@@ -1,23 +1,23 @@
 /*
- * This file is part of Baritone.
+ * This file is part of Princeps.
  *
- * Baritone is free software: you can redistribute it and/or modify
+ * Princeps is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
  *
- * Baritone is distributed in the hope that it will be useful,
+ * Princeps is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Lesser General Public License for more details.
  *
  * You should have received a copy of the GNU Lesser General Public License
- * along with Baritone.  If not, see <https://www.gnu.org/licenses/>.
+ * along with Princeps.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-import baritone.gradle.task.CreateDistTask
-import baritone.gradle.task.ProguardTask
-//import baritone.gradle.task.TweakerJsonAssembler
+import princeps.gradle.task.CreateDistTask
+import princeps.gradle.task.ProguardTask
+//import princeps.gradle.task.TweakerJsonAssembler
 
 plugins {
     id "com.github.johnrengelman.shadow" version "8.0.0"
@@ -26,7 +26,7 @@ plugins {
 unimined.minecraft {
     runs.client = {
         mainClass = "net.minecraft.launchwrapper.Launch"
-        args.addAll(["--tweakClass", "baritone.launch.tweaker.BaritoneTweaker"])
+        args.addAll(["--tweakClass", "princeps.launch.tweaker.PrincepsTweaker"])
     }
 }
 
@@ -85,10 +85,10 @@ jar {
 
     manifest {
         attributes(
-                'MixinConfigs': 'mixins.baritone.json',
-                "MixinConnector": "baritone.launch.BaritoneMixinConnector",
+                'MixinConfigs': 'mixins.princeps.json',
+                "MixinConnector": "princeps.launch.PrincepsMixinConnector",
 
-                'Implementation-Title': 'Baritone',
+                'Implementation-Title': 'Princeps',
                 'Implementation-Version': version,
         )
     }

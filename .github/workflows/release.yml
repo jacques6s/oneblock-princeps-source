@@ -34,9 +34,9 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Baritone ${{ steps.version.outputs.VERSION }} for MC 26.1"
+          name: "Princeps ${{ steps.version.outputs.VERSION }} for MC 26.1"
           body: |
-            ## Baritone for Minecraft 26.1 (Fabric)
+            ## Princeps for Minecraft 26.1 (Fabric)
 
             ### Installation
             1. Install Fabric Loader for MC 26.1

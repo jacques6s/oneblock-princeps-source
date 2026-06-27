@@ -10,7 +10,7 @@ assignees: ''
 Operating system:
 Java version:
 Minecraft version:
-Baritone version:
+Princeps version:
 Other mods (if used): 
 
 ## Exception, error or logs
@@ -30,6 +30,6 @@ To get the modified settings run `#modified` in game
 
 ## Final checklist
 - [x] I know how to properly use check boxes 
-- [ ] I have included the version of Minecraft I'm running, baritone's version and forge mods (if used).
+- [ ] I have included the version of Minecraft I'm running, princeps's version and forge mods (if used).
 - [ ] I have included logs, exceptions and / or steps to reproduce the issue.
 - [ ] I have not used any OwO's or UwU's in this issue.

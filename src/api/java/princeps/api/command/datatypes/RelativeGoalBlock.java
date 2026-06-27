@@ -1,0 +1,52 @@
+/*
+ * This file is part of Princeps.
+ *
+ * Princeps is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Princeps is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Princeps.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package princeps.api.command.datatypes;
+
+import princeps.api.command.argument.IArgConsumer;
+import princeps.api.command.exception.CommandException;
+import princeps.api.pathing.goals.GoalBlock;
+import princeps.api.utils.BetterBlockPos;
+import java.util.stream.Stream;
+import net.minecraft.util.Mth;
+
+public enum RelativeGoalBlock implements IDatatypePost<GoalBlock, BetterBlockPos> {
+    INSTANCE;
+
+    @Override
+    public GoalBlock apply(IDatatypeContext ctx, BetterBlockPos origin) throws CommandException {
+        if (origin == null) {
+            origin = BetterBlockPos.ORIGIN;
+        }
+
+        final IArgConsumer consumer = ctx.getConsumer();
+        return new GoalBlock(
+                Mth.floor(consumer.getDatatypePost(RelativeCoordinate.INSTANCE, (double) origin.x)),
+                Mth.floor(consumer.getDatatypePost(RelativeCoordinate.INSTANCE, (double) origin.y)),
+                Mth.floor(consumer.getDatatypePost(RelativeCoordinate.INSTANCE, (double) origin.z))
+        );
+    }
+
+    @Override
+    public Stream<String> tabComplete(IDatatypeContext ctx) {
+        final IArgConsumer consumer = ctx.getConsumer();
+        if (consumer.hasAtMost(3)) {
+            return consumer.tabCompleteDatatype(RelativeCoordinate.INSTANCE);
+        }
+        return Stream.empty();
+    }
+}

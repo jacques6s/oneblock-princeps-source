@@ -1,31 +1,31 @@
 {
   "schemaVersion": 1,
-  "id": "baritone",
+  "id": "princeps",
   "version": "${version}",
 
-  "name": "Baritone",
+  "name": "Princeps",
   "description": "Google Maps for Blockgame",
   "authors": [
     "leijurv", "Brady"
   ],
   "contact": {
-    "homepage": "https://github.com/cabaletta/baritone",
-    "sources": "https://github.com/cabaletta/baritone",
-    "issues": "https://github.com/cabaletta/baritone/issues"
+    "homepage": "https://github.com/cabaletta/princeps",
+    "sources": "https://github.com/cabaletta/princeps",
+    "issues": "https://github.com/cabaletta/princeps/issues"
   },
 
   "license": "LGPL-3.0",
-  "icon": "assets/baritone/icon.png",
+  "icon": "assets/princeps/icon.png",
 
   "environment": "*",
   "entrypoints": {
   },
   "mixins": [
-      "mixins.baritone.json"
+      "mixins.princeps.json"
   ],
   "depends": {
     "fabricloader": ">=0.14.22",
-    "minecraft": ["26.1"]
+    "minecraft": [">=26.1"]
   },
   "custom": {
     "modmenu": {

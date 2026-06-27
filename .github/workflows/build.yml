@@ -27,5 +27,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: baritone-fabric-mc26.1
+          name: princeps-fabric-mc26.1
           path: build/libs/*.jar

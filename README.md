@@ -1,17 +1,17 @@
-# NewBaritone
+# NewPrinceps
 
-Baritone mod ported to **Minecraft 26.1** (Fabric).
+Princeps mod ported to **Minecraft 26.1** (Fabric).
 
-Forked from [cabaletta/baritone](https://github.com/cabaletta/baritone) and updated for the unobfuscated MC 26.1.
+Forked from [cabaletta/princeps](https://github.com/cabaletta/princeps) and updated for the unobfuscated MC 26.1.
 
 ## Download
 
-**[Latest Release](https://github.com/XMRhapsody0807/NewBaritone/releases/latest)**
+**[Latest Release](https://github.com/XMRhapsody0807/NewPrinceps/releases/latest)**
 
 ## Installation
 
 1. Install [Fabric Loader](https://fabricmc.net/) for Minecraft 26.1
-2. Download the jar from [Releases](https://github.com/XMRhapsody0807/NewBaritone/releases)
+2. Download the jar from [Releases](https://github.com/XMRhapsody0807/NewPrinceps/releases)
 3. Place the jar into your `.minecraft/mods/` folder
 4. Launch the game
 
@@ -49,7 +49,7 @@ Requires JDK 21+ (JDK 25 for runtime).
 ./gradlew jar
 ```
 
-Output: `build/libs/baritone-*.jar`
+Output: `build/libs/princeps-*.jar`
 
 ## License
 
@@ -57,5 +57,5 @@ LGPL-3.0 - See [LICENSE](LICENSE)
 
 ## Credits
 
-- [cabaletta/baritone](https://github.com/cabaletta/baritone) - Original project
+- [cabaletta/princeps](https://github.com/cabaletta/princeps) - Original project
 - leijurv, Brady - Original authors
