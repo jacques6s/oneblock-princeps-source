@@ -762,9 +762,12 @@ public final class Settings {
     public final Setting<Boolean> blockFreeLook = new Setting<>(false);
 
     /**
-     * Automatically elytra fly without having to force the client-sided rotations.
+     * Free-look during elytra flight: send the flight rotation to the server while leaving the client
+     * view free. Default OFF so the body + camera + sent rotation all face the actual flight direction
+     * (like a normal elytra flyer) and no decoupled "silent rotation" packets are sent — cleaner and
+     * far safer against server anticheat. Enable only if you want to look around while auto-flying.
      */
-    public final Setting<Boolean> elytraFreeLook = new Setting<>(true);
+    public final Setting<Boolean> elytraFreeLook = new Setting<>(false);
 
     /**
      * Forces the client-sided yaw rotation to an average of the last {@link #smoothLookTicks} of server-sided rotations.
