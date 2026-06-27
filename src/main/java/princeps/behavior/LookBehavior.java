@@ -120,6 +120,14 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                             ctx.player().setXRot((float) this.smoothPitchBuffer.stream().mapToDouble(d -> d).average().orElse(this.prevRotation.getPitch()));
                         }
                     }
+                    // During elytra flight, snap the body + head to the final look yaw so the model faces
+                    // the flight direction instead of lagging / twisting behind the rapidly-steered look.
+                    if (ctx.player().isFallFlying()) {
+                        final float yaw = ctx.player().getYRot();
+                        ctx.player().yBodyRot = yaw;
+                        ctx.player().yBodyRotO = yaw;
+                        ctx.player().setYHeadRot(yaw);
+                    }
                     //ctx.player().xRotO = prevRotation.getPitch();
                     //ctx.player().yRotO = prevRotation.getYaw();
                     this.prevRotation = null;
