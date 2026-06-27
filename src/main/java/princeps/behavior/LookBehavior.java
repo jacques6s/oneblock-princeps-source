@@ -27,6 +27,7 @@ import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.Rotation;
 import princeps.behavior.look.ForkableRandom;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
+import net.minecraft.util.Mth;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -96,8 +97,20 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
                 this.prevRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
                 final Rotation actual = this.processor.peekRotation(this.target.rotation);
-                ctx.player().setYRot(actual.getYaw());
-                ctx.player().setXRot(actual.getPitch());
+                if (ctx.player().isFallFlying()) {
+                    // Low-pass the *applied* look while gliding: ease toward the steering target instead of
+                    // snapping to it each tick. This is the rotation the physics step AND the outgoing movement
+                    // packet both read, so the server sees one smooth, self-consistent line — no silent packets,
+                    // nothing that looks robotic. elytraSmoothFactor == 1.0 disables it (snap straight to target).
+                    final float a = (float) (double) Princeps.settings().elytraSmoothFactor.value;
+                    final float curYaw = this.prevRotation.getYaw();
+                    final float curPitch = this.prevRotation.getPitch();
+                    ctx.player().setYRot(curYaw + Mth.degreesDifference(curYaw, actual.getYaw()) * a);
+                    ctx.player().setXRot(curPitch + (actual.getPitch() - curPitch) * a);
+                } else {
+                    ctx.player().setYRot(actual.getYaw());
+                    ctx.player().setXRot(actual.getPitch());
+                }
                 break;
             }
             case POST: {
@@ -120,12 +133,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                             ctx.player().setXRot((float) this.smoothPitchBuffer.stream().mapToDouble(d -> d).average().orElse(this.prevRotation.getPitch()));
                         }
                     }
-                    // During elytra flight, snap the body + head to the final look yaw so the model faces
-                    // the flight direction instead of lagging / twisting behind the rapidly-steered look.
+                    // During elytra flight, point the body + head at the final look yaw so the model faces the
+                    // flight direction. We deliberately leave yBodyRotO / yHeadRotO at their previous-tick values
+                    // so the renderer interpolates the body smoothly at frame-rate, instead of snapping once per
+                    // tick — that per-tick snap is what made the model look like it was stuttering / twitching.
                     if (ctx.player().isFallFlying()) {
                         final float yaw = ctx.player().getYRot();
                         ctx.player().yBodyRot = yaw;
-                        ctx.player().yBodyRotO = yaw;
                         ctx.player().setYHeadRot(yaw);
                     }
                     //ctx.player().xRotO = prevRotation.getPitch();
@@ -239,6 +253,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         @Override
         public final void tick() {
+            // No anti-aim wobble while gliding: a real elytra flyer holds a smooth line, so the randomLooking
+            // jitter both looks robotic to the server AND is the dominant source of the visible per-tick twitch.
+            // Skipping it here (and in the forked solver processor, which shares this method) keeps the simulated
+            // and the actually-applied rotation identical.
+            if (this.ctx.player() != null && this.ctx.player().isFallFlying()) {
+                this.randomYawOffset = 0.0;
+                this.randomPitchOffset = 0.0;
+                return;
+            }
             // randomLooking
             this.randomYawOffset = (this.rand.nextDouble() - 0.5) * Princeps.settings().randomLooking.value;
             this.randomPitchOffset = (this.rand.nextDouble() - 0.5) * Princeps.settings().randomLooking.value;
