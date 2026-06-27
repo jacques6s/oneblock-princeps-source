@@ -101,8 +101,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     // Low-pass the *applied* look while gliding: ease toward the steering target instead of
                     // snapping to it each tick. This is the rotation the physics step AND the outgoing movement
                     // packet both read, so the server sees one smooth, self-consistent line — no silent packets,
-                    // nothing that looks robotic. elytraSmoothFactor == 1.0 disables it (snap straight to target).
-                    final float a = (float) (double) Princeps.settings().elytraSmoothFactor.value;
+                    // nothing that looks robotic. elytraSmoothness in [0,1] (higher = smoother) maps to the
+                    // per-tick lerp factor `a` (lower = smoother); clamped so even max smoothness still tracks
+                    // the target each tick, and 0 disables it (snap straight to the steering target).
+                    final double smoothness = Princeps.settings().elytraSmoothness.value;
+                    final float a = (float) Math.max(0.1, Math.min(1.0, 1.0 - smoothness * 0.9));
                     final float curYaw = this.prevRotation.getYaw();
                     final float curPitch = this.prevRotation.getPitch();
                     ctx.player().setYRot(curYaw + Mth.degreesDifference(curYaw, actual.getYaw()) * a);

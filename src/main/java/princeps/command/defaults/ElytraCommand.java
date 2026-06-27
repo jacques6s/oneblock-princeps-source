@@ -91,6 +91,22 @@ public class ElytraCommand extends Command {
                 logDirect("Queued all loaded chunks for repacking");
                 break;
             }
+            case "smooth": {
+                if (!args.hasAny()) {
+                    logDirect(String.format("Elytra smoothing is %.2f (0 = off / snappy, 1 = max smooth)",
+                            Princeps.settings().elytraSmoothness.value));
+                    break;
+                }
+                final double v;
+                try {
+                    v = Math.max(0.0, Math.min(1.0, Double.parseDouble(args.getString())));
+                } catch (NumberFormatException e) {
+                    throw new CommandInvalidStateException("Expected a number between 0 (off) and 1 (max smooth)");
+                }
+                Princeps.settings().elytraSmoothness.value = v;
+                logDirect(String.format("Elytra smoothing set to %.2f (0 = off / snappy, 1 = max smooth)", v));
+                break;
+            }
             default: {
                 throw new CommandInvalidStateException("Invalid action");
             }
@@ -186,7 +202,7 @@ public class ElytraCommand extends Command {
     public Stream<String> tabComplete(String label, IArgConsumer args) throws CommandException {
         TabCompleteHelper helper = new TabCompleteHelper();
         if (args.hasExactlyOne()) {
-            helper.append("reset", "repack", "supported");
+            helper.append("reset", "repack", "supported", "smooth");
         }
         return helper.filterPrefix(args.getString()).stream();
     }
@@ -205,6 +221,7 @@ public class ElytraCommand extends Command {
                 "> elytra - fly to the current goal",
                 "> elytra reset - Resets the state of the process, but will try to keep flying to the same goal.",
                 "> elytra repack - Queues all of the chunks in render distance to be given to the native library.",
+                "> elytra smooth <0-1> - Sets how smooth the flight look is (higher = smoother, 0 = off). No arg prints the current value.",
                 "> elytra supported - Tells you if princeps ships a native library that is compatible with your PC."
         );
     }

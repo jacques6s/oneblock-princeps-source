@@ -780,13 +780,14 @@ public final class Settings {
     public final Setting<Boolean> elytraSmoothLook = new Setting<>(false);
 
     /**
-     * How quickly the applied elytra look eases toward the steering target each tick, in {@code (0, 1]}.
+     * How strongly the elytra look is smoothed while gliding, in {@code [0, 1]} — higher is smoother.
      * Unlike {@link #elytraSmoothLook} (which only smooths the client-side camera and still sends the raw,
      * twitchy rotation to the server), this low-passes the rotation that the physics step and the outgoing
      * movement packet both use — so the smoothing is what the server actually sees, and it stays legit.
-     * {@code 1.0} snaps straight to the target (no smoothing); lower is smoother but lags turns slightly.
+     * {@code 0} disables it (snap straight to the steering target). Tune it live with
+     * {@code #elytra smooth <value>}.
      */
-    public final Setting<Double> elytraSmoothFactor = new Setting<>(0.7D);
+    public final Setting<Double> elytraSmoothness = new Setting<>(0.65D);
 
     /**
      * The number of ticks to average across for {@link #smoothLook};
