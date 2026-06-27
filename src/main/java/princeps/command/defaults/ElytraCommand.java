@@ -93,9 +93,20 @@ public class ElytraCommand extends Command {
             }
             case "smooth": {
                 if (!args.hasAny()) {
-                    logDirect(String.format("Elytra smoothing is %.2f (0 = off / snappy, 1 = max smooth)",
-                            Princeps.settings().elytraSmoothness.value));
+                    logDirect(String.format(
+                            "Elytra smoothing: flight %.2f, landing %.2f (0 = off / snappy, 1 = max smooth)",
+                            Princeps.settings().elytraSmoothness.value,
+                            Princeps.settings().elytraLandingSmoothness.value));
                     break;
+                }
+                final boolean landing = args.peekString().equalsIgnoreCase("land");
+                if (landing) {
+                    args.getString(); // consume the "land" keyword
+                    if (!args.hasAny()) {
+                        logDirect(String.format("Elytra landing smoothing is %.2f",
+                                Princeps.settings().elytraLandingSmoothness.value));
+                        break;
+                    }
                 }
                 final double v;
                 try {
@@ -103,8 +114,13 @@ public class ElytraCommand extends Command {
                 } catch (NumberFormatException e) {
                     throw new CommandInvalidStateException("Expected a number between 0 (off) and 1 (max smooth)");
                 }
-                Princeps.settings().elytraSmoothness.value = v;
-                logDirect(String.format("Elytra smoothing set to %.2f (0 = off / snappy, 1 = max smooth)", v));
+                if (landing) {
+                    Princeps.settings().elytraLandingSmoothness.value = v;
+                    logDirect(String.format("Elytra landing smoothing set to %.2f", v));
+                } else {
+                    Princeps.settings().elytraSmoothness.value = v;
+                    logDirect(String.format("Elytra flight smoothing set to %.2f", v));
+                }
                 break;
             }
             default: {
@@ -221,7 +237,8 @@ public class ElytraCommand extends Command {
                 "> elytra - fly to the current goal",
                 "> elytra reset - Resets the state of the process, but will try to keep flying to the same goal.",
                 "> elytra repack - Queues all of the chunks in render distance to be given to the native library.",
-                "> elytra smooth <0-1> - Sets how smooth the flight look is (higher = smoother, 0 = off). No arg prints the current value.",
+                "> elytra smooth <0-1> - Sets how smooth the flight look is (higher = smoother, 0 = off).",
+                "> elytra smooth land <0-1> - Sets the snappier smoothing used while landing. No arg prints both values.",
                 "> elytra supported - Tells you if princeps ships a native library that is compatible with your PC."
         );
     }

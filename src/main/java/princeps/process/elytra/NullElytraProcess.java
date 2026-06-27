@@ -87,4 +87,9 @@ public final class NullElytraProcess extends PrincepsProcessHelper implements IE
     public boolean isSafeToCancel() {
         return true;
     }
+
+    @Override
+    public boolean isLanding() {
+        return false;
+    }
 }

@@ -787,7 +787,16 @@ public final class Settings {
      * {@code 0} disables it (snap straight to the steering target). Tune it live with
      * {@code #elytra smooth <value>}.
      */
-    public final Setting<Double> elytraSmoothness = new Setting<>(0.65D);
+    public final Setting<Double> elytraSmoothness = new Setting<>(0.85D);
+
+    /**
+     * Smoothness used while the elytra is landing — approaching the chosen landing spot or in its final
+     * descent ({@link princeps.api.process.IElytraProcess#isLanding()}), in {@code [0, 1]}. Kept low/snappy
+     * by default so the look tracks the spot precisely and sets down cleanly, instead of the high cruise
+     * smoothing lagging the turn-in and overshooting until it gets stuck. Tune live with
+     * {@code #elytra smooth land <value>}.
+     */
+    public final Setting<Double> elytraLandingSmoothness = new Setting<>(0.3D);
 
     /**
      * The number of ticks to average across for {@link #smoothLook};

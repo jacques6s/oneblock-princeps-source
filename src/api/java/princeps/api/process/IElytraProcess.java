@@ -47,4 +47,11 @@ public interface IElytraProcess extends IPrincepsProcess {
      * FOR INTERNAL USE ONLY. MAY BE REMOVED AT ANY TIME.
      */
     boolean isSafeToCancel();
+
+    /**
+     * @return {@code true} while the elytra is landing — either approaching the chosen landing spot or in
+     *         its final descent. Used to steer more sharply (less look smoothing) so it sets down cleanly
+     *         instead of overshooting the spot and getting stuck.
+     */
+    boolean isLanding();
 }

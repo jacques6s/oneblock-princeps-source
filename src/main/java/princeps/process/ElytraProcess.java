@@ -107,6 +107,11 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         }
     }
 
+    @Override
+    public boolean isLanding() {
+        return this.goingToLandingSpot || this.state == State.LANDING;
+    }
+
     private static final String AUTO_JUMP_FAILURE_MSG = "Failed to compute a walking path to a spot to jump off from. Consider starting from a higher location, near an overhang. Or, you can disable elytraAutoJump and just manually begin gliding.";
 
     @Override

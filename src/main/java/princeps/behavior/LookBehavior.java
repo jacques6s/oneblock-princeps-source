@@ -22,6 +22,7 @@ import princeps.api.Settings;
 import princeps.api.behavior.ILookBehavior;
 import princeps.api.behavior.look.IAimProcessor;
 import princeps.api.behavior.look.ITickableAimProcessor;
+import princeps.api.process.IElytraProcess;
 import princeps.api.event.events.*;
 import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.Rotation;
@@ -103,8 +104,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     // packet both read, so the server sees one smooth, self-consistent line — no silent packets,
                     // nothing that looks robotic. elytraSmoothness in [0,1] (higher = smoother) maps to the
                     // per-tick lerp factor `a` (lower = smoother); clamped so even max smoothness still tracks
-                    // the target each tick, and 0 disables it (snap straight to the steering target).
-                    final double smoothness = Princeps.settings().elytraSmoothness.value;
+                    // the target each tick, and 0 disables it (snap straight to the steering target). While
+                    // landing we use the snappier elytraLandingSmoothness so the look tracks the spot precisely
+                    // and sets down cleanly instead of overshooting until it gets stuck.
+                    final IElytraProcess elytraProc = princeps.getElytraProcess();
+                    final double smoothness = (elytraProc != null && elytraProc.isLanding())
+                            ? Princeps.settings().elytraLandingSmoothness.value
+                            : Princeps.settings().elytraSmoothness.value;
                     final float a = (float) Math.max(0.1, Math.min(1.0, 1.0 - smoothness * 0.9));
                     final float curYaw = this.prevRotation.getYaw();
                     final float curPitch = this.prevRotation.getPitch();
