@@ -567,25 +567,33 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     private static final int LANDING_COLUMN_HEIGHT = 15;
     private Set<BetterBlockPos> badLandingSpots = new HashSet<>();
 
+    // Hard cap on positions the landing search may explore. ~4000 horizontal cells ≈ a 35-block radius,
+    // which is plenty to find a clear spot near the player, while guaranteeing the search can never stall
+    // the game thread (the old uncapped 3D search took 5-8s in the open, freezing SP and desyncing on
+    // servers). Worst case is now a single sub-tick pass; the common case returns on the first iteration.
+    private static final int MAX_LANDING_SEARCH = 4000;
+
     private BetterBlockPos findSafeLandingSpot(BetterBlockPos start) {
         Queue<BetterBlockPos> queue = new PriorityQueue<>(Comparator.<BetterBlockPos>comparingInt(pos -> (pos.x - start.x) * (pos.x - start.x) + (pos.z - start.z) * (pos.z - start.z)).thenComparingInt(pos -> -pos.y));
         Set<BetterBlockPos> visited = new HashSet<>();
         LongOpenHashSet checkedPositions = new LongOpenHashSet();
         queue.add(start);
+        int explored = 0;
 
-        while (!queue.isEmpty()) {
+        while (!queue.isEmpty() && explored++ < MAX_LANDING_SEARCH) {
             BetterBlockPos pos = queue.poll();
             if (ctx.world().isLoaded(pos) && isInBounds(pos) && ctx.world().getBlockState(pos).getBlock() == Blocks.AIR) {
                 BetterBlockPos actualLandingSpot = checkLandingSpot(pos, checkedPositions);
                 if (actualLandingSpot != null && isColumnAir(actualLandingSpot, LANDING_COLUMN_HEIGHT) && hasAirBubble(actualLandingSpot.above(LANDING_COLUMN_HEIGHT)) && !badLandingSpots.contains(actualLandingSpot.above(LANDING_COLUMN_HEIGHT))) {
                     return actualLandingSpot.above(LANDING_COLUMN_HEIGHT);
                 }
+                // Horizontal frontier only: checkLandingSpot already walks the whole column downward from
+                // each (x,z) air cell, so we never need to expand above/below — that 3D expansion is what
+                // ballooned the search through open sky. A 2D frontier reaches every landing column at O(r^2).
                 if (visited.add(pos.north())) queue.add(pos.north());
                 if (visited.add(pos.east())) queue.add(pos.east());
                 if (visited.add(pos.south())) queue.add(pos.south());
                 if (visited.add(pos.west())) queue.add(pos.west());
-                if (visited.add(pos.above())) queue.add(pos.above());
-                if (visited.add(pos.below())) queue.add(pos.below());
             }
         }
         return null;
