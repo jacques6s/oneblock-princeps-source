@@ -136,11 +136,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     if (this.target.mode == Target.Mode.SERVER) {
                         ctx.player().setYRot(this.prevRotation.getYaw());
                         ctx.player().setXRot(this.prevRotation.getPitch());
-                    } else if (ctx.player().isFallFlying() ? Princeps.settings().elytraSmoothLook.value : Princeps.settings().smoothLook.value) {
+                    } else if (!ctx.player().isFallFlying() && Princeps.settings().smoothLook.value) {
+                        // Camera averaging only off the elytra. While fall-flying the PRE low-pass is the single
+                        // source of truth — overwriting yRot here with the raw-target buffer average would leak a
+                        // stale mean into the next tick's packet and re-desync the physics from the sent rotation.
                         ctx.player().setYRot((float) this.smoothYawBuffer.stream().mapToDouble(d -> d).average().orElse(this.prevRotation.getYaw()));
-                        if (ctx.player().isFallFlying()) {
-                            ctx.player().setXRot((float) this.smoothPitchBuffer.stream().mapToDouble(d -> d).average().orElse(this.prevRotation.getPitch()));
-                        }
                     }
                     // During elytra flight, point the body + head at the final look yaw so the model faces the
                     // flight direction. We deliberately leave yBodyRotO / yHeadRotO at their previous-tick values
@@ -180,6 +180,8 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     public void onWorldEvent(WorldEvent event) {
         this.serverRotation = null;
         this.target = null;
+        this.smoothYawBuffer.clear();
+        this.smoothPitchBuffer.clear();
     }
 
     public void pig() {
@@ -199,11 +201,21 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
     @Override
     public void onPlayerRotationMove(RotationMoveEvent event) {
-        if (this.target != null) {
-            final Rotation actual = this.processor.peekRotation(this.target.rotation);
-            event.setYaw(actual.getYaw());
-            event.setPitch(actual.getPitch());
+        if (this.target == null) {
+            return;
         }
+        // During elytra flight the movement/thrust MUST use the same rotation PRE already applied to the
+        // player — the low-passed value the movement packet also sends. Overriding it here with the raw
+        // steering target would make the physics glide along the un-smoothed angle while the packet reports
+        // the smoothed one: a move-direction-vs-look-direction desync that elytra anticheats flag. So while
+        // fall-flying we leave the event at its default (the applied, low-passed rotation) and only steer the
+        // move for non-elytra targets.
+        if (ctx.player().isFallFlying()) {
+            return;
+        }
+        final Rotation actual = this.processor.peekRotation(this.target.rotation);
+        event.setYaw(actual.getYaw());
+        event.setPitch(actual.getPitch());
     }
 
     private static final class AimProcessor extends AbstractAimProcessor {

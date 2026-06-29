@@ -48,6 +48,11 @@ import java.util.concurrent.TimeUnit;
 public final class NetherPathfinderContext {
 
     private static final BlockState AIR_BLOCK_STATE = Blocks.AIR.defaultBlockState();
+    // The native nether-pathfinder Chunk is a fixed 24-section (24*16 = 384 block) struct with no bounds
+    // checks. Feeding a taller dimension's height, or writing/querying an octree Y outside [0, height),
+    // indexes past that allocation and corrupts the native heap. Everything fed to the native side is
+    // capped/clamped against this.
+    private static final int MAX_OCTREE_HEIGHT = 384;
     // This lock must be held while there are active pointers to chunks in java,
     // but we just hold it for the entire tick so we don't have to think much about it.
     public final Object cullingLock = new Object();
@@ -64,12 +69,25 @@ public final class NetherPathfinderContext {
     private final ExecutorService executor;
 
     public NetherPathfinderContext(long seed, int dimension, int minY, int height) {
-        this.context = NetherPathfinder.newContext(seed, null, dimension, height, false);
+        // Never exceed the native Chunk's fixed capacity; a >384 dimension simply isn't elytra-pathable
+        // above 384 blocks, which is safe (the alternative is a native heap overflow when packing chunks).
+        final int capped = Math.min(height, MAX_OCTREE_HEIGHT);
+        this.context = NetherPathfinder.newContext(seed, null, dimension, capped, false);
         this.seed = seed;
         this.dimension = dimension;
         this.minY = minY;
-        this.height = height;
+        this.height = capped;
         this.executor = Executors.newSingleThreadExecutor();
+    }
+
+    /** World Y -> native octree Y, clamped into the valid [0, height) range so it can never index OOB. */
+    private int octreeY(int worldY) {
+        return Math.max(0, Math.min(this.height - 1, worldY - this.minY));
+    }
+
+    /** Double overload of {@link #octreeY(int)} for the raytrace endpoints. */
+    private double octreeY(double worldY) {
+        return Math.max(0.0, Math.min(this.height - 1, worldY - this.minY));
     }
 
     /**
@@ -148,8 +166,8 @@ public final class NetherPathfinderContext {
                     || !Princeps.settings().elytraPredictTerrain.value;
             final PathSegment segment = NetherPathfinder.pathFind(
                     this.context,
-                    src.getX(), src.getY() - this.minY, src.getZ(),
-                    dst.getX(), dst.getY() - this.minY, dst.getZ(),
+                    src.getX(), octreeY(src.getY()), src.getZ(),
+                    dst.getX(), octreeY(dst.getY()), dst.getZ(),
                     true,
                     false,
                     10000,
@@ -191,7 +209,7 @@ public final class NetherPathfinderContext {
     public boolean raytrace(final double startX, final double startY, final double startZ,
                             final double endX, final double endY, final double endZ) {
         return NetherPathfinder.isVisible(this.context, NetherPathfinder.CACHE_MISS_SOLID,
-                startX, startY - this.minY, startZ, endX, endY - this.minY, endZ);
+                startX, octreeY(startY), startZ, endX, octreeY(endY), endZ);
     }
 
     /**
@@ -204,7 +222,7 @@ public final class NetherPathfinderContext {
      */
     public boolean raytrace(final Vec3 start, final Vec3 end) {
         return NetherPathfinder.isVisible(this.context, NetherPathfinder.CACHE_MISS_SOLID,
-                start.x, start.y - this.minY, start.z, end.x, end.y - this.minY, end.z);
+                start.x, octreeY(start.y), start.z, end.x, octreeY(end.y), end.z);
     }
 
     public boolean raytrace(final int count, final double[] src, final double[] dst, final int visibility) {
@@ -229,14 +247,11 @@ public final class NetherPathfinderContext {
         }
     }
 
-    /** Copy of an interleaved (x,y,z) coord array with every Y shifted to octree space. No-op when minY==0. */
+    /** Copy of an interleaved (x,y,z) coord array with every Y mapped + clamped into octree space [0,height). */
     private double[] offsetY(final double[] coords, final int count) {
-        if (this.minY == 0) {
-            return coords;
-        }
         final double[] out = coords.clone();
         for (int i = 0; i < count; i++) {
-            out[i * 3 + 1] -= this.minY;
+            out[i * 3 + 1] = octreeY(coords[i * 3 + 1]);
         }
         return out;
     }
