@@ -20,6 +20,7 @@ package princeps.utils;
 import princeps.api.PrincepsAPI;
 import princeps.api.event.events.RenderEvent;
 import princeps.api.pathing.goals.*;
+import princeps.api.process.IElytraProcess;
 import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.interfaces.IGoalRenderPos;
@@ -94,6 +95,15 @@ public final class PathRenderer implements IRenderer {
         }
 
         if (!settings.renderPath.value) {
+            return;
+        }
+
+        // While the elytra process is flying, Princeps steers with the elytra, which draws its own flight
+        // path. The walking pathfinder may still hold a ground path, but only the route actually being used
+        // should be shown — so skip the walking path (and its break/place/in-progress overlays) here. The
+        // goal box above still renders since the destination is shared.
+        final IElytraProcess elytra = behavior.princeps.getElytraProcess();
+        if (elytra != null && elytra.isActive()) {
             return;
         }
 
