@@ -52,6 +52,7 @@ import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
+import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -549,13 +550,19 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 return null;
             }
             checkedSpots.add(mut.asLong());
-            Block block = ctx.world().getBlockState(mut).getBlock();
+            final BlockState state = ctx.world().getBlockState(mut);
+            final Block block = state.getBlock();
 
             if (isSafeBlock(mut)) {
                 if (!isAtEdge(mut)) {
                     return new BetterBlockPos(mut);
                 }
                 return null;
+            } else if (state.getFluidState().is(FluidTags.WATER)) {
+                // No solid ground (e.g. flying over the ocean): water negates the elytra impact, so the
+                // water surface is itself a valid landing spot. Without this the bounded search finds
+                // nothing over sea and never lands.
+                return new BetterBlockPos(mut);
             } else if (block != Blocks.AIR) {
                 return null;
             }
