@@ -550,19 +550,13 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 return null;
             }
             checkedSpots.add(mut.asLong());
-            final BlockState state = ctx.world().getBlockState(mut);
-            final Block block = state.getBlock();
+            Block block = ctx.world().getBlockState(mut).getBlock();
 
             if (isSafeBlock(mut)) {
                 if (!isAtEdge(mut)) {
                     return new BetterBlockPos(mut);
                 }
                 return null;
-            } else if (state.getFluidState().is(FluidTags.WATER)) {
-                // No solid ground (e.g. flying over the ocean): water negates the elytra impact, so the
-                // water surface is itself a valid landing spot. Without this the bounded search finds
-                // nothing over sea and never lands.
-                return new BetterBlockPos(mut);
             } else if (block != Blocks.AIR) {
                 return null;
             }
@@ -602,6 +596,83 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 if (visited.add(pos.south())) queue.add(pos.south());
                 if (visited.add(pos.west())) queue.add(pos.west());
             }
+        }
+        // The bounded land search found nothing nearby. If we're flying over open water, landing in the sea
+        // would drown an unattended player — so look for the nearest reachable LAND instead (see below).
+        return findNearestShore(start);
+    }
+
+    /**
+     * Over open water the bounded land search finds nothing, but ditching in the sea would drown an
+     * unattended player. So find the nearest standable LAND surface around the water level: scan down to the
+     * water surface, then spiral outward (nearest-first) over the whole plane at that level looking for a
+     * solid block you could stand on; if that plane has no land, raise it one block and retry, up to 5 above
+     * the water. Searched out to render distance with cheap single-block checks (no per-cell column scan), so
+     * it stays fast. Returns the elytra approach point above the shore, or null if we weren't over water /
+     * there is genuinely no land in range.
+     */
+    private BetterBlockPos findNearestShore(BetterBlockPos start) {
+        final int waterY = waterSurfaceY(start);
+        if (waterY == Integer.MIN_VALUE) {
+            return null; // not over water
+        }
+        final int maxR = Math.min(ctx.minecraft().options.getEffectiveRenderDistance(), 12) * 16;
+        for (int dy = 0; dy <= 5; dy++) {
+            final int y = waterY + dy;
+            for (int r = 0; r <= maxR; r++) {
+                final BetterBlockPos spot = scanShoreRing(start.x, start.z, y, r);
+                if (spot != null) {
+                    return spot;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Y of the first water block straight down from {@code start}, or {@link Integer#MIN_VALUE} if none. */
+    private int waterSurfaceY(BetterBlockPos start) {
+        final BlockPos.MutableBlockPos mut = new BlockPos.MutableBlockPos(start.x, start.y, start.z);
+        final int min = ctx.world().getMinY();
+        while (mut.getY() >= min) {
+            if (ctx.world().getBlockState(mut).getFluidState().is(FluidTags.WATER)) {
+                return mut.getY();
+            }
+            mut.setY(mut.getY() - 1);
+        }
+        return Integer.MIN_VALUE;
+    }
+
+    /** Square ring of radius {@code r} centred on (cx,cz) at height {@code y}; the first standable shore wins. */
+    private BetterBlockPos scanShoreRing(int cx, int cz, int y, int r) {
+        if (r == 0) {
+            return shoreSpotAt(cx, y, cz);
+        }
+        for (int dx = -r; dx <= r; dx++) {
+            final BetterBlockPos a = shoreSpotAt(cx + dx, y, cz - r);
+            if (a != null) return a;
+            final BetterBlockPos b = shoreSpotAt(cx + dx, y, cz + r);
+            if (b != null) return b;
+        }
+        for (int dz = -r + 1; dz <= r - 1; dz++) {
+            final BetterBlockPos a = shoreSpotAt(cx - r, y, cz + dz);
+            if (a != null) return a;
+            final BetterBlockPos b = shoreSpotAt(cx + r, y, cz + dz);
+            if (b != null) return b;
+        }
+        return null;
+    }
+
+    /** A standable land surface at (x,y,z) with open sky above -> the elytra approach point above it, else null. */
+    private BetterBlockPos shoreSpotAt(int x, int y, int z) {
+        final BlockPos surface = new BlockPos(x, y, z);
+        if (!ctx.world().isLoaded(surface) || !isSafeBlock(surface)
+                || !ctx.world().getBlockState(surface.above()).isAir()) {
+            return null;
+        }
+        final BetterBlockPos landing = new BetterBlockPos(surface);
+        final BetterBlockPos approach = landing.above(LANDING_COLUMN_HEIGHT);
+        if (isColumnAir(landing, LANDING_COLUMN_HEIGHT) && hasAirBubble(approach) && !badLandingSpots.contains(approach)) {
+            return approach;
         }
         return null;
     }
