@@ -818,6 +818,22 @@ public final class Settings {
     public final Setting<Boolean> antiCheatCompatibility = new Setting<>(true);
 
     /**
+     * Humanized look. While CRUISING (straight walking) the sent/visible yaw gently wanders a few degrees around
+     * the true heading (mean-reverting) instead of holding a laser-locked line, corners are speed-limited into a
+     * short human arc instead of a one-tick superhuman snap, and every delta is fed through the mouse-sensitivity
+     * quantizer — so the rotation looks like a real player rather than a bot (no rigid heading, no long runs of
+     * identical/zero deltas, no impossible float angles). HARD-BYPASSED during precise phases (block break/place,
+     * airborne jumps/parkour, elytra) so pathing stays 100% accurate — same or better result, just not robotic.
+     */
+    public final Setting<Boolean> humanizedLook = new Setting<>(true);
+
+    /** Max degrees the humanized yaw may wander from the true heading while cruising (pitch uses half of this). */
+    public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(3.0);
+
+    /** Max degrees/tick the humanized look may turn while cruising, so a corner is a short arc, not an instant snap. */
+    public final Setting<Double> humanizedLookTurnSpeed = new Setting<>(34.0);
+
+    /**
      * Exclusively use cached chunks for pathing
      * <p>
      * Never turn this on
@@ -960,6 +976,20 @@ public final class Settings {
      * Sets the maximum y level to mine ores at.
      */
     public final Setting<Integer> maxYLevelWhileMining = new Setting<>(2031);
+
+    /**
+     * When true, the A* pathfinder will never expand or accept a movement whose destination block Y is
+     * above {@link #baseHuntMaxY}. Off by default so normal pathing is completely unaffected — only the
+     * Base Hunter turns it on (and drives baseHuntMaxY dynamically) to keep routes underground.
+     */
+    public final Setting<Boolean> baseHuntYCeiling = new Setting<>(false);
+
+    /**
+     * The maximum destination block Y a movement may reach while {@link #baseHuntYCeiling} is true.
+     * Ignored entirely unless baseHuntYCeiling is true. Callers raise this to the player's Y during an
+     * initial surface descent and pin it low (e.g. -1) once underground.
+     */
+    public final Setting<Integer> baseHuntMaxY = new Setting<>(-1);
 
     /**
      * This will only allow princeps to mine exposed ores, can be used to stop ore obfuscators on servers that use them.

@@ -74,6 +74,10 @@ public class CalculationContext {
     public final boolean allowDiagonalDescend;
     public final boolean allowDiagonalAscend;
     public final boolean allowDownward;
+    // Base Hunter Y ceiling: when enabled, no movement may reach a destination Y above baseHuntMaxY. Read
+    // once here (like every other tunable) so all movements in a single path-calc are consistent.
+    public final boolean baseHuntYCeiling;
+    public final int baseHuntMaxY;
     public int minFallHeight;
     public int maxFallHeightNoWater;
     public final int maxFallHeightBucket;
@@ -129,6 +133,8 @@ public class CalculationContext {
         this.allowDiagonalDescend = Princeps.settings().allowDiagonalDescend.value;
         this.allowDiagonalAscend = Princeps.settings().allowDiagonalAscend.value;
         this.allowDownward = Princeps.settings().allowDownward.value;
+        this.baseHuntYCeiling = Princeps.settings().baseHuntYCeiling.value;
+        this.baseHuntMaxY = Princeps.settings().baseHuntMaxY.value;
         this.minFallHeight = 3; // Minimum fall height used by MovementFall
         this.maxFallHeightNoWater = Princeps.settings().maxFallHeightNoWater.value;
         this.maxFallHeightBucket = Princeps.settings().maxFallHeightBucket.value;

@@ -26,6 +26,7 @@ import princeps.api.process.IElytraProcess;
 import princeps.api.event.events.*;
 import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.Rotation;
+import princeps.api.utils.input.Input;
 import princeps.behavior.look.ForkableRandom;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.util.Mth;
@@ -67,7 +68,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
     @Override
     public void updateTarget(Rotation rotation, boolean blockInteract) {
-        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract));
+        // blockInteract == "this movement needs an EXACT facing" (break/place/bridge) → carry it as the precise
+        // flag so the humanized-look filter hard-bypasses its wander for this target.
+        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract), blockInteract);
     }
 
     @Override
@@ -97,6 +100,10 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 }
 
                 this.prevRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
+                // A jump commanded THIS tick (parkour/ascend launch) must fly its EXACT heading: the airborne
+                // bypass only engages next tick once physics leave the ground, so a forced-jump tick counts precise.
+                final boolean jumpLaunch = princeps.getInputOverrideHandler().isInputForcedDown(Input.JUMP);
+                this.processor.setPrecise(this.target.precise || jumpLaunch);
                 final Rotation actual = this.processor.peekRotation(this.target.rotation);
                 if (ctx.player().isFallFlying()) {
                     // Low-pass the *applied* look while gliding: ease toward the steering target instead of
@@ -237,6 +244,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private final ForkableRandom rand;
         private double randomYawOffset;
         private double randomPitchOffset;
+        // Humanized-look state: mean-reverting yaw/pitch wander + the current precise-phase gate.
+        private double ouYaw;
+        private double ouPitch;
+        private boolean precise;
+        private static final double OU_THETA = 0.06; // mean-reversion rate per tick (lower = slower, smoother)
 
         public AbstractAimProcessor(IPlayerContext ctx) {
             this.ctx = ctx;
@@ -248,10 +260,29 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.rand = source.rand.fork();
             this.randomYawOffset = source.randomYawOffset;
             this.randomPitchOffset = source.randomPitchOffset;
+            this.ouYaw = source.ouYaw;
+            this.ouPitch = source.ouPitch;
+            this.precise = source.precise;
+        }
+
+        final void setPrecise(final boolean precise) {
+            this.precise = precise;
         }
 
         @Override
         public final Rotation peekRotation(final Rotation rotation) {
+            return this.peekRotationInternal(rotation, false);
+        }
+
+        @Override
+        public final Rotation peekRotationExact(final Rotation rotation) {
+            // Reach/place PREDICTIONS must model the EXACT rotation the (always-precise) break/place is applied at,
+            // never the cosmetic cruising wander — otherwise the prediction disagrees with reality and a reach/place
+            // raytrace flips hit<->miss around the ~3° wander.
+            return this.peekRotationInternal(rotation, true);
+        }
+
+        private Rotation peekRotationInternal(final Rotation rotation, final boolean forceExact) {
             final Rotation prev = this.getPrevRotation();
 
             float desiredYaw = rotation.getYaw();
@@ -263,6 +294,27 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 desiredPitch = nudgeToLevel(desiredPitch);
             }
 
+            final boolean airborne = this.ctx.player() != null
+                    && (!this.ctx.player().onGround() || this.ctx.player().isFallFlying());
+            if (!forceExact && Princeps.settings().humanizedLook.value && !this.precise && !airborne) {
+                // Cruising: add the mean-reverting wander, then SPEED-LIMIT the per-tick turn so a corner is a
+                // short human arc rather than a one-tick superhuman flick. Fed through calculateMouseMove below so
+                // the emitted delta is still an integer number of mouse counts (never an impossible float angle).
+                desiredYaw += (float) this.ouYaw;
+                desiredPitch += (float) this.ouPitch;
+                final float maxTurn = (float) Math.max(1.0, Princeps.settings().humanizedLookTurnSpeed.value);
+                final float cappedYaw = prev.getYaw()
+                        + Mth.clamp(Mth.degreesDifference(prev.getYaw(), desiredYaw), -maxTurn, maxTurn);
+                final float cappedPitch = prev.getPitch()
+                        + Mth.clamp(desiredPitch - prev.getPitch(), -maxTurn, maxTurn);
+                return new Rotation(
+                        this.calculateMouseMove(prev.getYaw(), cappedYaw),
+                        this.calculateMouseMove(prev.getPitch(), cappedPitch)
+                ).clamp();
+            }
+
+            // Precise phase (break/place, airborne jump/parkour, elytra) or humanized-look off: face the EXACT
+            // target. (randomYawOffset/randomPitchOffset are held at 0 whenever humanizedLook is on.)
             desiredYaw += this.randomYawOffset;
             desiredPitch += this.randomPitchOffset;
 
@@ -281,13 +333,29 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             if (this.ctx.player() != null && this.ctx.player().isFallFlying()) {
                 this.randomYawOffset = 0.0;
                 this.randomPitchOffset = 0.0;
+                this.ouYaw = 0.0;
+                this.ouPitch = 0.0;
                 return;
             }
-            // randomLooking
+            if (Princeps.settings().humanizedLook.value) {
+                // Advance the mean-reverting (Ornstein-Uhlenbeck) wander every tick — in tick(), so the forked
+                // solver's advance() replays it deterministically and its place-predictions match reality. It
+                // reverts to 0 (= the true heading), so the walk stays inside the path corridor while never
+                // holding a rigid angle; it is only APPLIED while cruising (see peekRotation).
+                final double maxDrift = Math.max(0.0, Princeps.settings().humanizedLookDriftDegrees.value);
+                final double sigma = maxDrift * 0.30;
+                this.ouYaw = clampDrift(this.ouYaw * (1.0 - OU_THETA) + sigma * gaussian(), maxDrift);
+                this.ouPitch = clampDrift(this.ouPitch * (1.0 - OU_THETA) + sigma * 0.5 * gaussian(), maxDrift * 0.5);
+                this.randomYawOffset = 0.0;
+                this.randomPitchOffset = 0.0;
+                return;
+            }
+
+            // legacy randomLooking (only when humanizedLook is off)
             this.randomYawOffset = (this.rand.nextDouble() - 0.5) * Princeps.settings().randomLooking.value;
             this.randomPitchOffset = (this.rand.nextDouble() - 0.5) * Princeps.settings().randomLooking.value;
 
-            // randomLooking113
+            // legacy randomLooking113
             double random = this.rand.nextDouble() - 0.5;
             if (Math.abs(random) < 0.1) {
                 random *= 4;
@@ -341,6 +409,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             return pitch;
         }
 
+        /** Cheap ~normal noise (mean 0, std ~0.5) from three uniforms — stateless, deterministic under fork(). */
+        private double gaussian() {
+            return this.rand.nextDouble() + this.rand.nextDouble() + this.rand.nextDouble() - 1.5;
+        }
+
+        private static double clampDrift(final double v, final double max) {
+            return v < -max ? -max : (v > max ? max : v);
+        }
+
         private float calculateMouseMove(float current, float target) {
             final float delta = target - current;
             final double deltaPx = angleToMouse(delta); // yes, even the mouse movements use double
@@ -363,10 +440,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         public final Rotation rotation;
         public final Mode mode;
+        /** True when the movement needs an EXACT facing (break/place/bridge) — humanized wander is bypassed. */
+        public final boolean precise;
 
-        public Target(Rotation rotation, Mode mode) {
+        public Target(Rotation rotation, Mode mode, boolean precise) {
             this.rotation = rotation;
             this.mode = mode;
+            this.precise = precise;
         }
 
         enum Mode {

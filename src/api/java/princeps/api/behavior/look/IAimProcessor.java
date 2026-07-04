@@ -36,6 +36,16 @@ public interface IAimProcessor {
     Rotation peekRotation(Rotation desired);
 
     /**
+     * Like {@link #peekRotation(Rotation)} but ALWAYS the exact rotation with no humanized-look wander. Reach/place
+     * feasibility predictions must use this: the actual break/place is applied at a precise (exact) rotation, so a
+     * prediction that included the cruising wander would disagree with reality and flip a raytrace hit/miss.
+     *
+     * @param desired The desired rotation to set
+     * @return The exact actual rotation (mouse-quantized, no wander)
+     */
+    Rotation peekRotationExact(Rotation desired);
+
+    /**
      * Returns a copy of this {@link IAimProcessor} which has its own internal state and is manually tickable.
      *
      * @return The forked processor

@@ -135,6 +135,13 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
                 if (moves.dynamicXZ && !worldBorder.entirelyContains(res.x, res.z)) { // see issue #218
                     continue;
                 }
+                // Base Hunter Y ceiling: block only NET-UPWARD movement that would rise above the cap. A level or
+                // downward move is always allowed — even from above the cap — so a player who ends up above it
+                // (knockback, rising water, or a stale latch after a teleport/reconnect) can always descend back
+                // out instead of stranding the pathfinder with an empty open set. Off by default (short-circuits).
+                if (calcContext.baseHuntYCeiling && res.y > calcContext.baseHuntMaxY && res.y > currentNode.y) {
+                    continue;
+                }
                 if (!moves.dynamicXZ && (res.x != newX || res.z != newZ)) {
                     throw new IllegalStateException(String.format(
                             "%s from %s %s %s ended at x z %s %s instead of %s %s",
