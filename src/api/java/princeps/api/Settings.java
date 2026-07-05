@@ -830,8 +830,15 @@ public final class Settings {
     /** Max degrees the humanized yaw may wander from the true heading while cruising (pitch uses half of this). */
     public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(3.0);
 
-    /** Max degrees/tick the humanized look may turn while cruising, so a corner is a short arc, not an instant snap. */
-    public final Setting<Double> humanizedLookTurnSpeed = new Setting<>(34.0);
+    /** Max degrees/tick the humanized look may turn while cruising, so a corner is a short arc, not an instant snap.
+     *  ~22°/tick ≈ 440°/s: brisk but clearly an arc across ~4 ticks for a 90° corner, not a 1-tick flick. */
+    public final Setting<Double> humanizedLookTurnSpeed = new Setting<>(22.0);
+
+    /** Also speed-limit the turn while BREAKING (not just cruising), so tunneling around a corner arcs the head over
+     *  a few ticks and mines the swept blocks — instead of a 1-tick 90° snap to each new block center. Off by default
+     *  (normal precise mining stays an exact instant aim); the Base Hunter enables it (widening a tunnel corner
+     *  slightly is fine there, and it removes the last robotic snap). Never affects place / jump / elytra. */
+    public final Setting<Boolean> humanizedLookCapBreakTurn = new Setting<>(false);
 
     /**
      * Exclusively use cached chunks for pathing

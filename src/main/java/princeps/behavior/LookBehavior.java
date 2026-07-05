@@ -104,6 +104,14 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // bypass only engages next tick once physics leave the ground, so a forced-jump tick counts precise.
                 final boolean jumpLaunch = princeps.getInputOverrideHandler().isInputForcedDown(Input.JUMP);
                 this.processor.setPrecise(this.target.precise || jumpLaunch);
+                // Optionally arc the head through a mining corner instead of snapping: cap the turn even while a
+                // BREAK is forced (CLICK_LEFT), on the ground, and not launching a jump (a jump must fly its exact
+                // heading). Off by default (normal precise stays a 1-tick exact aim); the Base Hunter turns it on.
+                final boolean breaking = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT);
+                this.processor.setCapPreciseTurn(
+                        Princeps.settings().humanizedLook.value
+                                && Princeps.settings().humanizedLookCapBreakTurn.value
+                                && breaking && !jumpLaunch);
                 final Rotation actual = this.processor.peekRotation(this.target.rotation);
                 if (ctx.player().isFallFlying()) {
                     // Low-pass the *applied* look while gliding: ease toward the steering target instead of
@@ -245,10 +253,19 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private double randomYawOffset;
         private double randomPitchOffset;
         // Humanized-look state: mean-reverting yaw/pitch wander + the current precise-phase gate.
-        private double ouYaw;
-        private double ouPitch;
+        private double ouYaw;          // current cruising fixation offset (yaw)
+        private double ouPitch;        // current cruising fixation offset (pitch)
+        private double ouYawTarget;    // fixation the current saccade is easing toward
+        private double ouPitchTarget;
+        private int dwellTicks;        // ticks left holding this fixation before the next saccade
+        private double tremorYaw;      // always-on micro-tremor (BOTH cruising and precise apply — never predictions)
+        private double tremorPitch;
         private boolean precise;
-        private static final double OU_THETA = 0.06; // mean-reversion rate per tick (lower = slower, smoother)
+        private boolean capPreciseTurn; // when set, speed-limit the turn even during a precise BREAK (mining arc)
+        private static final double SACCADE_EASE = 0.28; // fraction toward the fixation per tick (~4-tick flick)
+        private static final double TREMOR_THETA = 0.35; // fast reversion → high-freq hand micro-jitter
+        private static final double TREMOR_YAW = 0.14;   // yaw micro-tremor scale (deg); clamped to 3x
+        private static final double TREMOR_PITCH = 0.10;
 
         public AbstractAimProcessor(IPlayerContext ctx) {
             this.ctx = ctx;
@@ -262,11 +279,21 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.randomPitchOffset = source.randomPitchOffset;
             this.ouYaw = source.ouYaw;
             this.ouPitch = source.ouPitch;
+            this.ouYawTarget = source.ouYawTarget;
+            this.ouPitchTarget = source.ouPitchTarget;
+            this.dwellTicks = source.dwellTicks;
+            this.tremorYaw = source.tremorYaw;
+            this.tremorPitch = source.tremorPitch;
             this.precise = source.precise;
+            this.capPreciseTurn = source.capPreciseTurn;
         }
 
         final void setPrecise(final boolean precise) {
             this.precise = precise;
+        }
+
+        final void setCapPreciseTurn(final boolean capPreciseTurn) {
+            this.capPreciseTurn = capPreciseTurn;
         }
 
         @Override
@@ -296,25 +323,57 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
             final boolean airborne = this.ctx.player() != null
                     && (!this.ctx.player().onGround() || this.ctx.player().isFallFlying());
-            if (!forceExact && Princeps.settings().humanizedLook.value && !this.precise && !airborne) {
-                // Cruising: add the mean-reverting wander, then SPEED-LIMIT the per-tick turn so a corner is a
-                // short human arc rather than a one-tick superhuman flick. Fed through calculateMouseMove below so
-                // the emitted delta is still an integer number of mouse counts (never an impossible float angle).
-                desiredYaw += (float) this.ouYaw;
-                desiredPitch += (float) this.ouPitch;
-                final float maxTurn = (float) Math.max(1.0, Princeps.settings().humanizedLookTurnSpeed.value);
-                final float cappedYaw = prev.getYaw()
-                        + Mth.clamp(Mth.degreesDifference(prev.getYaw(), desiredYaw), -maxTurn, maxTurn);
-                final float cappedPitch = prev.getPitch()
-                        + Mth.clamp(desiredPitch - prev.getPitch(), -maxTurn, maxTurn);
+            if (!forceExact && Princeps.settings().humanizedLook.value) {
+                // Always-on micro-tremor, applied on BOTH the cruising and the precise APPLY path (never on the
+                // peekRotationExact predictions). A real hand is never bit-exactly still: without this the yaw/pitch
+                // freeze to a constant the instant a break/place starts and the noise floor collapses to exactly 0 —
+                // a bimodal "silence keyed to interactions" tell. Bounded < ~0.5° so at reach distance the aim moves
+                // < 0.04 blocks and never leaves the target face → reach/place hit<->miss is unchanged (predictions
+                // stay exact) and the break's crosshair stays on the target block.
+                desiredYaw += (float) this.tremorYaw;
+                desiredPitch += (float) this.tremorPitch;
+                if (!this.precise && !airborne) {
+                    // Cruising: add the fixation/saccade wander, then SPEED-LIMIT the per-tick turn so a corner is a
+                    // short human arc rather than a one-tick superhuman flick. Fed through calculateMouseMove below so
+                    // the emitted delta is still an integer number of mouse counts (never an impossible float angle).
+                    desiredYaw += (float) this.ouYaw;
+                    desiredPitch += (float) this.ouPitch;
+                    final float maxTurn = (float) Math.max(1.0, Princeps.settings().humanizedLookTurnSpeed.value);
+                    final float cappedYaw = prev.getYaw()
+                            + Mth.clamp(Mth.degreesDifference(prev.getYaw(), desiredYaw), -maxTurn, maxTurn);
+                    final float cappedPitch = prev.getPitch()
+                            + Mth.clamp(desiredPitch - prev.getPitch(), -maxTurn, maxTurn);
+                    return new Rotation(
+                            this.calculateMouseMove(prev.getYaw(), cappedYaw),
+                            this.calculateMouseMove(prev.getPitch(), cappedPitch)
+                    ).clamp();
+                }
+                // Precise APPLY (break/place, airborne jump/parkour, elytra): EXACT target + tremor only, no wander.
+                // Normally NO turn cap — the crosshair must sit on the target block THIS tick for BlockBreakHelper.
+                // Exception (capPreciseTurn, base-hunt only, breaking-on-ground): speed-limit the approach too. The
+                // head arcs to the new block over a few ticks and the crosshair breaks the blocks it sweeps across —
+                // a natural human mining arc through a corner instead of a 1-tick 90° snap. Safe here because the dig
+                // simply lands a few ticks later once the crosshair arrives (isLookingAt gates the actual break); the
+                // reach/place PREDICTIONS still use peekRotationExact (uncapped) so pathing plans correctly.
+                if (this.capPreciseTurn && !airborne) {
+                    final float maxTurn = (float) Math.max(1.0, Princeps.settings().humanizedLookTurnSpeed.value);
+                    final float cappedYaw = prev.getYaw()
+                            + Mth.clamp(Mth.degreesDifference(prev.getYaw(), desiredYaw), -maxTurn, maxTurn);
+                    final float cappedPitch = prev.getPitch()
+                            + Mth.clamp(desiredPitch - prev.getPitch(), -maxTurn, maxTurn);
+                    return new Rotation(
+                            this.calculateMouseMove(prev.getYaw(), cappedYaw),
+                            this.calculateMouseMove(prev.getPitch(), cappedPitch)
+                    ).clamp();
+                }
                 return new Rotation(
-                        this.calculateMouseMove(prev.getYaw(), cappedYaw),
-                        this.calculateMouseMove(prev.getPitch(), cappedPitch)
+                        this.calculateMouseMove(prev.getYaw(), desiredYaw),
+                        this.calculateMouseMove(prev.getPitch(), desiredPitch)
                 ).clamp();
             }
 
-            // Precise phase (break/place, airborne jump/parkour, elytra) or humanized-look off: face the EXACT
-            // target. (randomYawOffset/randomPitchOffset are held at 0 whenever humanizedLook is on.)
+            // forceExact prediction, or humanized-look off: face the EXACT target with NO tremor so reach/place
+            // predictions are byte-identical to what the precise apply lands on. (legacy offsets are 0 while humanized.)
             desiredYaw += this.randomYawOffset;
             desiredPitch += this.randomPitchOffset;
 
@@ -335,17 +394,31 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 this.randomPitchOffset = 0.0;
                 this.ouYaw = 0.0;
                 this.ouPitch = 0.0;
+                this.tremorYaw = 0.0;
+                this.tremorPitch = 0.0;
                 return;
             }
             if (Princeps.settings().humanizedLook.value) {
-                // Advance the mean-reverting (Ornstein-Uhlenbeck) wander every tick — in tick(), so the forked
-                // solver's advance() replays it deterministically and its place-predictions match reality. It
-                // reverts to 0 (= the true heading), so the walk stays inside the path corridor while never
-                // holding a rigid angle; it is only APPLIED while cruising (see peekRotation).
+                // Advance the wander + tremor every tick — in tick(), so the forked solver's advance() replays it
+                // deterministically and its place-predictions match reality.
                 final double maxDrift = Math.max(0.0, Princeps.settings().humanizedLookDriftDegrees.value);
-                final double sigma = maxDrift * 0.30;
-                this.ouYaw = clampDrift(this.ouYaw * (1.0 - OU_THETA) + sigma * gaussian(), maxDrift);
-                this.ouPitch = clampDrift(this.ouPitch * (1.0 - OU_THETA) + sigma * 0.5 * gaussian(), maxDrift * 0.5);
+                // Fixation + saccade (replaces the symmetric mean-zero OU, whose smooth mean-reverting spectrum has
+                // no saccades and averages to exactly the true heading — itself a tell). A human head HOLDS a small
+                // offset for a randomized dwell, then FLICKS to a new one: hold near ouYawTarget for dwellTicks, then
+                // ease quickly toward a fresh uniform offset in [-maxDrift, maxDrift]. Bounded by maxDrift so the walk
+                // stays inside the path corridor; it is only APPLIED while cruising (see peekRotation).
+                if (this.dwellTicks <= 0) {
+                    this.ouYawTarget = (this.rand.nextDouble() * 2.0 - 1.0) * maxDrift;
+                    this.ouPitchTarget = (this.rand.nextDouble() * 2.0 - 1.0) * maxDrift * 0.5;
+                    this.dwellTicks = 6 + (int) (this.rand.nextDouble() * 26.0); // hold 6..31 ticks (~0.3–1.6s)
+                }
+                this.dwellTicks--;
+                this.ouYaw += (this.ouYawTarget - this.ouYaw) * SACCADE_EASE;
+                this.ouPitch += (this.ouPitchTarget - this.ouPitch) * SACCADE_EASE;
+                // Always-on high-frequency micro-tremor (hand jitter) — never zeroed on the ground, so the emitted
+                // rotation is never bit-exactly constant even mid-break. Fast reversion + small scale, clamped to 3x.
+                this.tremorYaw = clampDrift(this.tremorYaw * (1.0 - TREMOR_THETA) + TREMOR_YAW * gaussian(), TREMOR_YAW * 3.0);
+                this.tremorPitch = clampDrift(this.tremorPitch * (1.0 - TREMOR_THETA) + TREMOR_PITCH * gaussian(), TREMOR_PITCH * 3.0);
                 this.randomYawOffset = 0.0;
                 this.randomPitchOffset = 0.0;
                 return;
