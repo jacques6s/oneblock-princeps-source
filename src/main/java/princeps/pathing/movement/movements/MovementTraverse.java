@@ -289,7 +289,12 @@ public class MovementTraverse extends Movement {
                     return state.setStatus(MovementStatus.UNREACHABLE);
                 }
             }
-            MovementHelper.moveTowards(ctx, state, against);
+            if (ladder) {
+                MovementHelper.moveTowards(ctx, state, against);
+            } else {
+                // plain flat walk: pure-pursuit steer along the path (falls back to moveTowards when off/no path)
+                MovementHelper.moveAlongPath(princeps, state, against);
+            }
             return state;
         } else {
             wasTheBridgeBlockAlwaysThere = false;

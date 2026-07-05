@@ -663,6 +663,118 @@ public interface MovementHelper extends ActionCosts, Helper {
         )).setInput(Input.MOVE_FORWARD, true);
     }
 
+    /** single-slot input hysteresis for {@link #moveAlongPath} (one local player per client) */
+    final class Steering {
+        private static boolean strafing;
+    }
+
+    /**
+     * Pure-pursuit cruising steer ("the elytra blue line, on the ground"): instead of aiming the body at the
+     * current node's center and holding W — which snaps the walk direction at every node boundary — the GAZE
+     * chases a far carrot ~3.2 blocks ahead on the path polyline (the eyes lead into corners early, like a human
+     * looking where they are going) while the FEET follow a near carrot 0.7 blocks ahead via the input combo
+     * (W/A/D strafe) closest to the local track direction. The near lookahead is small enough that the walked
+     * track still enters every node's block column (validated in simulation: 100% node coverage at 0.7; feet
+     * therefore still trigger each movement's feet==dest SUCCESS), so the executor's bookkeeping is untouched —
+     * the corner is cut by at most ~0.5 blocks inside the corner node's own block. Strafe engages above 25° of
+     * look-vs-track error and releases below 12° (hysteresis kills A/D chatter); within the deadband it is plain
+     * W and the mouse does the steering, exactly like a human. Falls back to classic moveTowards whenever there
+     * is no active path, the flat window is degenerate, or the feature is off.
+     */
+    static void moveAlongPath(IPrinceps princeps, MovementState state, BlockPos classicAim) {
+        IPlayerContext ctx = princeps.getPlayerContext();
+        if (!Princeps.settings().humanizedLook.value || !Princeps.settings().humanizedSteering.value) {
+            moveTowards(ctx, state, classicAim);
+            return;
+        }
+        princeps.api.pathing.path.IPathExecutor exec = princeps.getPathingBehavior().getCurrent();
+        if (exec == null || exec.getPath() == null) {
+            moveTowards(ctx, state, classicAim);
+            return;
+        }
+        List<BetterBlockPos> nodes = exec.getPath().positions();
+        int pos = exec.getPosition();
+        if (pos < 0 || pos >= nodes.size()) {
+            moveTowards(ctx, state, classicAim);
+            return;
+        }
+        // window of the flat run around the executor position: [pos-1 .. pos+8], truncated at any y-change so
+        // the smoothing never reaches across an ascend/descend/parkour edge (those keep their exact aims)
+        final int y = nodes.get(pos).y;
+        int start = (pos > 0 && nodes.get(pos - 1).y == y) ? pos - 1 : pos;
+        int end = pos;
+        while (end + 1 < nodes.size() && nodes.get(end + 1).y == y && end - pos < 8) {
+            end++;
+        }
+        if (end - start < 1) {
+            moveTowards(ctx, state, classicAim);
+            return;
+        }
+        final Vec3 player = ctx.player().position();
+        // project the player onto the windowed polyline of node centers (segment index + fraction)
+        int segI = start;
+        double segT = 0, bestD = Double.MAX_VALUE;
+        for (int i = start; i < end; i++) {
+            double ax = nodes.get(i).x + 0.5, az = nodes.get(i).z + 0.5;
+            double bx = nodes.get(i + 1).x + 0.5, bz = nodes.get(i + 1).z + 0.5;
+            double dx = bx - ax, dz = bz - az;
+            double l2 = dx * dx + dz * dz;
+            double t = l2 == 0 ? 0 : Mth.clamp(((player.x - ax) * dx + (player.z - az) * dz) / l2, 0.0, 1.0);
+            double qx = ax + dx * t, qz = az + dz * t;
+            double d = (player.x - qx) * (player.x - qx) + (player.z - qz) * (player.z - qz);
+            if (d < bestD) {
+                bestD = d;
+                segI = i;
+                segT = t;
+            }
+        }
+        final double[] far = advanceAlong(nodes, segI, segT, end, 3.2);
+        final double[] near = advanceAlong(nodes, segI, segT, end, 0.7);
+        // gaze: far carrot, current pitch (nudgeToLevel + the humanized shaping own the rest)
+        state.setTarget(new MovementTarget(
+                RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
+                        new Vec3(far[0], ctx.playerHead().y, far[1]),
+                        ctx.playerRotations()).withPitch(ctx.playerRotations().getPitch()),
+                false
+        ));
+        // track: near carrot via the octant inputs, with engage/release hysteresis around plain W
+        float idealYaw = RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
+                new Vec3(near[0], ctx.playerHead().y, near[1]), ctx.playerRotations()).getYaw();
+        float rel = Math.abs(Mth.degreesDifference(ctx.playerRotations().getYaw(), idealYaw));
+        if (Steering.strafing ? rel < 12f : rel < 25f) {
+            Steering.strafing = false;
+            state.setInput(Input.MOVE_FORWARD, true);
+        } else {
+            Steering.strafing = true;
+            moveTowardsWithoutRotation(ctx, state, idealYaw);
+        }
+    }
+
+    /** advance {@code ahead} blocks of arc length along the node-center polyline from (segment i, fraction t),
+     *  clamped at node {@code end}; returns {x, z} */
+    private static double[] advanceAlong(List<BetterBlockPos> nodes, int i, double t, int end, double ahead) {
+        double cx = nodes.get(i).x + 0.5 + (nodes.get(i + 1).x - nodes.get(i).x) * t;
+        double cz = nodes.get(i).z + 0.5 + (nodes.get(i + 1).z - nodes.get(i).z) * t;
+        int j = i;
+        double rem = ahead;
+        while (rem > 1e-9) {
+            double bx = nodes.get(j + 1).x + 0.5, bz = nodes.get(j + 1).z + 0.5;
+            double seg = Math.sqrt((bx - cx) * (bx - cx) + (bz - cz) * (bz - cz));
+            if (seg >= rem) {
+                double f = seg == 0 ? 0 : rem / seg;
+                return new double[]{cx + (bx - cx) * f, cz + (bz - cz) * f};
+            }
+            rem -= seg;
+            cx = bx;
+            cz = bz;
+            j++;
+            if (j >= end) {
+                return new double[]{cx, cz};
+            }
+        }
+        return new double[]{cx, cz};
+    }
+
     static void moveTowardsWithoutRotation(IPlayerContext ctx, MovementState state, float idealYaw) {
         MovementOption.getOptions(
                 Mth.sin(ctx.playerRotations().getYaw() * DEG_TO_RAD_F),

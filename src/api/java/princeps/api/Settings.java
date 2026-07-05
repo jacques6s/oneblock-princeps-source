@@ -857,6 +857,14 @@ public final class Settings {
      *  slightly is fine there, and it removes the last robotic snap). Never affects place / jump / elytra. */
     public final Setting<Boolean> humanizedLookCapBreakTurn = new Setting<>(false);
 
+    /** Pure-pursuit cruising steer for flat walks (traverse/diagonal): the gaze chases a far carrot ~3.2 blocks
+     *  ahead on the path (eyes lead into corners) while the feet follow a near carrot 0.7 blocks ahead via W/A/D
+     *  octant inputs — smooth arcs instead of node-center snaps. Decouples the walked track from the look, so even
+     *  a slow/smooth look profile keeps 100% node coverage (sim: max cross-track 0.8->0.22 blocks with the smooth
+     *  profile, no orbits, ~10% faster on winding paths). Requires humanizedLook; falls back to the classic aim
+     *  whenever there is no active path or the flat window degenerates (edges, ascends, ladders). */
+    public final Setting<Boolean> humanizedSteering = new Setting<>(true);
+
     /**
      * Exclusively use cached chunks for pathing
      * <p>

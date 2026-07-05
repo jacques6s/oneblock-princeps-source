@@ -278,7 +278,9 @@ public class MovementDiagonal extends Movement {
             state.setInput(Input.SPRINT, true);
         }
         state.setInput(Input.SNEAK, Princeps.settings().allowWalkOnMagmaBlocks.value && MovementHelper.steppingOnBlocks(ctx).stream().anyMatch(block -> ctx.world().getBlockState(block).is(Blocks.MAGMA_BLOCK)));
-        MovementHelper.moveTowards(ctx, state, dest);
+        // flat diagonal cruise: pure-pursuit steer along the path (falls back to moveTowards when off/no path,
+        // and the y-window inside degenerates on diagonal ascends so those keep the classic exact aim)
+        MovementHelper.moveAlongPath(princeps, state, dest);
         return state;
     }
 
