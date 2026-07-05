@@ -154,8 +154,19 @@ public abstract class Movement implements IMovement, MovementHelper {
         if (state.getStatus() == MovementStatus.WAITING) {
             return true;
         }
+        // While actually FALLING (opt-in per movement type, see skipFallPassedBlocks), ignore to-break column
+        // blocks the player has already fallen PAST: water or gravel pouring into the vacated shaft above can
+        // never be reached again, but the blind fallback below would aim the look rigidly straight up at it for
+        // the entire fall AND hold this movement in PREPPING — starving updateState, so the landing centering
+        // never ran. Blocks at or below the player keep the full handling (they genuinely block the landing).
+        final boolean falling = this.skipFallPassedBlocks()
+                && !ctx.player().onGround()
+                && ctx.player().getDeltaMovement().y < -0.1;
         boolean somethingInTheWay = false;
         for (BetterBlockPos blockPos : positionsToBreak) {
+            if (falling && blockPos.y > ctx.playerFeet().y + 1) {
+                continue;
+            }
             if (!ctx.world().getEntitiesOfClass(FallingBlockEntity.class, new AABB(0, 0, 0, 1, 1.1, 1).move(blockPos)).isEmpty() && Princeps.settings().pauseMiningForFallingBlocks.value) {
                 return false;
             }
@@ -190,6 +201,15 @@ public abstract class Movement implements IMovement, MovementHelper {
             return true;
         }
         return true;
+    }
+
+    /**
+     * Whether {@link #prepared} may skip to-break blocks the player has already fallen past while airborne.
+     * Default false; only movements whose to-break column is anchored at the drop TOP (MovementFall) opt in —
+     * movements that legitimately break blocks ABOVE while airborne (pillar/ascend/parkour at a jump apex) must not.
+     */
+    protected boolean skipFallPassedBlocks() {
+        return false;
     }
 
     @Override

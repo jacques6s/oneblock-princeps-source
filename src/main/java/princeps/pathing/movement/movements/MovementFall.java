@@ -207,4 +207,12 @@ public class MovementFall extends Movement {
         }
         return true;
     }
+
+    @Override
+    protected boolean skipFallPassedBlocks() {
+        // Our to-break column is anchored at the drop TOP (buildPositionsToBreak: src.y+1 downward). Once we're
+        // falling, water/gravel appearing in the already-passed column top must not hijack prepared() — the blind
+        // break fallback would stare straight up all the way down and starve updateState's landing centering.
+        return true;
+    }
 }

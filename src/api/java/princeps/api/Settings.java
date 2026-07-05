@@ -830,9 +830,26 @@ public final class Settings {
     /** Max degrees the humanized yaw may wander from the true heading while cruising (pitch uses half of this). */
     public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(3.0);
 
-    /** Max degrees/tick the humanized look may turn while cruising, so a corner is a short arc, not an instant snap.
-     *  ~22°/tick ≈ 440°/s: brisk but clearly an arc across ~4 ticks for a 90° corner, not a 1-tick flick. */
+    /** Max degrees of always-on hand micro-tremor (pitch uses ~70% of this). Set to 0 for fully stable cameras. */
+    public final Setting<Double> humanizedLookTremorDegrees = new Setting<>(0.14);
+
+    /**
+     * @deprecated no longer read — the turn is proportional now (see {@link #humanizedLookTurnMaxSpeed},
+     * {@link #humanizedLookTurnMinSpeed}, {@link #humanizedLookTurnGain}). A CONSTANT deg/tick cap gave the walk a
+     * fixed minimum turning radius and made the bot orbit overshot path nodes. Kept only so persisted configs parse.
+     */
+    @Deprecated
     public final Setting<Double> humanizedLookTurnSpeed = new Setting<>(22.0);
+
+    /** Peak flick speed (deg/tick) of the humanized ballistic turn — big heading errors resolve in 2-4 ticks like a
+     *  real mouse flick (~1100°/s peak on a 180° flip), then ease out. */
+    public final Setting<Double> humanizedLookTurnMaxSpeed = new Setting<>(55.0);
+
+    /** Settle floor (deg/tick): small corrections move at most this fast (and never past the target). */
+    public final Setting<Double> humanizedLookTurnMinSpeed = new Setting<>(8.0);
+
+    /** Fraction of the remaining heading error taken per tick (ballistic ease-out profile). */
+    public final Setting<Double> humanizedLookTurnGain = new Setting<>(0.55);
 
     /** Also speed-limit the turn while BREAKING (not just cruising), so tunneling around a corner arcs the head over
      *  a few ticks and mines the swept blocks — instead of a 1-tick 90° snap to each new block center. Off by default

@@ -54,6 +54,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
      */
     private Rotation prevRotation;
 
+    /**
+     * The rotation PRE actually applied to the player this tick. RotationMoveEvent (moveRelative) fires later in
+     * the same tick and used to RE-peek with prev = the already-advanced live rotation — taking a SECOND turn step
+     * that the mixin then wrote back to the entity. That doubled the effective turn rate erratically (1-2x) and made
+     * the walk direction lead the visible look during turns (the observed weaving). Consumers of "the rotation this
+     * tick" must reuse this value instead of re-peeking.
+     */
+    private Rotation appliedRotation;
+
     private final AimProcessor processor;
 
     private final Deque<Float> smoothYawBuffer;
@@ -135,6 +144,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     ctx.player().setYRot(actual.getYaw());
                     ctx.player().setXRot(actual.getPitch());
                 }
+                this.appliedRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
                 break;
             }
             case POST: {
@@ -151,7 +161,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     if (this.target.mode == Target.Mode.SERVER) {
                         ctx.player().setYRot(this.prevRotation.getYaw());
                         ctx.player().setXRot(this.prevRotation.getPitch());
-                    } else if (!ctx.player().isFallFlying() && Princeps.settings().smoothLook.value) {
+                    } else if (!ctx.player().isFallFlying() && Princeps.settings().smoothLook.value
+                            && !Princeps.settings().humanizedLook.value) {
+                        // smoothLook only when the humanizer is off: humanizedLook owns the turn shaping now, and
+                        // this raw-target camera average would flatten the wander back out (and its naive degree
+                        // mean corrupts headings near ±180).
                         // Camera averaging only off the elytra. While fall-flying the PRE low-pass is the single
                         // source of truth — overwriting yRot here with the raw-target buffer average would leak a
                         // stale mean into the next tick's packet and re-desync the physics from the sent rotation.
@@ -172,6 +186,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 }
                 // The target is done being used for this game tick, so it can be invalidated
                 this.target = null;
+                this.appliedRotation = null;
                 break;
             }
             default:
@@ -195,13 +210,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     public void onWorldEvent(WorldEvent event) {
         this.serverRotation = null;
         this.target = null;
+        this.appliedRotation = null;
         this.smoothYawBuffer.clear();
         this.smoothPitchBuffer.clear();
     }
 
     public void pig() {
         if (this.target != null) {
-            final Rotation actual = this.processor.peekRotation(this.target.rotation);
+            final Rotation actual = this.appliedRotation != null
+                    ? this.appliedRotation
+                    : this.processor.peekRotation(this.target.rotation);
             ctx.player().setYRot(actual.getYaw());
         }
     }
@@ -228,7 +246,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         if (ctx.player().isFallFlying()) {
             return;
         }
-        final Rotation actual = this.processor.peekRotation(this.target.rotation);
+        // Reuse the exact rotation PRE applied this tick — movement == look, ONE turn step per tick. Re-peeking
+        // here read the already-advanced live rotation as prev and took a second step (see appliedRotation).
+        final Rotation actual = this.appliedRotation != null
+                ? this.appliedRotation
+                : this.processor.peekRotation(this.target.rotation);
         event.setYaw(actual.getYaw());
         event.setPitch(actual.getPitch());
     }
@@ -264,8 +286,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private boolean capPreciseTurn; // when set, speed-limit the turn even during a precise BREAK (mining arc)
         private static final double SACCADE_EASE = 0.28; // fraction toward the fixation per tick (~4-tick flick)
         private static final double TREMOR_THETA = 0.35; // fast reversion → high-freq hand micro-jitter
-        private static final double TREMOR_YAW = 0.14;   // yaw micro-tremor scale (deg); clamped to 3x
-        private static final double TREMOR_PITCH = 0.10;
+        private static final double TREMOR_PITCH_RATIO = 0.70; // pitch tremor as a fraction of yaw tremor
 
         public AbstractAimProcessor(IPlayerContext ctx) {
             this.ctx = ctx;
@@ -333,16 +354,24 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 desiredYaw += (float) this.tremorYaw;
                 desiredPitch += (float) this.tremorPitch;
                 if (!this.precise && !airborne) {
-                    // Cruising: add the fixation/saccade wander, then SPEED-LIMIT the per-tick turn so a corner is a
-                    // short human arc rather than a one-tick superhuman flick. Fed through calculateMouseMove below so
-                    // the emitted delta is still an integer number of mouse counts (never an impossible float angle).
-                    desiredYaw += (float) this.ouYaw;
-                    desiredPitch += (float) this.ouPitch;
-                    final float maxTurn = (float) Math.max(1.0, Princeps.settings().humanizedLookTurnSpeed.value);
+                    // Cruising: saccadic wander + a PROPORTIONAL ("ballistic") turn. The old CONSTANT deg/tick cap
+                    // gave the walk (movement direction == applied yaw) a ~0.7-block minimum turning radius — after
+                    // overshooting a node center the pursuit point sat INSIDE the turning circle and the bot orbited
+                    // it (the observed near-circles). Humans are the opposite: big heading errors get a fast flick
+                    // (hundreds of deg/s) that eases out into a smooth settle. Step grows with the error, so orbiting
+                    // is impossible; small corrections stay gentle. Fed through calculateMouseMove below so the
+                    // emitted delta is still an integer number of mouse counts.
+                    final float rawYawErr = Math.abs(Mth.degreesDifference(prev.getYaw(), desiredYaw));
+                    // The wander must not fight an active turn: fade it out between 20° and 45° of true heading
+                    // error (deterministic in prev+target, so forked solver predictions replay it identically).
+                    final double wanderScale = rawYawErr <= 20.0f ? 1.0 : Math.max(0.0, 1.0 - (rawYawErr - 20.0) / 25.0);
+                    desiredYaw += (float) (this.ouYaw * wanderScale);
+                    desiredPitch += (float) (this.ouPitch * wanderScale);
+                    final double maxStep = Princeps.settings().humanizedLookTurnMaxSpeed.value;
                     final float cappedYaw = prev.getYaw()
-                            + Mth.clamp(Mth.degreesDifference(prev.getYaw(), desiredYaw), -maxTurn, maxTurn);
+                            + proportionalStep(Mth.degreesDifference(prev.getYaw(), desiredYaw), maxStep);
                     final float cappedPitch = prev.getPitch()
-                            + Mth.clamp(desiredPitch - prev.getPitch(), -maxTurn, maxTurn);
+                            + proportionalStep(desiredPitch - prev.getPitch(), maxStep * 0.6);
                     return new Rotation(
                             this.calculateMouseMove(prev.getYaw(), cappedYaw),
                             this.calculateMouseMove(prev.getPitch(), cappedPitch)
@@ -356,11 +385,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // simply lands a few ticks later once the crosshair arrives (isLookingAt gates the actual break); the
                 // reach/place PREDICTIONS still use peekRotationExact (uncapped) so pathing plans correctly.
                 if (this.capPreciseTurn && !airborne) {
-                    final float maxTurn = (float) Math.max(1.0, Princeps.settings().humanizedLookTurnSpeed.value);
+                    final double maxStep = Princeps.settings().humanizedLookTurnMaxSpeed.value;
                     final float cappedYaw = prev.getYaw()
-                            + Mth.clamp(Mth.degreesDifference(prev.getYaw(), desiredYaw), -maxTurn, maxTurn);
+                            + proportionalStep(Mth.degreesDifference(prev.getYaw(), desiredYaw), maxStep);
                     final float cappedPitch = prev.getPitch()
-                            + Mth.clamp(desiredPitch - prev.getPitch(), -maxTurn, maxTurn);
+                            + proportionalStep(desiredPitch - prev.getPitch(), maxStep * 0.6);
                     return new Rotation(
                             this.calculateMouseMove(prev.getYaw(), cappedYaw),
                             this.calculateMouseMove(prev.getPitch(), cappedPitch)
@@ -415,10 +444,17 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 this.dwellTicks--;
                 this.ouYaw += (this.ouYawTarget - this.ouYaw) * SACCADE_EASE;
                 this.ouPitch += (this.ouPitchTarget - this.ouPitch) * SACCADE_EASE;
-                // Always-on high-frequency micro-tremor (hand jitter) — never zeroed on the ground, so the emitted
-                // rotation is never bit-exactly constant even mid-break. Fast reversion + small scale, clamped to 3x.
-                this.tremorYaw = clampDrift(this.tremorYaw * (1.0 - TREMOR_THETA) + TREMOR_YAW * gaussian(), TREMOR_YAW * 3.0);
-                this.tremorPitch = clampDrift(this.tremorPitch * (1.0 - TREMOR_THETA) + TREMOR_PITCH * gaussian(), TREMOR_PITCH * 3.0);
+                // Always-on high-frequency micro-tremor (hand jitter) — never zeroed on the ground by default, so
+                // emitted rotation is not bit-exactly constant mid-break. BaseHunter can set this to 0 for a fully
+                // stable first-person camera while keeping the humanized acceleration curve.
+                final double tremorYawScale = Math.max(0.0, Princeps.settings().humanizedLookTremorDegrees.value);
+                final double tremorPitchScale = tremorYawScale * TREMOR_PITCH_RATIO;
+                this.tremorYaw = clampDrift(
+                        this.tremorYaw * (1.0 - TREMOR_THETA) + tremorYawScale * gaussian(),
+                        tremorYawScale * 3.0);
+                this.tremorPitch = clampDrift(
+                        this.tremorPitch * (1.0 - TREMOR_THETA) + tremorPitchScale * gaussian(),
+                        tremorPitchScale * 3.0);
                 this.randomYawOffset = 0.0;
                 this.randomPitchOffset = 0.0;
                 return;
@@ -489,6 +525,21 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         private static double clampDrift(final double v, final double max) {
             return v < -max ? -max : (v > max ? max : v);
+        }
+
+        /**
+         * Ballistic ease-out turn step: a fraction (gain) of the remaining error per tick, floored at minStep so the
+         * settle completes, ceilinged at maxStep. The outer {@code min(|error|, ...)} overshoot clamp is load-bearing:
+         * without it the minStep floor would oscillate ±minStep around the target forever (a self-made weave).
+         * Pure function of (error, settings) — no rand — so it is side-effect-free across the multiple peek calls per
+         * tick and identical in forked solver predictions.
+         */
+        private static float proportionalStep(final float error, final double maxStep) {
+            final double gain = Math.max(0.05, Princeps.settings().humanizedLookTurnGain.value);
+            final double minStep = Math.max(0.5, Princeps.settings().humanizedLookTurnMinSpeed.value);
+            final double abs = Math.abs(error);
+            final double clamped = Math.max(minStep, Math.min(abs * gain, Math.max(minStep, maxStep)));
+            return (float) Math.copySign(Math.min(abs, clamped), error);
         }
 
         private float calculateMouseMove(float current, float target) {
