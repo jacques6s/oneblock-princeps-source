@@ -133,6 +133,21 @@ public class Rotation {
     }
 
     /**
+     * Like {@link #isReallyCloseTo(Rotation)} but with explicit tolerances. Needed by gates that compare the APPLIED
+     * rotation to a raw target while humanizedLook's bounded micro-tremor (&lt;0.5°) rides on every applied rotation —
+     * a 0.01° equality there would never be satisfied again and the gate would go dead.
+     *
+     * @param other     another rotation
+     * @param yawTol    max yaw difference in degrees
+     * @param pitchTol  max pitch difference in degrees
+     * @return whether both components are within their tolerance
+     */
+    public boolean isCloseTo(Rotation other, float yawTol, float pitchTol) {
+        float yawDiff = Math.abs(normalizeYaw(yaw) - normalizeYaw(other.yaw));
+        return (yawDiff < yawTol || yawDiff > 360 - yawTol) && Math.abs(this.pitch - other.pitch) < pitchTol;
+    }
+
+    /**
      * Clamps the specified pitch value between -90 and 90.
      *
      * @param pitch The input pitch

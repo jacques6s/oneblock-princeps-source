@@ -208,8 +208,11 @@ public class MovementTraverse extends Movement {
             float yawToDest = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), VecUtils.calculateBlockCenter(ctx.world(), dest), ctx.playerRotations()).getYaw();
             float pitchToBreak = state.getTarget().getRotation().get().getPitch();
             if ((MovementHelper.isBlockNormalCube(pb0) || pb0.getBlock() instanceof AirBlock && (MovementHelper.isBlockNormalCube(pb1) || pb1.getBlock() instanceof AirBlock))) {
-                // in the meantime, before we're right up against the block, we can break efficiently at this angle
-                pitchToBreak = 26;
+                // in the meantime, before we're right up against the block, we can break efficiently at this angle.
+                // Jitter the old hardcoded 26 by a stable per-target amount so the pitch histogram doesn't spike at a
+                // single constant (the efficient-break geometry tolerates several degrees); the look tremor rides on
+                // top for per-tick continuity.
+                pitchToBreak = 26f + ((Long.hashCode(dest.asLong()) & 7) - 3) * 1.1f; // ~23..30, stable per block
             }
 
             return state.setTarget(new MovementState.MovementTarget(new Rotation(yawToDest, pitchToBreak), true))
@@ -319,8 +322,10 @@ public class MovementTraverse extends Movement {
                             // but only if our attempted place is straight ahead
                             return state.setInput(Input.MOVE_FORWARD, true);
                         }
-                    } else if (ctx.playerRotations().isReallyCloseTo(state.getTarget().rotation)) {
+                    } else if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)) {
                         // well i guess theres something in the way
+                        // (tolerance covers humanizedLook's bounded micro-tremor — a 0.01° check would never pass
+                        // again with tremor on and this gate would go dead, stalling the bridge against obstructions)
                         return state.setInput(Input.CLICK_LEFT, true);
                     }
                     return state;
@@ -351,7 +356,9 @@ public class MovementTraverse extends Movement {
                     return state.setInput(Input.CLICK_RIGHT, true); // wait to right click until we are able to place
                 }
                 // Out.log("Trying to look at " + goalLook + ", actually looking at" + Princeps.whatAreYouLookingAt());
-                if (ctx.playerRotations().isReallyCloseTo(state.getTarget().rotation)) {
+                // Tremor-tolerant (see above): CLICK_LEFT just breaks the crosshair block, so sub-degree closeness
+                // to the intended aim is functionally identical to the old exact check.
+                if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)) {
                     state.setInput(Input.CLICK_LEFT, true);
                 }
                 return state;

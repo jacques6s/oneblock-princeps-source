@@ -197,6 +197,20 @@ public final class RotationUtils {
                 return Optional.of(hypothetical);
             }
         }
+        // Humanized aim: before falling back to the exact geometric centroid (a superhuman dead-center tell that an
+        // anticheat can catch by replaying the dig raytrace and seeing every hit land on the shape centroid), aim at
+        // the point on the block NEAREST our current look — a human pulls to the near edge, not across to dead center
+        // (minimal mouse travel) — plus a small deterministic per-block scatter. Guarded by the same reachableOffset
+        // raytrace, so it is only used when the ray still lands on `pos`; otherwise we fall through to the exact
+        // centroid / face centers below, unchanged. Predictions go through peekRotationExact (in reachableOffset), so
+        // reach/place stays byte-consistent. Only breaking/interacting use this; placement-against has its own aim.
+        if (PrincepsAPI.getSettings().humanizedLook.value && !wouldSneak) {
+            Optional<Rotation> humanized = reachableHumanized(ctx, pos, blockReachDistance);
+            if (humanized.isPresent()) {
+                return humanized;
+            }
+        }
+
         Optional<Rotation> possibleRotation = reachableCenter(ctx, pos, blockReachDistance, wouldSneak);
         //System.out.println("center: " + possibleRotation);
         if (possibleRotation.isPresent()) {
@@ -259,6 +273,46 @@ public final class RotationUtils {
      */
     public static Optional<Rotation> reachableCenter(IPlayerContext ctx, BlockPos pos, double blockReachDistance, boolean wouldSneak) {
         return reachableOffset(ctx, pos, VecUtils.calculateBlockCenter(ctx.world(), pos), blockReachDistance, wouldSneak);
+    }
+
+    /**
+     * Human-like reach: aim at the point on {@code pos} nearest to where the player is ALREADY looking (least mouse
+     * travel — a person pulls to the near edge of a block, not across it to the dead center), with a small
+     * deterministic per-block scatter so repeated breaks don't all reconstruct to the exact shape centroid. Returns
+     * empty (→ caller falls back to the exact center) if the resulting ray would not land on {@code pos}, so
+     * correctness is never traded for realism. Deterministic per block (stable across ticks) so the reach raytrace
+     * never flips hit&lt;-&gt;miss from tick jitter.
+     */
+    private static Optional<Rotation> reachableHumanized(IPlayerContext ctx, BlockPos pos, double blockReachDistance) {
+        final Vec3 eyes = ctx.player().getEyePosition(1.0F);
+        final Vec3 center = VecUtils.calculateBlockCenter(ctx.world(), pos);
+
+        // Closest point on our current look ray to the block center → where the block sits relative to our aim.
+        final Vec3 look = calcLookDirectionFromRotation(ctx.playerRotations());
+        final double t = Mth.clamp(center.subtract(eyes).dot(look), 0.0, blockReachDistance);
+        final Vec3 rayPt = eyes.add(look.scale(t));
+
+        // Small deterministic per-block scatter (splitmix on the packed pos) so different blocks land on different
+        // in-face points, but a given block is stable tick-to-tick.
+        final long h = mix(pos.asLong());
+        final double nx = ((h & 0xFFFFL) / 65535.0) - 0.5;         // [-0.5, 0.5]
+        final double ny = (((h >>> 16) & 0xFFFFL) / 65535.0) - 0.5;
+        final double nz = (((h >>> 32) & 0xFFFFL) / 65535.0) - 0.5;
+
+        // Clamp the aim well inside the block (inset from every edge) so the guard raytrace still lands on pos.
+        final double margin = 0.18;
+        final double x = Mth.clamp(rayPt.x + nx * 0.22, pos.getX() + margin, pos.getX() + 1.0 - margin);
+        final double y = Mth.clamp(rayPt.y + ny * 0.22, pos.getY() + margin, pos.getY() + 1.0 - margin);
+        final double z = Mth.clamp(rayPt.z + nz * 0.22, pos.getZ() + margin, pos.getZ() + 1.0 - margin);
+
+        return reachableOffset(ctx, pos, new Vec3(x, y, z), blockReachDistance, false);
+    }
+
+    /** SplitMix64 finalizer — cheap, well-distributed hash of the packed block position (deterministic, no state). */
+    private static long mix(long z) {
+        z = (z ^ (z >>> 33)) * 0xff51afd7ed558ccdL;
+        z = (z ^ (z >>> 33)) * 0xc4ceb9fe1a85ec53L;
+        return z ^ (z >>> 33);
     }
 
     @Deprecated
