@@ -687,6 +687,16 @@ public interface MovementHelper extends ActionCosts, Helper {
             moveTowards(ctx, state, classicAim);
             return;
         }
+        // Collision safety: the pure-pursuit line cuts a corner by up to ~0.5 blocks INSIDE the corner node, which
+        // in a tight/just-dug 1-wide corridor can clip the still-solid diagonal wall block. The instant we actually
+        // touch a wall, revert to the exact node aim (node-to-node is guaranteed walkable by the pather), which
+        // pulls us straight back onto the path and clears the wall. Self-correcting: next unobstructed tick the
+        // smooth line resumes. This makes the deviation strictly bounded and collision-safe.
+        if (ctx.player().horizontalCollision) {
+            Steering.strafing = false;
+            moveTowards(ctx, state, classicAim);
+            return;
+        }
         princeps.api.pathing.path.IPathExecutor exec = princeps.getPathingBehavior().getCurrent();
         if (exec == null || exec.getPath() == null) {
             moveTowards(ctx, state, classicAim);
