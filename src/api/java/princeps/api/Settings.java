@@ -851,6 +851,13 @@ public final class Settings {
     /** Fraction of the remaining heading error taken per tick (ballistic ease-out profile). */
     public final Setting<Double> humanizedLookTurnGain = new Setting<>(0.55);
 
+    /** Absolute per-tick rotation-delta ceiling on the SENT rotation — a turn-envelope backstop above the normal
+     *  ballistic max, so it is inert in normal play and only clamps lone superhuman one-tick snaps (an un-capped
+     *  precise break re-aim 90°+ to the side, or a mid-air parkour retarget flipping ~180°) that would otherwise be
+     *  statistical outliers in an otherwise-smooth stream. ~70°/tick (1400°/s) is the high end of a real human flick;
+     *  a single-tick turn faster than this while calmly pathing does not match a human. */
+    public final Setting<Double> humanizedLookMaxTurnHardCap = new Setting<>(70.0);
+
     /** Also speed-limit the turn while BREAKING (not just cruising), so tunneling around a corner arcs the head over
      *  a few ticks and mines the swept blocks — instead of a 1-tick 90° snap to each new block center. Off by default
      *  (normal precise mining stays an exact instant aim); the Base Hunter enables it (widening a tunnel corner

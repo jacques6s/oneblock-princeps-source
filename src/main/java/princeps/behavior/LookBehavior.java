@@ -395,9 +395,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                             this.calculateMouseMove(prev.getPitch(), cappedPitch)
                     ).clamp();
                 }
+                // Turn-envelope backstop on the ONLY un-rate-limited apply path: a precise break/place re-aim can be
+                // 90°+ to the side and an airborne parkour retarget can flip ~180° in a single tick. Vanilla imposes
+                // no per-tick rotation limit, so that is not a protocol violation — but a lone superhuman snap inside
+                // an otherwise-smooth capped stream is a statistical outlier that does not match a calmly-pathing
+                // human. The cap spreads it over a few ticks (still fast, still human-possible); the dig/place fires
+                // once isLookingAt catches up. Inert in normal play (every intended delta <= the 55°/tick ballistic
+                // max, well under the cap), so it changes nothing except the rare pathological snap.
                 return new Rotation(
-                        this.calculateMouseMove(prev.getYaw(), desiredYaw),
-                        this.calculateMouseMove(prev.getPitch(), desiredPitch)
+                        this.calculateMouseMove(prev.getYaw(), hardCap(prev.getYaw(), desiredYaw, true)),
+                        this.calculateMouseMove(prev.getPitch(), hardCap(prev.getPitch(), desiredPitch, false))
                 ).clamp();
             }
 
@@ -534,6 +541,18 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
          * Pure function of (error, settings) — no rand — so it is side-effect-free across the multiple peek calls per
          * tick and identical in forked solver predictions.
          */
+        /**
+         * Absolute per-tick delta ceiling — a packet-validity backstop applied to the SENT rotation only (never to
+         * peekRotationExact predictions, which must stay exact for reach/place planning). Normal movement never
+         * exceeds the ballistic max, so this only clamps pathological one-tick snaps (un-capped break re-aim, mid-air
+         * retarget flip) that would otherwise emit a physically impossible rotation packet.
+         */
+        private float hardCap(final float prev, final float target, final boolean yaw) {
+            final float cap = (float) Math.max(1.0, Princeps.settings().humanizedLookMaxTurnHardCap.value);
+            final float delta = yaw ? Mth.degreesDifference(prev, target) : target - prev;
+            return prev + Mth.clamp(delta, -cap, cap);
+        }
+
         private static float proportionalStep(final float error, final double maxStep) {
             final double gain = Math.max(0.05, Princeps.settings().humanizedLookTurnGain.value);
             final double minStep = Math.max(0.5, Princeps.settings().humanizedLookTurnMinSpeed.value);
