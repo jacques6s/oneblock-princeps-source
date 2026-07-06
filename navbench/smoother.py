@@ -92,9 +92,9 @@ def turns(path):
         total += d
     return n, total
 
-# ---- scenarios: (name, grid, start, goal) ; grid = open field minus 'blocked' cells (+ optional hazard) ----
-def field(w, h, blocked=(), hazard=()):
-    return {'w': w, 'h': h, 'blocked': set(blocked), 'hazard': set(hazard)}
+# ---- scenarios: (name, grid, start, goal) ; grid = open field minus 'blocked' cells (+ hazard / lowceil) ----
+def field(w, h, blocked=(), hazard=(), lowceil=()):
+    return {'w': w, 'h': h, 'blocked': set(blocked), 'hazard': set(hazard), 'lowceil': set(lowceil)}
 
 def wall(x, z0, z1):  # vertical wall segment
     return [(x, z) for z in range(z0, z1)]
@@ -110,6 +110,14 @@ def scenarios():
         # corner across the pit (that would walk the bot into lava). Expect the detour to be preserved.
         ("lava_pit",     field(14, 10, hazard=[(x, z) for x in range(5, 9) for z in range(3, 6)]),
                          (0, 4), (13, 4)),
+        # SAFETY: a low-ceiling strip (head obstacle) on the direct line — the body can't fit; the smoother must not
+        # chord across it (canWalkThrough head fails). Detour preserved.
+        ("low_ceiling",  field(14, 10, lowceil=[(x, z) for x in range(5, 9) for z in range(3, 6)]),
+                         (0, 4), (13, 4)),
+        # a genuine 1-wide corridor (thick walls) — a diagonal body clips the walls, so almost nothing merges; the
+        # smoother must keep it essentially lattice (coverage/safety hold, minimal shortening).
+        ("tight_corridor", field(16, 11, wall(0, 0, 4) + wall(0, 6, 11) + [(x, z) for x in range(1, 16) for z in list(range(0, 4)) + list(range(6, 11))]),
+                         (1, 5), (14, 5)),
     ]
 
 def run():

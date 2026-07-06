@@ -205,10 +205,16 @@ class Path extends PathBase {
                 if (best > i) { // merge i..best into one chord
                     final BetterBlockPos src = start.getSrc();
                     final BetterBlockPos dest = movements.get(best).getDest();
-                    double cost = 0;
+                    double summed = 0;
                     for (int k = i; k <= best; k++) {
-                        cost += movements.get(k).getCost(context);
+                        summed += movements.get(k).getCost(context);
                     }
+                    // getCost = min(euclidean chord walked at sprint, summed lattice cost): the chord is the actual
+                    // (shorter) distance the bot walks, so this reflects true cost without ever EXCEEDING the summed
+                    // lattice cost -> the executor's cost-verification (recalc vs self) can never cancel.
+                    final double chord = Math.sqrt((double) (dest.x - src.x) * (dest.x - src.x)
+                            + (double) (dest.z - src.z) * (dest.z - src.z));
+                    final double cost = Math.min(chord * princeps.api.pathing.movement.ActionCosts.SPRINT_ONE_BLOCK_COST, summed);
                     Set<BetterBlockPos> swept = SmoothTraverse.sweptCells(src, dest, 0.35);
                     newMov.add(new SmoothTraverse(context.princeps, src, dest, cost, swept));
                     newPos.add(dest);
