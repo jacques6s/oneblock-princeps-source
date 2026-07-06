@@ -52,6 +52,11 @@ public class SmoothTraverse extends Movement {
         super(princeps, src, dest, new BetterBlockPos[0], null);
         this.precomputedCost = cost;
         this.valid = ImmutableSet.copyOf(sweptCells);
+        // Populate the cached cost field NOW. Unlike lattice movements (which get it via override() during
+        // Path assembly), a SmoothTraverse is synthesized in post-processing and never re-run through runBackwards,
+        // so without this the field stays null and the executor's no-arg getCost() (read before recalculateCost on
+        // a movement's first tick) NPEs the moment a chord starts executing.
+        override(cost);
     }
 
     @Override
