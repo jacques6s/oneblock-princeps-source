@@ -542,7 +542,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // ease quickly toward a fresh uniform offset in [-maxDrift, maxDrift]. Bounded by maxDrift so the walk
                 // stays inside the path corridor; it is only APPLIED while cruising (see peekRotation).
                 if (this.dwellTicks <= 0) {
-                    this.ouYawTarget = (this.rand.nextDouble() * 2.0 - 1.0) * maxDrift;
+                    // Minimal-saccade floor (user spec: straight walking should only ever adjust 0.5..~2*drift deg):
+                    // redraw until the new fixation differs visibly from the current offset, so a saccade is never a
+                    // sub-visible micro twitch. Guarded redraw keeps the rand stream deterministic under fork replay.
+                    final double minSaccade = Math.min(0.5, maxDrift);
+                    double target = (this.rand.nextDouble() * 2.0 - 1.0) * maxDrift;
+                    for (int guard = 0; guard < 8 && Math.abs(target - this.ouYaw) < minSaccade; guard++) {
+                        target = (this.rand.nextDouble() * 2.0 - 1.0) * maxDrift;
+                    }
+                    this.ouYawTarget = target;
                     this.ouPitchTarget = (this.rand.nextDouble() * 2.0 - 1.0) * maxDrift * 0.5;
                     this.dwellTicks = 6 + (int) (this.rand.nextDouble() * 26.0); // hold 6..31 ticks (~0.3–1.6s)
                 }

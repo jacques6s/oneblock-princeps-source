@@ -827,8 +827,10 @@ public final class Settings {
      */
     public final Setting<Boolean> humanizedLook = new Setting<>(true);
 
-    /** Max degrees the humanized yaw may wander from the true heading while cruising (pitch uses half of this). */
-    public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(3.0);
+    /** Max degrees the humanized yaw may wander from the true heading while cruising (pitch uses half of this).
+     *  Saccade-to-saccade changes land in [~0.5, 2*this] degrees — user spec for straight walking: only minimal
+     *  0.5..3 deg head adjustments, no big wobble → default 1.5 (band ±1.5 = max 3 deg change, min 0.5). */
+    public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(1.5);
 
     /** Max degrees of always-on hand micro-tremor (pitch uses ~70% of this). Set to 0 for fully stable cameras. */
     public final Setting<Double> humanizedLookTremorDegrees = new Setting<>(0.14);
