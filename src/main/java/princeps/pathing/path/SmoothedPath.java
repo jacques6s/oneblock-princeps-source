@@ -1,0 +1,68 @@
+/*
+ * This file is part of Princeps.
+ *
+ * Princeps is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Princeps is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with Princeps.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package princeps.pathing.path;
+
+import princeps.api.pathing.goals.Goal;
+import princeps.api.pathing.movement.IMovement;
+import princeps.api.utils.BetterBlockPos;
+import princeps.utils.pathing.PathBase;
+
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * A path whose flat, obstacle-free runs of lattice movements have been string-pulled into taut any-angle
+ * {@link princeps.pathing.movement.movements.SmoothTraverse} chords (see {@code Path.postProcess}). Same start/dest and
+ * goal as the lattice path it was built from; {@code movements.size() == positions.size() - 1} holds by construction
+ * (verified by {@link PathBase#sanityCheck()}).
+ */
+public class SmoothedPath extends PathBase {
+
+    private final List<BetterBlockPos> path;
+    private final List<IMovement> movements;
+    private final int numNodes;
+    private final Goal goal;
+
+    public SmoothedPath(List<BetterBlockPos> positions, List<IMovement> movements, int numNodes, Goal goal) {
+        this.path = positions;
+        this.movements = movements;
+        this.numNodes = numNodes;
+        this.goal = goal;
+        sanityCheck();
+    }
+
+    @Override
+    public Goal getGoal() {
+        return goal;
+    }
+
+    @Override
+    public List<IMovement> movements() {
+        return Collections.unmodifiableList(movements);
+    }
+
+    @Override
+    public List<BetterBlockPos> positions() {
+        return Collections.unmodifiableList(path);
+    }
+
+    @Override
+    public int getNumNodesConsidered() {
+        return numNodes;
+    }
+}

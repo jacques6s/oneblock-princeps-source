@@ -874,6 +874,15 @@ public final class Settings {
      *  slightly is fine there, and it removes the last robotic snap). Never affects place / jump / elytra. */
     public final Setting<Boolean> humanizedLookCapBreakTurn = new Setting<>(false);
 
+    /** ANY-ANGLE path smoothing: after A*, string-pull flat obstacle-free runs of the block-center lattice into taut
+     *  straight SmoothTraverse chords (walk diagonally across many blocks instead of 45/90-deg zig-zags). Shorter and
+     *  much smoother. Collision-safe: a run only merges if every cell the body sweeps along the chord has floor + body
+     *  + head clearance and no hazard, and the merged movement's getValidPositions() = those swept cells so the
+     *  executor gates still pass. DEFAULT OFF — the executor/movement integration is only fully testable in-game; the
+     *  navbench validates the geometry, safety predicate and pursuit-following. Enable only after a live open-ground
+     *  test. */
+    public final Setting<Boolean> smoothPath = new Setting<>(false);
+
     /** Pure-pursuit cruising steer for flat walks (traverse/diagonal): the gaze chases a far carrot ahead on the
      *  path (eyes lead into corners) while the feet follow a near carrot ahead via W/A/D octant inputs — smooth arcs
      *  instead of node-center snaps. Decouples the walked track from the look, so even a slow/smooth look profile

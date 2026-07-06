@@ -22,16 +22,23 @@ import princeps.api.pathing.goals.Goal;
 import princeps.api.pathing.movement.IMovement;
 import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.Helper;
+import princeps.Princeps;
 import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
+import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.Moves;
+import princeps.pathing.movement.movements.MovementDiagonal;
+import princeps.pathing.movement.movements.MovementTraverse;
+import princeps.pathing.movement.movements.SmoothTraverse;
 import princeps.pathing.path.CutoffPath;
+import princeps.pathing.path.SmoothedPath;
 import princeps.utils.pathing.PathBase;
 import com.google.common.collect.Lists;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
+import java.util.Set;
 import java.util.List;
 
 /**
@@ -160,7 +167,84 @@ class Path extends PathBase {
         }
         // more post processing here
         sanityCheck();
+        if (Princeps.settings().smoothPath.value) {
+            IPath smoothed = smoothFlatRuns();
+            if (smoothed != null) {
+                return smoothed;
+            }
+        }
         return this;
+    }
+
+    /**
+     * ANY-ANGLE smoothing: string-pull maximal flat, obstacle-free runs of MovementTraverse/MovementDiagonal into
+     * single straight {@link SmoothTraverse} chords. Greedy line-of-sight: from each kept node, jump to the furthest
+     * node whose direct chord is collision-safe. Returns {@code null} (keep the safe lattice path) on any problem.
+     */
+    private IPath smoothFlatRuns() {
+        try {
+            List<BetterBlockPos> newPos = new ArrayList<>();
+            List<princeps.api.pathing.movement.IMovement> newMov = new ArrayList<>();
+            newPos.add(path.get(0));
+            final int n = movements.size();
+            int i = 0;
+            while (i < n) {
+                final Movement start = movements.get(i);
+                int best = i;
+                if (isFlatMergeable(start)) {
+                    final BetterBlockPos src = start.getSrc();
+                    int k = i;
+                    while (k < n && isFlatMergeable(movements.get(k))
+                            && movements.get(k).getSrc().y == src.y && movements.get(k).getDest().y == src.y) {
+                        if (chordSafe(src, movements.get(k).getDest())) {
+                            best = k;
+                        }
+                        k++;
+                    }
+                }
+                if (best > i) { // merge i..best into one chord
+                    final BetterBlockPos src = start.getSrc();
+                    final BetterBlockPos dest = movements.get(best).getDest();
+                    double cost = 0;
+                    for (int k = i; k <= best; k++) {
+                        cost += movements.get(k).getCost(context);
+                    }
+                    Set<BetterBlockPos> swept = SmoothTraverse.sweptCells(src, dest, 0.35);
+                    newMov.add(new SmoothTraverse(context.princeps, src, dest, cost, swept));
+                    newPos.add(dest);
+                    i = best + 1;
+                } else {
+                    newMov.add(start);
+                    newPos.add(start.getDest());
+                    i++;
+                }
+            }
+            return new SmoothedPath(newPos, newMov, numNodes, goal);
+        } catch (Exception e) {
+            return null; // any failure -> fall back to the proven lattice path
+        }
+    }
+
+    private boolean isFlatMergeable(Movement m) {
+        if (!(m instanceof MovementTraverse) && !(m instanceof MovementDiagonal)) {
+            return false;
+        }
+        if (m.getSrc().y != m.getDest().y) {
+            return false; // only flat runs; ascend/descend/parkour/fall/pillar terminate a run
+        }
+        return m.toBreak(context.bsi).isEmpty() && m.toPlace(context.bsi).isEmpty(); // no dig/place waypoints
+    }
+
+    /** Every cell a 0.7-wide body sweeps along src->dest must have solid floor + clear body + clear head + no hazard. */
+    private boolean chordSafe(BetterBlockPos src, BetterBlockPos dest) {
+        for (BetterBlockPos c : SmoothTraverse.sweptCells(src, dest, 0.35)) {
+            final int x = c.x, y = c.y, z = c.z;
+            if (!MovementHelper.canWalkOn(context, x, y - 1, z, context.get(x, y - 1, z))) return false;
+            if (!MovementHelper.canWalkThrough(context, x, y, z)) return false;
+            if (!MovementHelper.canWalkThrough(context, x, y + 1, z)) return false;
+            if (MovementHelper.avoidWalkingInto(context.get(x, y, z))) return false;
+        }
+        return true;
     }
 
     @Override
