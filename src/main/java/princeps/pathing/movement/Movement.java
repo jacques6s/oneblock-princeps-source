@@ -274,7 +274,11 @@ public abstract class Movement implements IMovement, MovementHelper {
 
     @Override
     public boolean calculatedWhileLoaded() {
-        return calculatedWhileLoaded;
+        // Null-safe: a movement synthesized outside runBackwards (e.g. a SmoothTraverse chord) could miss its
+        // checkLoadedChunk call, and unboxing null here crashed the whole game (live-test crash 2026-07-06).
+        // The creation sites are fixed to call checkLoadedChunk, but a conservative false (= keep the executor's
+        // cost-increase check active) must never be a crash.
+        return calculatedWhileLoaded != null && calculatedWhileLoaded;
     }
 
     @Override

@@ -226,7 +226,13 @@ class Path extends PathBase {
                             + (double) (dest.z - src.z) * (dest.z - src.z));
                     final double cost = Math.min(chord * princeps.api.pathing.movement.ActionCosts.SPRINT_ONE_BLOCK_COST, summed);
                     Set<BetterBlockPos> swept = SmoothTraverse.sweptCells(src, dest, 0.35);
-                    newMov.add(new SmoothTraverse(context.princeps, src, dest, cost, swept));
+                    SmoothTraverse st = new SmoothTraverse(context.princeps, src, dest, cost, swept);
+                    // Synthesized movements MUST replay the full lattice lifecycle: postProcess ran its
+                    // checkLoadedChunk forEach over the ORIGINAL movements before this merge, so without this call
+                    // the chord's boxed calculatedWhileLoaded stays null and the executor's unboxing read
+                    // (PathExecutor cost-increase check) NPE-crashes the game on the chord's first tick.
+                    st.checkLoadedChunk(context);
+                    newMov.add(st);
                     newPos.add(dest);
                     i = best + 1;
                 } else {
