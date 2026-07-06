@@ -333,7 +333,6 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private double curveVel;       // current head-turn speed of the running arc (deg/tick)
         private long tickCount;        // advanced once per tick() — forks replay it deterministically via advance()
         private long curveTickStamp = Long.MIN_VALUE; // last tickCount the curve advanced (gap > 1 tick = fresh arc)
-        private double curveVarAmp;    // this arc's random variance amplitude (drawn per arc: 0.01%..0.1%)
         // Execution-only variance RNG: NEVER drawn from this.rand — the forked solver replays this.rand via tick()
         // and consuming it here would desync its place-predictions from reality. The curve only shapes the APPLY
         // path (predictions use peekRotationExact), so untracked randomness is safe here, like BlockBreakHelper's.
@@ -365,7 +364,6 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.curveVel = source.curveVel;
             this.tickCount = source.tickCount;
             this.curveTickStamp = source.curveTickStamp;
-            this.curveVarAmp = source.curveVarAmp;
         }
 
         final void setPrecise(final boolean precise) {
@@ -487,8 +485,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
          * the straight (yaw,pitch) error vector so the arc is one clean sweep. The velocity advances exactly once
          * per game tick (guarded by {@code tickCount}), so a same-tick re-peek can never double-accelerate; a gap
          * in curve ticks (the arc ended or was interrupted) resets the speed to 0 = the next aim eases in fresh.
-         * Per-arc random variance (amplitude drawn 0.01%..0.1%) makes no two arcs numerically identical, and is
-         * clamped so the mode ceiling is NEVER exceeded. Mouse-quantization happens in calculateMouseMove as usual.
+         * A per-tick ABSOLUTE jitter (0.01..0.1 deg, user spec) makes the plateau breathe around the mode value
+         * (9 -> 8.90..9.10) and keeps the ease-out's mini steps from ever repeating the same number; the soft
+         * ceiling is mode + 0.1. Mouse-quantization happens in calculateMouseMove as usual.
          */
         private Rotation aimCurveTurn(final Rotation prev, final float desiredYaw, final float desiredPitch) {
             final float yawErr = Mth.degreesDifference(prev.getYaw(), desiredYaw);
@@ -499,12 +498,17 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 this.curveTickStamp = this.tickCount;
                 if (fresh) {
                     this.curveVel = 0.0;
-                    this.curveVarAmp = 1.0e-4 + this.curveRng.nextDouble() * 9.0e-4; // 0.01%..0.1% per arc
                 }
                 final double peak = aimCurvePeak();
                 double v = aimCurveNextVel(this.curveVel, errMag, peak);
-                v *= 1.0 + (this.curveRng.nextDouble() * 2.0 - 1.0) * this.curveVarAmp;
-                this.curveVel = Math.min(v, peak); // variance never lifts the speed above the mode's hard ceiling
+                // Per-tick ABSOLUTE jitter, magnitude 0.01..0.1 deg (user spec): the plateau BREATHES around the
+                // mode value (9 -> 8.90..9.10) instead of stagnating on the identical number tick after tick, and
+                // the ease-out's mini steps are never numerically the same twice. Soft ceiling = mode + 0.1 (the
+                // user's own example: 9.09 is fine at mode 9). Also spreads the first arc step (~peak/3 +- jitter),
+                // removing the constant-first-step histogram spike flagged in the mining-session audit.
+                final double jitterMag = 0.01 + this.curveRng.nextDouble() * 0.09;
+                v += this.curveRng.nextBoolean() ? jitterMag : -jitterMag;
+                this.curveVel = Math.max(0.3, Math.min(v, peak + 0.1));
             }
             final double step = Math.min(errMag, this.curveVel);
             final double s = errMag > 1e-9 ? step / errMag : 0.0;

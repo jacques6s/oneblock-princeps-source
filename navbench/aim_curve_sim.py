@@ -29,16 +29,17 @@ def curve_next_vel(v_prev, err, peak):
     tail = max(tail_min, err * gain)
     return min(rise, tail)
 
-def run_arc(err0, peak, var_amp=0.0, rng=None, max_ticks=400):
-    """simulate one aim arc; returns (steps, vels)"""
+def run_arc(err0, peak, jitter=False, rng=None, max_ticks=400):
+    """simulate one aim arc; returns (steps, vels). jitter = per-tick ABSOLUTE 0.01..0.1 deg (user spec):
+    the plateau breathes around the mode value (soft ceiling mode+0.1) and no velocity repeats twice."""
     err = err0; v = 0.0; steps = []; vels = []
     for _ in range(max_ticks):
         if err <= 1e-3:
             break
         v = curve_next_vel(v, err, peak)
-        if var_amp and rng is not None:
-            v *= 1.0 + (rng.random() * 2.0 - 1.0) * var_amp
-            v = min(v, peak)                    # ceiling holds even with variance
+        if jitter and rng is not None:
+            jm = 0.01 + rng.random() * 0.09
+            v = max(0.3, min(v + (jm if rng.random() < 0.5 else -jm), peak + 0.1))
         step = min(err, v)
         steps.append(step); vels.append(v)
         err -= step
@@ -94,15 +95,18 @@ def main():
     print(f"  accel improvement : {steps_old[0]/a_new:.1f}x lower peak acceleration; arrival +{len(steps_new)-len(steps_old)} ticks")
     print()
 
-    print("== variance band: 400 arcs @ 90 deg, standard, amp per-arc in [0.01%,0.1%] ==")
-    v_ceil_breaches = 0; tick_counts = set(); vmaxes = []
+    print("== jitter band: 400 arcs @ 90 deg, standard — plateau must BREATHE (no repeats), ceiling 9.10 ==")
+    v_ceil_breaches = 0; stagnant = 0; tick_counts = set(); vmaxes = []
     for _ in range(400):
-        amp = 1.0e-4 + rng.random() * 9.0e-4
-        steps, vels = run_arc(90.0, 9.0, var_amp=amp, rng=rng)
-        if max(vels) > 9.0 + 1e-9:
+        steps, vels = run_arc(90.0, 9.0, jitter=True, rng=rng)
+        if max(vels) > 9.1 + 1e-9:
             v_ceil_breaches += 1
+        for i in range(len(vels) - 1):
+            if abs(vels[i+1] - vels[i]) < 1e-9:
+                stagnant += 1
         tick_counts.add(len(steps)); vmaxes.append(max(vels))
-    print(f"  ceiling breaches: {v_ceil_breaches} (MUST be 0) | vMax range: {min(vmaxes):.4f}..{max(vmaxes):.4f} | arc lengths seen: {sorted(tick_counts)}")
+    print(f"  ceiling(9.10) breaches: {v_ceil_breaches} (MUST be 0) | consecutive-identical velocities: {stagnant} (MUST be 0)")
+    print(f"  vMax range: {min(vmaxes):.3f}..{max(vmaxes):.3f} | arc lengths seen: {sorted(tick_counts)}")
     print()
 
     print("== hold-on-target: tremor-sized corrections (<=0.5 deg) while mining must stay sub-degree ==")

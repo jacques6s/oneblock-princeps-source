@@ -879,8 +879,9 @@ public final class Settings {
     /** Human ACCELERATION BELL for the mining aim (requires {@link #humanizedLookCapBreakTurn}): instead of jumping
      *  straight to the max turn rate (a visible velocity kick), the head EASES IN (accelerates ~peak/3 per tick^2),
      *  rides the mode's peak, then EASES OUT proportionally into the target — the classic fast-rise/long-tail human
-     *  re-aim curve. A tiny per-arc random variance (0.01%..0.1%) makes no two arcs numerically identical; the mode
-     *  ceiling is never exceeded. Sim-validated (navbench/aim_curve_sim.py): peak accel 3x lower than the flat
+     *  re-aim curve. A per-tick absolute jitter (0.01..0.1 deg) makes the plateau breathe around the mode value
+     *  (9 -> 8.90..9.10, soft ceiling mode + 0.1) and keeps every mini step numerically distinct — the curve never
+     *  stagnates on one repeated number. Sim-validated (navbench/aim_curve_sim.py): peak accel 3x lower than the flat
      *  rate-limit, 30x lower than the old snap; tremor-sized corrections stay sub-degree so the crosshair never
      *  leaves the block face (the break keeps firing). */
     public final Setting<Boolean> humanizedLookAimCurve = new Setting<>(true);
