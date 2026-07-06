@@ -738,8 +738,12 @@ public interface MovementHelper extends ActionCosts, Helper {
                 segT = t;
             }
         }
-        final double[] far = advanceAlong(nodes, segI, segT, end, 3.2);
-        final double[] near = advanceAlong(nodes, segI, segT, end, 0.7);
+        // Lookahead distances are settings so the feel can be tuned live (sim-validated window: near <= ~0.7 keeps
+        // 100% node coverage; larger near cuts corners harder and starts skipping node columns).
+        final double gazeAhead = Math.max(1.0, Princeps.settings().humanizedSteeringGazeBlocks.value);
+        final double trackAhead = Mth.clamp(Princeps.settings().humanizedSteeringTrackBlocks.value.doubleValue(), 0.3, 0.7);
+        final double[] far = advanceAlong(nodes, segI, segT, end, gazeAhead);
+        final double[] near = advanceAlong(nodes, segI, segT, end, trackAhead);
         // gaze: far carrot, current pitch (nudgeToLevel + the humanized shaping own the rest)
         state.setTarget(new MovementTarget(
                 RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
