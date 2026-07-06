@@ -98,4 +98,21 @@ public class SmoothTraverseTest {
         assertTrue(cells.contains(a));
         assertFalse("a zero-length chord must not sweep foreign cells", cells.contains(new BetterBlockPos(6, 64, 6)));
     }
+
+    @Test
+    public void safetyMarginCatchesTheKnifeEdgeGraze() {
+        // A concrete grazing chord (0,64,0)->(7,64,3) passes right at the corner of cell (2,64,2). Verified in the
+        // navbench margin probe: at half=0.30 (the exact 0.6-wide body, ZERO margin) the swept corners never floor
+        // into (2,2) — the body clears it by a knife's edge; at the deployed half=0.35 the AABB corner pokes into
+        // (2,2), so it IS in the swept set and chordSafe() will test it and (it being solid) reject the merge.
+        // This pins WHY the deployed margin is 0.35 not 0.30: the extra 0.05 rejects exactly the grazes a jittering
+        // real body could clip. If anyone loosens the margin toward 0.30, this test fails and flags the safety loss.
+        BetterBlockPos src = new BetterBlockPos(0, 64, 0);
+        BetterBlockPos dest = new BetterBlockPos(7, 64, 3);
+        BetterBlockPos graze = new BetterBlockPos(2, 64, 2);
+        assertFalse("half=0.30 (zero margin) must NOT sweep the graze cell — the body clears it by a knife's edge",
+                SmoothTraverse.sweptCells(src, dest, 0.30).contains(graze));
+        assertTrue("deployed half=0.35 MUST sweep the graze cell so chordSafe rejects a body-clipping chord",
+                SmoothTraverse.sweptCells(src, dest, 0.35).contains(graze));
+    }
 }

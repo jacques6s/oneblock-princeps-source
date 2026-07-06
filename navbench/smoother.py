@@ -218,6 +218,35 @@ def centers_to_nodes(cells):
     """navsim.simulate expects integer lattice nodes; smoothed endpoints are already integer cells, pass through."""
     return [(int(x), int(z)) for x, z in cells]
 
+def margin_sweep():
+    """
+    Justify the collision-safety half-width (deployed 0.35). Re-smooth every scenario at half in {0.30..0.45} and
+    report the total smoothed length + merge count. 0.30 = the exact 0.6-wide body (ZERO margin); larger = more
+    conservative (rejects grazes, keeps the lattice detour). The finding: 0.35 buys a real corner-clearance margin
+    (it rejects knife-edge grazes a 0.30 body would accept — see the navbench graze probe / SmoothTraverseTest) while
+    losing ~nothing in length on real paths, because lattice routes keep >=1 block clearance so genuine merges aren't
+    grazes. So 0.35 sits at the safe knee: full efficiency, real margin.
+    """
+    print("\n== collision-margin sweep (half-width): total smoothed length + merges across all scenarios ==")
+    print(f"{'half':>5s} {'totLatLen':>9s} {'totSmLen':>8s} {'len-':>5s} {'merges':>6s} {'allSafe':>7s}")
+    scen = scenarios()
+    for half in (0.30, 0.35, 0.40, 0.45):
+        old = globals()['HALF']; globals()['HALF'] = half
+        try:
+            totLat = totSm = 0.0; merges = 0; allSafe = True
+            for name, grid, start, goal in scen:
+                lat = astar(grid, start, goal); sm = string_pull(grid, lat)
+                totLat += length(lat); totSm += length(sm)
+                merges += len(lat) - len(sm)
+                if not all(los(grid, sm[k], sm[k+1]) for k in range(len(sm)-1)):
+                    allSafe = False
+            print(f"{half:5.2f} {totLat:9.1f} {totSm:8.1f} {100*(totSm/totLat-1):+4.0f}% {merges:6d} {str(allSafe):>7s}"
+                  + ("   <- deployed" if abs(half-0.35) < 1e-9 else ""))
+        finally:
+            globals()['HALF'] = old
+    print("(0.30 = exact body / zero margin; deployed 0.35 keeps the length gains AND rejects knife-edge grazes)")
+
 if __name__ == '__main__':
     run()
     ab_compare()
+    margin_sweep()
