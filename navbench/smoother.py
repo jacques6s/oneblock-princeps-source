@@ -17,6 +17,7 @@ solid-floor + head-room raytrace, but the geometry (which cells the body sweeps)
 import math, heapq, io, contextlib
 with contextlib.redirect_stdout(io.StringIO()):
     import navsim
+    import analyze
 
 HALF = 0.35   # player half-width + small margin (cells the body sweeps must be clear)
 
@@ -146,5 +147,77 @@ def run():
         print(f"{name:13s} {len(lat):8d} {len(sm):7d} {ll:7.1f} {sl:6.1f} {100*(sl/ll-1):+4.0f}% "
               f"{lt:8d} {st:7d} {lh:7.0f} {sh:6.0f} {str(safe):>4s} {haz:>7s} {follow:>7s}")
 
+def walked_length(tr):
+    """actual distance the BODY travelled through the physics sim (not the polyline length) — the real efficiency."""
+    r = tr.records
+    return sum(math.hypot(r[i+1].x - r[i].x, r[i+1].z - r[i].z) for i in range(len(r)-1))
+
+def head_rate(tr):
+    """peak + rms of the per-tick SENT yaw delta (|dyaw|) — the packet-visible head-turn rate."""
+    d = [abs(q.dyaw) for q in tr.records]
+    peak = max(d, default=0.0)
+    rms = math.sqrt(sum(x*x for x in d)/len(d)) if d else 0.0
+    return peak, rms
+
+def _mean(xs):
+    return sum(xs)/len(xs) if xs else 0.0
+
+def ab_compare(seeds=(1000, 1001, 1002, 1003, 1004, 1005, 1006, 1007)):
+    """
+    OBJECTIVE any-angle measurement: walk the SAME lattice route once as the raw Baritone lattice and once as the
+    string-pulled smoothed polyline, both through the FULL physics + pursuit-steering pipeline (navsim, deployed
+    profile), and report the per-dimension % improvement. This is the honest end-to-end number: it isn't "the geometry
+    is shorter", it's "a body actually walking the smoothed line is measurably smoother AND keeps full coverage".
+    Averaged over seeds because the human-wander layer is stochastic.
+    Dimensions: efficiency (walked length), smoothness/jerk (velDir jerk RMS, sent-yaw angular jerk RMS, head-turn
+    peak), collision-safety (max cross-track), coverage (node hit-rate — must not regress).
+    """
+    print("\n== A/B: lattice vs smoothed, walked through the full physics+steering pipeline (avg over %d seeds) ==" % len(seeds))
+    print(f"{'scenario':13s} {'len_lat':>7s} {'len_sm':>6s} {'len%':>5s} {'vdj_lat':>7s} {'vdj_sm':>6s} {'vdj%':>5s} "
+          f"{'aj_lat':>6s} {'aj_sm':>6s} {'aj%':>5s} {'hd_lat':>6s} {'hd_sm':>6s} {'cov_lat':>7s} {'cov_sm':>6s} {'xt_sm':>5s}")
+    agg = {k: [] for k in ('len', 'vdj', 'aj', 'hd', 'covL', 'covS', 'xt')}
+    for name, grid, start, goal in scenarios():
+        lat = astar(grid, start, goal)
+        sm = string_pull(grid, lat)
+        L = {k: [] for k in ('lenL','lenS','vdjL','vdjS','ajL','ajS','hdL','hdS','covL','covS','xtS')}
+        for sd in seeds:
+            tl = navsim.simulate(centers_to_nodes(lat), navsim.DEPLOYED, seed=sd)
+            ts = navsim.simulate(centers_to_nodes(sm),  navsim.DEPLOYED, seed=sd)
+            sl_, ss_ = analyze.smoothness(tl), analyze.smoothness(ts)
+            L['lenL'].append(walked_length(tl)); L['lenS'].append(walked_length(ts))
+            L['vdjL'].append(sl_['veldir_jump_rms']); L['vdjS'].append(ss_['veldir_jump_rms'])
+            L['ajL'].append(sl_['ang_jerk_rms']); L['ajS'].append(ss_['ang_jerk_rms'])
+            L['hdL'].append(head_rate(tl)[0]); L['hdS'].append(head_rate(ts)[0])
+            L['covL'].append(tl.coverage); L['covS'].append(ts.coverage)
+            L['xtS'].append(max((abs(q.cross) for q in ts.records), default=0.0))
+        lenL, lenS = _mean(L['lenL']), _mean(L['lenS'])
+        vdjL, vdjS = _mean(L['vdjL']), _mean(L['vdjS'])
+        ajL, ajS = _mean(L['ajL']), _mean(L['ajS'])
+        hdL, hdS = _mean(L['hdL']), _mean(L['hdS'])
+        covL, covS = _mean(L['covL']), _mean(L['covS'])
+        xtS = _mean(L['xtS'])
+        pct = lambda a, b: (100*(1 - b/a)) if a > 1e-9 else 0.0   # % reduction (lower is better)
+        agg['len'].append((lenL, lenS)); agg['vdj'].append((vdjL, vdjS)); agg['aj'].append((ajL, ajS))
+        agg['hd'].append((hdL, hdS)); agg['covL'].append(covL); agg['covS'].append(covS); agg['xt'].append(xtS)
+        print(f"{name:13s} {lenL:7.1f} {lenS:6.1f} {pct(lenL,lenS):+4.0f}% {vdjL:7.2f} {vdjS:6.2f} {pct(vdjL,vdjS):+4.0f}% "
+              f"{ajL:6.2f} {ajS:6.2f} {pct(ajL,ajS):+4.0f}% {hdL:6.1f} {hdS:6.1f} {covL*100:6.0f}% {covS*100:5.0f}% {xtS:5.2f}")
+    # aggregate improvement across all scenarios (totals for length, means for jerk)
+    tLenL = sum(a for a, _ in agg['len']); tLenS = sum(b for _, b in agg['len'])
+    mVdjL, mVdjS = _mean([a for a, _ in agg['vdj']]), _mean([b for _, b in agg['vdj']])
+    mAjL, mAjS = _mean([a for a, _ in agg['aj']]), _mean([b for _, b in agg['aj']])
+    mHdL, mHdS = _mean([a for a, _ in agg['hd']]), _mean([b for _, b in agg['hd']])
+    red = lambda a, b: (100*(1 - b/a)) if a > 1e-9 else 0.0
+    print("-" * 118)
+    print("AGGREGATE  walked-length %+.0f%%  | velDir-jerk %+.0f%%  | angular-jerk %+.0f%%  | head-peak %+.0f%%  "
+          "| coverage lat %.0f%% -> sm %.0f%%  | maxXT %.2f"
+          % (red(tLenL, tLenS), red(mVdjL, mVdjS), red(mAjL, mAjS), red(mHdL, mHdS),
+             _mean(agg['covL'])*100, _mean(agg['covS'])*100, _mean(agg['xt'])))
+    print("(positive %% = smoothed is that much better; coverage must stay ~equal = no strand introduced)")
+
+def centers_to_nodes(cells):
+    """navsim.simulate expects integer lattice nodes; smoothed endpoints are already integer cells, pass through."""
+    return [(int(x), int(z)) for x, z in cells]
+
 if __name__ == '__main__':
     run()
+    ab_compare()
