@@ -76,6 +76,13 @@ sourceSets {
         compileClasspath += schematica_api.output
         runtimeClasspath += schematica_api.output
     }
+    // The api/schematica_api classes live in separate source sets; main sees them via the additions above, but the
+    // test source set does not inherit those, so JUnit could not resolve princeps.api.* — which had left the whole
+    // test suite uncompilable since the source-set split. Put the api outputs on the test classpath too.
+    test {
+        compileClasspath += api.output + schematica_api.output
+        runtimeClasspath += api.output + schematica_api.output
+    }
 }
 
 // Add all source sets to main runtime classpath for dev runs and Fabric Loader
