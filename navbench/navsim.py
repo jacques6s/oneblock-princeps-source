@@ -216,11 +216,17 @@ def simulate(nodes, profile, seed=0, flip_at=None, max_ticks=None):
             # cross>0 means the body is left of the path (see cross sign) -> steer right (W+D = -45); else W+A (+45)
             octo = (-45 if cross > 0 else 45) if strafing else 0
         else:
-            # current design: strafe tracks the near-carrot bearing across all 8 octants
+            # SHIPPED design: strafe engages on near-carrot bearing OR lateral cross-track drift (the drift trigger
+            # actuates a forced +-45 toward the line when the bearing sits inside the octant-0 deadzone — matches
+            # MovementHelper.moveAlongPath after the review fix; bearing-only rounding was a no-op there).
             rel = wrap(yaw_to(pos, near) - prev_yaw)
-            if strafing and abs(rel) < p.release_deg: strafing = False
-            elif not strafing and abs(rel) >= p.engage_deg: strafing = True
-            octo = min(OCTANTS, key=lambda o: abs(wrap(rel - o))) if strafing else 0
+            bearing_wants = (abs(rel) >= p.release_deg) if strafing else (abs(rel) >= p.engage_deg)
+            xt_wants = (abs(cross) > p.xt_release) if strafing else (abs(cross) >= p.xt_engage)
+            strafing = bearing_wants or xt_wants
+            if strafing and abs(rel) < 22.5 and abs(cross) > p.xt_release:
+                octo = 45 if cross > 0 else -45
+            else:
+                octo = min(OCTANTS, key=lambda o: abs(wrap(rel - o))) if strafing else 0
             # BOUNDARY HYSTERESIS (the shipped anti-chatter): keep the currently-held octant unless a different one
             # is better by more than boundary_hyst deg — stops the rapid A<->D flip as the bearing hovers on a
             # 45-deg boundary. Matches Princeps MovementHelper.strafeToward.
