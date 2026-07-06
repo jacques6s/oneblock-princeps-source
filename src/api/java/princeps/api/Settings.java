@@ -931,6 +931,21 @@ public final class Settings {
      *  same straight line (no smoothness loss). Set very high to disable the cap. */
     public final Setting<Integer> smoothMaxChord = new Setting<>(24);
 
+    /** Half-width (blocks) of the corridor a {@code smoothPath} chord must verify AND accept as valid positions.
+     *  Must cover the player half-width (0.3) PLUS the realistic pursuit cross-track error (~0.3 before the strafe
+     *  hysteresis corrects), so the body can NEVER clip a wall the merge did not check: 0.65 by default. Wider =
+     *  fewer merges near walls (tight corridors keep exact lattice steps — correct there anyway); the executor's
+     *  valid-position corridor widens equally, so honest drift is never misread as off-path. */
+    public final Setting<Double> smoothPathSweepHalf = new Setting<>(0.65);
+
+    /** Engage the A/D octant strafe when the lateral cross-track drift from the path line reaches this many blocks —
+     *  in ADDITION to the bearing-error trigger. On long any-angle chords a small heading offset INTEGRATES into
+     *  real drift (no 1-block nodes to reset it), so the feet correct early while the smooth gaze stays calm. */
+    public final Setting<Double> humanizedSteeringXtEngage = new Setting<>(0.30);
+
+    /** Release threshold (blocks) for the cross-track strafe of {@link #humanizedSteeringXtEngage} (hysteresis). */
+    public final Setting<Double> humanizedSteeringXtRelease = new Setting<>(0.12);
+
     /** Pure-pursuit cruising steer for flat walks (traverse/diagonal): the gaze chases a far carrot ahead on the
      *  path (eyes lead into corners) while the feet follow a near carrot ahead via W/A/D octant inputs — smooth arcs
      *  instead of node-center snaps. Decouples the walked track from the look, so even a slow/smooth look profile

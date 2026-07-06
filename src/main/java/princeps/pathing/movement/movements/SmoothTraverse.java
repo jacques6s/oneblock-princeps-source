@@ -78,6 +78,22 @@ public class SmoothTraverse extends Movement {
         if (ctx.playerFeet().equals(dest)) {
             return state.setStatus(MovementStatus.SUCCESS);
         }
+        // END-REGION success: the wide valid corridor (smoothPathSweepHalf) extends PAST the endpoint, so a body
+        // that slid just beyond dest (sprint momentum, corner cut) stays "valid" forever while exact-cell equality
+        // can never fire again — the movement would strand until its timeout (bench-caught: stuck-at-goal case).
+        // The chord is factually complete once the body's projection along the chord axis reaches the final half
+        // block, on the chord's own level.
+        if (ctx.playerFeet().y == dest.y) {
+            final double dx = dest.x - src.x, dz = dest.z - src.z;
+            final double len = Math.hypot(dx, dz);
+            if (len > 1e-6) {
+                final net.minecraft.world.phys.Vec3 p = ctx.player().position();
+                final double s = ((p.x - (src.x + 0.5)) * dx + (p.z - (src.z + 0.5)) * dz) / len;
+                if (s >= len - 0.5) {
+                    return state.setStatus(MovementStatus.SUCCESS);
+                }
+            }
+        }
         // Walk the smoothed line: the pure-pursuit follows the (now-sparse) smoothed polyline of the executor's path,
         // and the curvature-slow / octant steering ride on top. SPRINT is held; the curvature-slow releases it at bends.
         MovementHelper.moveAlongPath(princeps, state, dest);

@@ -111,14 +111,38 @@ public class PathExecutor implements IPathExecutor, Helper {
                     return false;
                 }
             }
-            for (int i = pathPosition + 3; i < path.length() - 1; i++) { //dont check pathPosition+1. the movement tells us when it's done (e.g. sneak placing)
-                // also don't check pathPosition+2 because reasons
-                if (((Movement) path.movements().get(i)).getValidPositions().contains(whereAmI)) {
+            // Forward skip. The original rule (start at +3, land-on-node i-1 semantics: "the movement tells us
+            // when it's done, e.g. sneak placing") stays for plain lattice chains — but any-angle chords need two
+            // additional, bench-derived recoveries at +1/+2 (executor-sim, 300 maps, 0 fails only with BOTH):
+            //  (a) feet INSIDE a chord candidate's swept corridor: momentum from a fall/splice lands the body
+            //      several blocks INTO the next chord (live-reproduced: "taken too long (114 ticks, expected
+            //      13.17)" + FAR AWAY drift arcs) — jump straight ONTO the chord (p = i; the classic i-1 would
+            //      strand, its dest is already behind the feet).
+            //  (b) feet EXACTLY ON a lattice candidate's dest cell: sprint momentum barrels through a short
+            //      lattice step sandwiched behind a chord — exact dest-cell equality (including y) means that
+            //      walk is factually complete; a body cannot stand there while still mid-action on the current
+            //      movement. Jump onto it (p = i; it reports SUCCESS immediately).
+            // FAR skips (>= +3) never enter a chord: the wide corridors of PARALLEL path rows (switchbacks)
+            // overlap, and a far jump onto the wrong end of one ping-pongs the executor (bench-caught).
+            for (int i = pathPosition + 1; i < path.length() - 1; i++) {
+                final Movement candidate = (Movement) path.movements().get(i);
+                final boolean chordCandidate = candidate instanceof SmoothTraverse;
+                boolean jumpTo = false;
+                if (i < pathPosition + 3) {
+                    jumpTo = (chordCandidate && candidate.getValidPositions().contains(whereAmI))
+                            || (!chordCandidate && candidate.getDest().equals(whereAmI));
+                    if (!jumpTo) {
+                        continue;
+                    }
+                } else if (chordCandidate) {
+                    continue;
+                }
+                if (jumpTo || candidate.getValidPositions().contains(whereAmI)) {
                     if (i - pathPosition > 2) {
                         logDebug("Skipping forward " + (i - pathPosition) + " steps, to " + i);
                     }
-                    //System.out.println("Double skip sundae");
-                    pathPosition = i - 1;
+                    //System.out.println("Double skip sundae")
+                    pathPosition = jumpTo ? i : i - 1;
                     onChangeInPathPosition();
                     onTick();
                     return false;

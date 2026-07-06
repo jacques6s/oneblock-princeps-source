@@ -29,11 +29,25 @@ class Chord:
     def __init__(self, src, dest):
         self.src, self.dest = src, dest
         cheb = max(abs(dest[0]-src[0]), abs(dest[1]-src[1]))
-        if cheb > 1:   # merged any-angle chord: valid = exact swept supercover (matches SmoothTraverse)
-            self.valid = set(S.swept_cells(src, dest, 0.35)) | {src, dest}
+        self.is_chord = cheb > 1
+        if self.is_chord:  # merged any-angle chord: valid = exact swept supercover (matches SmoothTraverse)
+            self.valid = set(S.swept_cells(src, dest, 0.65)) | {src, dest}   # matches smoothPathSweepHalf
         else:          # plain lattice step (matches MovementTraverse/Diagonal validPositions)
             self.valid = {src, dest}
-        self.cost = math.hypot(dest[0]-src[0], dest[1]-src[1]) * SPRINT_ONE_BLOCK_COST
+        self.len = math.hypot(dest[0]-src[0], dest[1]-src[1])
+        self.axis = ((dest[0]-src[0])/self.len, (dest[1]-src[1])/self.len) if self.len > 0 else (0.0, 0.0)
+        self.cost = self.len * SPRINT_ONE_BLOCK_COST
+
+    def done(self, pos, feet):
+        """chord SUCCESS: exact dest cell OR the body has reached/passed the END REGION along the chord axis.
+        The wide (0.65) valid corridor extends past the endpoint, so a body hovering just beyond dest stays
+        'valid' forever and exact-cell equality alone can never fire (bench-caught stuck-at-goal case)."""
+        if feet == self.dest:
+            return True
+        if not self.is_chord:
+            return False
+        s = (pos[0]-(self.src[0]+0.5))*self.axis[0] + (pos[1]-(self.src[1]+0.5))*self.axis[1]
+        return s >= self.len - 0.5
 
 def run_executor(poly, profile, seed=0, max_ticks=6000):
     """walk the polyline through pursuit physics + the executor state machine; returns (ok, reason, stats)."""
@@ -64,13 +78,34 @@ def run_executor(poly, profile, seed=0, max_ticks=6000):
                         p, ticks_on, jumped = i, 0, True
                         break
                 if not jumped:
-                    for i in range(p+3, len(movements)-1):   # forward skip, starts at +3 like the real one
-                        if feet in movements[i].valid:
-                            p, ticks_on, jumped = i, 0, True
-                            break
+                    # forward skip around CHORD gaps: at +1/+2 accept (a) a chord candidate containing the feet
+                    # (fall/splice landing INTO the chord; jump straight onto it: p=i), or (b) when the CURRENT
+                    # movement is an action-free chord, a lattice candidate whose DEST the feet already reached
+                    # (the body overshot the chord's end cell past the short following steps; p=i -> the candidate
+                    # SUCCEEDs instantly). FAR skips (>= +3) never enter a chord: the wide 0.65 corridors of
+                    # parallel path rows (switchbacks) overlap and a far jump ping-pongs (bench-caught). Plain
+                    # lattice chains keep the original +3 threshold and land-on-node i-1 semantics.
+                    for i in range(p+1, len(movements)):
+                        chord_cand = max(abs(movements[i].dest[0]-movements[i].src[0]),
+                                         abs(movements[i].dest[1]-movements[i].src[1])) > 1
+                        if i < p+3:
+                            if chord_cand and feet in movements[i].valid:
+                                p, ticks_on, jumped = i, 0, True
+                                break
+                            if not chord_cand and feet == movements[i].dest:
+                                # exact dest-cell equality = that movement's walk is factually complete (a body
+                                # can't stand on p+1/p+2's dest while still mid-action on p) -> advance onto it
+                                p, ticks_on, jumped = i, 0, True
+                                break
+                        else:
+                            if chord_cand:
+                                continue
+                            if feet in movements[i].valid:
+                                p, ticks_on, jumped = max(p, i-1), 0, True
+                                break
                 if jumped:
                     continue
-            if feet == m.dest:                            # SmoothTraverse SUCCESS
+            if m.done(pos, feet):                         # SmoothTraverse SUCCESS (dest cell or end region)
                 p += 1; ticks_on = 0
                 continue
             break

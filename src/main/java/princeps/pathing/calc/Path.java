@@ -225,7 +225,7 @@ class Path extends PathBase {
                     final double chord = Math.sqrt((double) (dest.x - src.x) * (dest.x - src.x)
                             + (double) (dest.z - src.z) * (dest.z - src.z));
                     final double cost = Math.min(chord * princeps.api.pathing.movement.ActionCosts.SPRINT_ONE_BLOCK_COST, summed);
-                    Set<BetterBlockPos> swept = SmoothTraverse.sweptCells(src, dest, 0.35);
+                    Set<BetterBlockPos> swept = SmoothTraverse.sweptCells(src, dest, sweepHalf());
                     SmoothTraverse st = new SmoothTraverse(context.princeps, src, dest, cost, swept);
                     // Synthesized movements MUST replay the full lattice lifecycle: postProcess ran its
                     // checkLoadedChunk forEach over the ORIGINAL movements before this merge, so without this call
@@ -257,9 +257,15 @@ class Path extends PathBase {
         return m.toBreak(context.bsi).isEmpty() && m.toPlace(context.bsi).isEmpty(); // no dig/place waypoints
     }
 
-    /** Every cell a 0.7-wide body sweeps along src->dest must have solid floor + clear body + clear head + no hazard. */
+    /** The corridor half-width a chord must verify: body half-width + realistic pursuit cross-track error. */
+    private static double sweepHalf() {
+        return Math.max(0.35, Princeps.settings().smoothPathSweepHalf.value);
+    }
+
+    /** Every cell the corridor (body + tracking error) covers along src->dest must have solid floor + clear body +
+     *  clear head + no hazard — the body may legitimately occupy any of it while the strafe hysteresis corrects. */
     private boolean chordSafe(BetterBlockPos src, BetterBlockPos dest) {
-        for (BetterBlockPos c : SmoothTraverse.sweptCells(src, dest, 0.35)) {
+        for (BetterBlockPos c : SmoothTraverse.sweptCells(src, dest, sweepHalf())) {
             final int x = c.x, y = c.y, z = c.z;
             if (!MovementHelper.canWalkOn(context, x, y - 1, z, context.get(x, y - 1, z))) return false;
             if (!MovementHelper.canWalkThrough(context, x, y, z)) return false;

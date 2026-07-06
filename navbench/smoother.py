@@ -19,7 +19,7 @@ with contextlib.redirect_stdout(io.StringIO()):
     import navsim
     import analyze
 
-HALF = 0.35   # player half-width + small margin (cells the body sweeps must be clear)
+HALF = 0.65   # corridor half-width: body half (0.3) + realistic pursuit cross-track (~0.3) — matches smoothPathSweepHalf
 
 def walkable(grid, cx, cz):
     # solid floor + clear body/head, and NOT a hazard. In Princeps this is the real
@@ -167,10 +167,12 @@ def run():
         sm = string_pull(grid, lat)
         ll, sl = length(lat), length(sm)
         lt, lh = turns(lat); st, sh = turns(sm)
-        safe = all(los(grid, sm[k], sm[k+1]) for k in range(len(sm)-1))
+        chord = lambda a, b: max(abs(b[0]-a[0]), abs(b[1]-a[1])) > 1
+        safe = all(los(grid, sm[k], sm[k+1]) for k in range(len(sm)-1) if chord(sm[k], sm[k+1]))
         # explicit hazard check (independent of los, via the exact swept-cell set): must touch NO hazard cell
         hazard_hit = any(crosses_hazard(grid, cx, cz)
-                         for k in range(len(sm)-1) for cx, cz in swept_cells(sm[k], sm[k+1], HALF))
+                         for k in range(len(sm)-1) if chord(sm[k], sm[k+1])
+                         for cx, cz in swept_cells(sm[k], sm[k+1], HALF))
         # followability: feed the smoothed polyline to the real pursuit sim (deployed profile)
         tr = navsim.simulate(list(sm), navsim.DEPLOYED, seed=1000)
         follow = "cov%d%% xt%.2f" % (round(tr.coverage*100), max((abs(q.cross) for q in tr.records), default=0))
@@ -261,7 +263,7 @@ def margin_sweep():
     print("\n== collision-margin sweep (half-width): total smoothed length + merges across all scenarios ==")
     print(f"{'half':>5s} {'totLatLen':>9s} {'totSmLen':>8s} {'len-':>5s} {'merges':>6s} {'allSafe':>7s}")
     scen = scenarios()
-    for half in (0.30, 0.35, 0.40, 0.45):
+    for half in (0.30, 0.35, 0.45, 0.65):
         old = globals()['HALF']; globals()['HALF'] = half
         try:
             totLat = totSm = 0.0; merges = 0; allSafe = True
@@ -272,7 +274,7 @@ def margin_sweep():
                 if not all(los(grid, sm[k], sm[k+1]) for k in range(len(sm)-1)):
                     allSafe = False
             print(f"{half:5.2f} {totLat:9.1f} {totSm:8.1f} {100*(totSm/totLat-1):+4.0f}% {merges:6d} {str(allSafe):>7s}"
-                  + ("   <- deployed" if abs(half-0.35) < 1e-9 else ""))
+                  + ("   <- deployed" if abs(half-0.65) < 1e-9 else ""))
         finally:
             globals()['HALF'] = old
     print("(0.30 = exact body / zero margin; deployed 0.35 keeps the length gains AND rejects knife-edge grazes)")
@@ -345,11 +347,16 @@ def random_stress(n_maps=600, n_sim=100, seed=7, gen=None, name="random-terrain"
             continue
         valid += 1
         sm = string_pull(grid, lat)
-        # SAFETY (the assertion that matters): every smoothed segment body-safe + hazard-free
-        seg_safe = all(los(grid, sm[k], sm[k + 1]) for k in range(len(sm) - 1))
-        # independent hazard cross-check via the exact swept-cell set (a finer step than the old los would have missed)
+        # SAFETY (the assertion that matters): every MERGED chord (len>1) must satisfy the full corridor; unit
+        # steps are original lattice movements whose walkability the pather itself guarantees (node-to-node),
+        # not a corridor property — asserting the wide corridor on them would flag legitimate 1-wide passages.
+        def is_chord(a, b):
+            return max(abs(b[0] - a[0]), abs(b[1] - a[1])) > 1
+        seg_safe = all(los(grid, sm[k], sm[k + 1])
+                       for k in range(len(sm) - 1) if is_chord(sm[k], sm[k + 1]))
         haz = any(crosses_hazard(grid, cx, cz)
-                  for k in range(len(sm) - 1) for cx, cz in swept_cells(sm[k], sm[k + 1], HALF))
+                  for k in range(len(sm) - 1) if is_chord(sm[k], sm[k + 1])
+                  for cx, cz in swept_cells(sm[k], sm[k + 1], HALF))
         if not seg_safe or haz:
             safety_violations += 1
         if length(sm) > length(lat) + 1e-6:

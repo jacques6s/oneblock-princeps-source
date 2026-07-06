@@ -691,15 +691,13 @@ public interface MovementHelper extends ActionCosts, Helper {
         }
         // Collision safety: the pure-pursuit line cuts a corner by up to ~0.5 blocks INSIDE the corner node, which
         // in a tight/just-dug 1-wide corridor can clip the still-solid diagonal wall block. The instant we actually
-        // touch a wall, revert to the exact node aim (node-to-node is guaranteed walkable by the pather), which
-        // pulls us straight back onto the path and clears the wall. Self-correcting: next unobstructed tick the
-        // smooth line resumes. This makes the deviation strictly bounded and collision-safe.
-        if (ctx.player().horizontalCollision) {
-            Steering.strafing = false;
-            Steering.hasHeld = false;
-            moveTowards(ctx, state, classicAim);
-            return;
-        }
+        // touch a wall, revert to an exact LOCAL aim that pulls us straight back onto the path and clears the wall.
+        // Self-correcting: next unobstructed tick the smooth line resumes. NOTE: the aim must be LOCAL — classicAim
+        // is the movement's dest, which for a SmoothTraverse chord can be 20+ blocks away; beelining at a distant
+        // dest from an off-path position leaves the collision-verified corridor entirely. The near-carrot fallback
+        // below (inside the windowed section) handles the on-path case; this early exit only remains for the
+        // no-path/degenerate cases where classicAim is the adjacent lattice node anyway.
+        final boolean collided = ctx.player().horizontalCollision;
         princeps.api.pathing.path.IPathExecutor exec = princeps.getPathingBehavior().getCurrent();
         if (exec == null || exec.getPath() == null) {
             moveTowards(ctx, state, classicAim);
@@ -747,6 +745,20 @@ public interface MovementHelper extends ActionCosts, Helper {
         final double trackAhead = Mth.clamp(Princeps.settings().humanizedSteeringTrackBlocks.value.doubleValue(), 0.3, 0.7);
         final double[] far = advanceAlong(nodes, segI, segT, end, gazeAhead);
         final double[] near = advanceAlong(nodes, segI, segT, end, trackAhead);
+        if (collided) {
+            // LOCAL collision recovery: exact-aim at the near carrot's cell (<= trackAhead blocks ahead ON the
+            // path), which pulls the body straight back into the verified corridor — never at a distant chord dest.
+            Steering.strafing = false;
+            Steering.hasHeld = false;
+            moveTowards(ctx, state, new BetterBlockPos((int) Math.floor(near[0]), y, (int) Math.floor(near[1])));
+            return;
+        }
+        // signed cross-track distance to the projected segment (for the A/D drift correction below)
+        final double pax = nodes.get(segI).x + 0.5, paz = nodes.get(segI).z + 0.5;
+        final double pbx = nodes.get(segI + 1).x + 0.5, pbz = nodes.get(segI + 1).z + 0.5;
+        final double segLen = Math.hypot(pbx - pax, pbz - paz);
+        final double crossTrack = segLen < 1e-6 ? 0.0
+                : ((player.x - pax) * (pbz - paz) - (player.z - paz) * (pbx - pax)) / segLen;
         // gaze: far carrot, current pitch (nudgeToLevel + the humanized shaping own the rest)
         state.setTarget(new MovementTarget(
                 RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
@@ -754,11 +766,21 @@ public interface MovementHelper extends ActionCosts, Helper {
                         ctx.playerRotations()).withPitch(ctx.playerRotations().getPitch()),
                 false
         ));
-        // track: near carrot via the octant inputs, with engage/release hysteresis around plain W
+        // track: near carrot via the octant inputs, with engage/release hysteresis around plain W. Engagement is
+        // driven by BOTH the bearing error AND the lateral cross-track drift: on a long any-angle chord a small,
+        // persistent heading offset INTEGRATES into real lateral drift (nodes are no longer 1 block apart to reset
+        // it), so the feet must correct with A/D before the drift grows — the user-requested "use A and D actively
+        // so the body follows the plan despite the smooth slow gaze". Direction still comes from the near carrot
+        // (back-to-the-line + forward), so this only engages the existing octant mechanism earlier, never replaces it.
         float idealYaw = RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
                 new Vec3(near[0], ctx.playerHead().y, near[1]), ctx.playerRotations()).getYaw();
         float rel = Math.abs(Mth.degreesDifference(ctx.playerRotations().getYaw(), idealYaw));
-        if (Steering.strafing ? rel < 12f : rel < 25f) {
+        final double xtEngage = Math.max(0.05, Princeps.settings().humanizedSteeringXtEngage.value);
+        final double xtRelease = Mth.clamp(Princeps.settings().humanizedSteeringXtRelease.value, 0.0, xtEngage);
+        final boolean bearingWants = Steering.strafing ? rel >= 12f : rel >= 25f;
+        final boolean xtWants = Steering.strafing ? Math.abs(crossTrack) > xtRelease
+                : Math.abs(crossTrack) >= xtEngage;
+        if (!bearingWants && !xtWants) {
             Steering.strafing = false;
             Steering.hasHeld = false;
             state.setInput(Input.MOVE_FORWARD, true);
