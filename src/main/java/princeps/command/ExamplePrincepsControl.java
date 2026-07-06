@@ -61,10 +61,17 @@ public class ExamplePrincepsControl extends Behavior implements Helper {
     public void onSendChatMessage(ChatEvent event) {
         String msg = event.getMessage();
         String prefix = settings.prefix.value;
+        String secondary = settings.secondaryPrefix.value;
         boolean forceRun = msg.startsWith(FORCE_COMMAND_PREFIX);
-        if ((settings.prefixControl.value && msg.startsWith(prefix)) || forceRun) {
+        boolean primaryHit = settings.prefixControl.value && msg.startsWith(prefix);
+        // secondary always-available prefix: rescue hatch when the host client's own command system swallows the
+        // configured prefix before it reaches this hook (e.g. a "."-prefixed client cancelling ".princeps ...").
+        boolean secondaryHit = !primaryHit && settings.prefixControl.value
+                && !secondary.isEmpty() && msg.startsWith(secondary);
+        if (primaryHit || secondaryHit || forceRun) {
             event.cancel();
-            String commandStr = msg.substring(forceRun ? FORCE_COMMAND_PREFIX.length() : prefix.length());
+            String commandStr = msg.substring(forceRun ? FORCE_COMMAND_PREFIX.length()
+                    : primaryHit ? prefix.length() : secondary.length());
             if (!runCommand(commandStr) && !commandStr.trim().isEmpty()) {
                 new CommandNotFoundException(CommandManager.expand(commandStr).getA()).handle(null, null);
             }

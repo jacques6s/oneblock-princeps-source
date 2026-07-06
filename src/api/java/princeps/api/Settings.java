@@ -989,6 +989,14 @@ public final class Settings {
     public final Setting<String> prefix = new Setting<>("#");
 
     /**
+     * A SECONDARY always-available command prefix (empty string disables). Rescue hatch for host clients whose own
+     * chat-command system swallows the configured {@link #prefix} before it ever reaches Princeps' outgoing-chat
+     * hook — e.g. a client with prefix "." cancels ".princeps ..." as an unknown client command, so Princeps never
+     * sees it. The secondary prefix should be chosen to NOT collide with the host client's prefix.
+     */
+    public final Setting<String> secondaryPrefix = new Setting<>("#");
+
+    /**
      * Use a short Princeps prefix [B] instead of [Princeps] when logging to chat
      */
     public final Setting<Boolean> shortPrincepsPrefix = new Setting<>(false);
