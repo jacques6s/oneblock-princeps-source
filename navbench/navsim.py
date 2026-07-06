@@ -52,6 +52,7 @@ class Profile:
     xt_engage: float = 0.30       # crosstrack strafe engage (blocks of lateral drift)
     xt_release: float = 0.12      # crosstrack strafe release (hysteresis)
     curve_slow: bool = False      # slow into sharp bends (human speed modulation) — enables tight yaw+W cornering
+    discrete_speed: bool = False  # use MC's 3 real speed levels (sprint/walk/sneak) instead of a continuous factor
     curve_lookahead: float = 2.4  # blocks ahead to measure upcoming path curvature
     min_speed_factor: float = 0.42  # hardest slow-in (fraction of sprint accel) at the sharpest bend
     boundary_hyst: float = 20.0   # deg margin to switch octant (SHIPPED anti-chatter; humanizedSteeringHysteresis)
@@ -59,9 +60,9 @@ class Profile:
     cruise_pitch_cap: float = 999.0 # hard smoothness cap on the per-tick sent pitch change (deg)
 
 DEPLOYED = Profile("deployed", gain=0.55, min_step=8.0, max_step=55.0, drift_deg=3.0, tremor_deg=0.14,
-                   cruise_yaw_cap=9.0, cruise_pitch_cap=15.0)
+                   cruise_yaw_cap=9.0, cruise_pitch_cap=15.0, curve_slow=True, discrete_speed=True)
 INTENDED = Profile("intended", gain=0.22, min_step=1.6, max_step=24.0, drift_deg=0.0, tremor_deg=0.0,
-                   cruise_yaw_cap=9.0, cruise_pitch_cap=15.0)
+                   cruise_yaw_cap=9.0, cruise_pitch_cap=15.0, curve_slow=True, discrete_speed=True)
 
 def min_count(sens):
     f = sens * 0.6 + 0.2
@@ -242,7 +243,12 @@ def simulate(nodes, profile, seed=0, flip_at=None, max_ticks=None):
             a1 = advance(pts, i, t, end, 0.2 + p.curve_lookahead * 0.5)
             a2 = advance(pts, i, t, end, 0.2 + p.curve_lookahead)
             bend = abs(wrap(yaw_to(a1, a2) - yaw_to(a0, a1)))          # heading change over the lookahead
-            speed_factor = 1.0 - (1.0 - p.min_speed_factor) * min(1.0, bend / 90.0)
+            if p.discrete_speed:
+                # SHIPPED mechanic: release sprint -> walk (0.77) at a sharp bend; no sneak. Matches
+                # MovementHelper.moveAlongPath humanizedSteeringCurveSlow / humanizedSteeringSlowBend.
+                speed_factor = 0.77 if bend >= 22 else 1.0
+            else:
+                speed_factor = 1.0 - (1.0 - p.min_speed_factor) * min(1.0, bend / 90.0)
         sprint = fwd and speed_factor > 0.85   # only truly sprint when not slowing for a bend
 
         # --- MC ground physics: v += accel*dir ; pos += v ; v *= friction ---

@@ -890,6 +890,15 @@ public final class Settings {
      *  sim shows larger values cut corners harder and start missing node columns (coverage loss). */
     public final Setting<Double> humanizedSteeringTrackBlocks = new Setting<>(0.7);
 
+    /** Release sprint (walk speed) approaching a sharp path bend so the tight per-tick head cap can trace the corner
+     *  as a smooth curve instead of the faster body carrying wide into a strafe. Bench: corner velocity-jerk ~-70%,
+     *  node coverage unchanged, ~+6% time. Straights keep sprinting. */
+    public final Setting<Boolean> humanizedSteeringCurveSlow = new Setting<>(true);
+
+    /** Upcoming-bend threshold (degrees over the next ~2.4 blocks of path) at/above which humanizedSteeringCurveSlow
+     *  eases off sprint. Lower = slows for gentler bends (smoother, a touch slower). */
+    public final Setting<Double> humanizedSteeringSlowBend = new Setting<>(22.0);
+
     /** Boundary hysteresis (degrees) for the humanizedSteering octant strafe: the held W/A/D combo is kept unless a
      *  different octant is better by more than this margin, so the strafe input does not chatter (flip A<->D every
      *  couple ticks) as the bearing hovers on a 45-degree boundary. Bench: ~20-30% fewer octant toggles on winding
