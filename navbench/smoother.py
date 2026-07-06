@@ -21,10 +21,19 @@ with contextlib.redirect_stdout(io.StringIO()):
 HALF = 0.35   # player half-width + small margin (cells the body sweeps must be clear)
 
 def walkable(grid, cx, cz):
-    return 0 <= cx < grid['w'] and 0 <= cz < grid['h'] and (cx, cz) not in grid['blocked']
+    # solid floor + clear body/head, and NOT a hazard. In Princeps this is the real
+    # MovementHelper.canWalkOn(below) && canWalkThrough(feet) && canWalkThrough(head) && !avoidWalkingInto(hazard).
+    if not (0 <= cx < grid['w'] and 0 <= cz < grid['h']): return False
+    c = (cx, cz)
+    return c not in grid['blocked'] and c not in grid.get('nofloor', set()) \
+        and c not in grid.get('lowceil', set()) and c not in grid.get('hazard', set())
+
+def crosses_hazard(grid, cx, cz):
+    return (cx, cz) in grid.get('hazard', set())
 
 def los(grid, a, b):
-    """can a 0.7-wide body walk the straight segment a->b entirely on walkable cells?"""
+    """3D-safe LOS: a 0.7-wide body can walk the straight segment a->b — every swept cell has floor + body + head
+       clearance and is NOT a hazard. A single unsafe swept cell fails the merge (the lattice detour is kept)."""
     (ax, az), (bx, bz) = (a[0] + 0.5, a[1] + 0.5), (b[0] + 0.5, b[1] + 0.5)
     dist = math.hypot(bx - ax, bz - az)
     steps = max(1, int(dist / 0.1))
@@ -33,7 +42,8 @@ def los(grid, a, b):
         x, z = ax + (bx - ax) * t, az + (bz - az) * t
         for ox in (-HALF, HALF):
             for oz in (-HALF, HALF):
-                if not walkable(grid, math.floor(x + ox), math.floor(z + oz)):
+                cx, cz = math.floor(x + ox), math.floor(z + oz)
+                if not walkable(grid, cx, cz) or crosses_hazard(grid, cx, cz):
                     return False
     return True
 
@@ -82,9 +92,9 @@ def turns(path):
         total += d
     return n, total
 
-# ---- scenarios: (name, grid, start, goal) ; grid = open field minus 'blocked' cells ----
-def field(w, h, blocked=()):
-    return {'w': w, 'h': h, 'blocked': set(blocked)}
+# ---- scenarios: (name, grid, start, goal) ; grid = open field minus 'blocked' cells (+ optional hazard) ----
+def field(w, h, blocked=(), hazard=()):
+    return {'w': w, 'h': h, 'blocked': set(blocked), 'hazard': set(hazard)}
 
 def wall(x, z0, z1):  # vertical wall segment
     return [(x, z) for z in range(z0, z1)]
@@ -96,6 +106,10 @@ def scenarios():
         ("corner_obst",  field(12, 12, wall(6, 0, 9)), (0, 4), (11, 4)),   # wall forces a detour; cut it where clear
         ("gap_slalom",   field(20, 9, wall(7, 0, 6) + wall(13, 3, 9)), (0, 4), (19, 4)),  # slalom around two walls
         ("diagonal45",   field(12, 12), (0, 0), (10, 10)),      # already 45 — smoother should barely change it
+        # SAFETY: a lava pit sits ON the direct chord. The lattice detours around it; the smoother MUST NOT cut the
+        # corner across the pit (that would walk the bot into lava). Expect the detour to be preserved.
+        ("lava_pit",     field(14, 10, hazard=[(x, z) for x in range(5, 9) for z in range(3, 6)]),
+                         (0, 4), (13, 4)),
     ]
 
 def run():
@@ -107,11 +121,22 @@ def run():
         ll, sl = length(lat), length(sm)
         lt, lh = turns(lat); st, sh = turns(sm)
         safe = all(los(grid, sm[k], sm[k+1]) for k in range(len(sm)-1))
+        # explicit hazard check: densely sample every smoothed segment's body-sweep; must touch NO hazard cell
+        hazard_hit = False
+        for k in range(len(sm)-1):
+            (ax, az), (bx, bz) = (sm[k][0]+0.5, sm[k][1]+0.5), (sm[k+1][0]+0.5, sm[k+1][1]+0.5)
+            steps = max(1, int(math.hypot(bx-ax, bz-az)/0.05))
+            for s in range(steps+1):
+                t = s/steps; x, z = ax+(bx-ax)*t, az+(bz-az)*t
+                for ox in (-HALF, HALF):
+                    for oz in (-HALF, HALF):
+                        if crosses_hazard(grid, math.floor(x+ox), math.floor(z+oz)): hazard_hit = True
         # followability: feed the smoothed polyline to the real pursuit sim (deployed profile)
         tr = navsim.simulate(list(sm), navsim.DEPLOYED, seed=1000)
         follow = "cov%d%% xt%.2f" % (round(tr.coverage*100), max((abs(q.cross) for q in tr.records), default=0))
+        haz = "HAZARD!" if hazard_hit else "clear"
         print(f"{name:13s} {len(lat):8d} {len(sm):7d} {ll:7.1f} {sl:6.1f} {100*(sl/ll-1):+4.0f}% "
-              f"{lt:8d} {st:7d} {lh:7.0f} {sh:6.0f} {str(safe):>4s} {follow:>7s}")
+              f"{lt:8d} {st:7d} {lh:7.0f} {sh:6.0f} {str(safe):>4s} {haz:>7s} {follow:>7s}")
 
 if __name__ == '__main__':
     run()
