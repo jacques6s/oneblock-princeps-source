@@ -127,4 +127,19 @@ public class SmoothTraverseTest {
                 new BetterBlockPos(0, 64, 0), new BetterBlockPos(9, 64, 4), 0.35);
         assertTrue("exact sweep must not leave a corner-graze gap", cells.contains(new BetterBlockPos(4, 64, 3)));
     }
+
+    @Test
+    public void diagonalThroughGridCornerSweepsAllFourMeetingCells() {
+        // Tangent edge case for the Liang-Barsky clip: a 45deg chord (0,64,0)->(4,64,4) passes EXACTLY through the grid
+        // corners (1,1),(2,2),(3,3). At corner (2,2) the body straddles all four meeting cells, so the conservative
+        // exact sweep must include every one of (1,2,1),(2,2,1),(1,2,2),(2,2,2) — a clip that dropped a boundary-touch
+        // here would leave a body-clip gap on any diagonal that rides grid corners. (validated in navbench.)
+        Set<BetterBlockPos> cells = SmoothTraverse.sweptCells(
+                new BetterBlockPos(0, 64, 0), new BetterBlockPos(4, 64, 4), 0.35);
+        assertTrue(cells.contains(new BetterBlockPos(1, 64, 1)));
+        assertTrue(cells.contains(new BetterBlockPos(2, 64, 1)));
+        assertTrue(cells.contains(new BetterBlockPos(1, 64, 2)));
+        assertTrue(cells.contains(new BetterBlockPos(2, 64, 2)));
+        assertFalse("a cell far off the diagonal must not be swept", cells.contains(new BetterBlockPos(0, 64, 4)));
+    }
 }

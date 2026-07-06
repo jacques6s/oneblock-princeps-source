@@ -280,7 +280,38 @@ def _random_grid(rng, w, h, density, hazard_frac):
                 (hazard if rng.random() < hazard_frac else blocked).append((x, z))
     return field(w, h, blocked=blocked, hazard=hazard)
 
-def random_stress(n_maps=600, n_sim=100, seed=7):
+def _structured_grid(rng, w, h):
+    """
+    STRUCTURED obstacles: axis-aligned walls (each with a doorway) + diagonal barrier segments. Unlike the blobby
+    independent-cell field, this produces long straight/diagonal faces so a smoothed chord can run tangent ALONG a
+    wall or squeeze a corridor — exactly the tangent / parallel-edge geometries where a floating-point bug in the
+    Liang-Barsky segment/AABB clip would hide. Some walls are hazard (lava). Goal corners kept clear.
+    """
+    blocked, hazard = set(), set()
+    def put(x, z, hz):
+        if 0 <= x < w and 0 <= z < h and not ((x <= 1 and z <= 1) or (x >= w - 2 and z >= h - 2)):
+            (hazard if hz else blocked).add((x, z))
+    for _ in range(rng.randint(3, 6)):                    # walls with a doorway
+        hz = rng.random() < 0.25
+        if rng.random() < 0.5:
+            cx = rng.randint(3, w - 4); z0 = rng.randint(0, h - 6); z1 = min(h - 1, z0 + rng.randint(4, 8))
+            door = rng.randint(z0, z1)
+            for z in range(z0, z1 + 1):
+                if z != door: put(cx, z, hz)
+        else:
+            cz = rng.randint(3, h - 4); x0 = rng.randint(0, w - 6); x1 = min(w - 1, x0 + rng.randint(4, 8))
+            door = rng.randint(x0, x1)
+            for x in range(x0, x1 + 1):
+                if x != door: put(x, cz, hz)
+    for _ in range(rng.randint(1, 3)):                    # diagonal barriers (the hardest graze geometry)
+        hz = rng.random() < 0.25
+        sx = rng.randint(2, w - 6); sz = rng.randint(2, h - 6); ln = rng.randint(3, 7); dz = rng.choice((1, -1))
+        for i in range(ln):
+            put(sx + i, sz + i * dz, hz)
+    return field(w, h, blocked=sorted(blocked), hazard=sorted(hazard))
+
+def random_stress(n_maps=600, n_sim=100, seed=7, gen=None, name="random-terrain",
+                  note="random 22x22 fields, 6-14% obstacles, 25% of them hazard; goal corners kept clear"):
     """
     ROBUSTNESS / anti-cherry-pick: instead of 8 curated scenarios, throw hundreds of random obstacle+hazard fields at
     the smoother. For every map with a valid A* route we assert (load-bearing, pure geometry, no sim needed) that every
@@ -288,6 +319,7 @@ def random_stress(n_maps=600, n_sim=100, seed=7):
     has a hole a body could clip a wall / lava through. We also assert the smoothed node set never GROWS and the
     smoothed polyline is never LONGER than the lattice (string-pull must only ever shorten). A subset is walked through
     the full physics+steering A/B to confirm the jerk/length gains generalise beyond the hand-built cases.
+    `gen` selects the obstacle topology (default = blobby random cells; pass _structured_grid for walls+diagonals).
     """
     import random
     rng = random.Random(seed)
@@ -297,7 +329,7 @@ def random_stress(n_maps=600, n_sim=100, seed=7):
     ab_len, ab_vdj, ab_covL, ab_covS = [], [], [], []
     while valid < n_maps and attempts < n_maps * 8:
         attempts += 1
-        grid = _random_grid(rng, W, H, density=rng.uniform(0.06, 0.14), hazard_frac=0.25)
+        grid = gen(rng, W, H) if gen else _random_grid(rng, W, H, density=rng.uniform(0.06, 0.14), hazard_frac=0.25)
         start, goal = (0, 0), (W - 1, H - 1)
         lat = astar(grid, start, goal)
         if len(lat) < 4 or lat[-1] != goal:      # no route on this map
@@ -326,14 +358,14 @@ def random_stress(n_maps=600, n_sim=100, seed=7):
     tLatL = sum(a for a, _ in ab_len); tLatS = sum(b for _, b in ab_len)
     mVdjL, mVdjS = _mean([a for a, _ in ab_vdj]), _mean([b for _, b in ab_vdj])
     red = lambda a, b: (100 * (1 - b / a)) if a > 1e-9 else 0.0
-    print("\n== random-terrain stress: %d valid maps (of %d attempts), %d walked through A/B ==" % (valid, attempts, min(valid, n_sim)))
+    print("\n== %s stress: %d valid maps (of %d attempts), %d walked through A/B ==" % (name, valid, attempts, min(valid, n_sim)))
     print("  SAFETY   unsafe/hazard-crossing smoothed paths : %d   (MUST be 0)" % safety_violations)
     print("  MONOTONE smoothed longer than lattice          : %d   (MUST be 0)" % length_regressions)
     print("  MONOTONE smoothed has more nodes than lattice  : %d   (MUST be 0)" % node_regressions)
     print("  COVERAGE smoothed stranded vs lattice (>5%% drop): %d   (MUST be 0)" % cov_regressions)
     print("  A/B      walked-length %+.0f%% | velDir-jerk %+.0f%% | coverage lat %.0f%% -> sm %.0f%%"
           % (red(tLatL, tLatS), red(mVdjL, mVdjS), _mean(ab_covL) * 100, _mean(ab_covS) * 100))
-    print("  (random 22x22 fields, 6-14%% obstacles, 25%% of them hazard; goal corners kept clear)")
+    print("  (%s)" % note)
     return safety_violations + length_regressions + node_regressions + cov_regressions
 
 if __name__ == '__main__':
@@ -341,3 +373,5 @@ if __name__ == '__main__':
     ab_compare()
     margin_sweep()
     random_stress()
+    random_stress(seed=13, gen=_structured_grid, name="structured-terrain",
+                  note="walls with doorways + diagonal barriers, 25% hazard; the tangent/parallel-edge stress")
