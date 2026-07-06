@@ -187,6 +187,12 @@ class Path extends PathBase {
             List<princeps.api.pathing.movement.IMovement> newMov = new ArrayList<>();
             newPos.add(path.get(0));
             final int n = movements.size();
+            // Cap a single chord's block-length. Without it the greedy scan is O(L^3) per long DIAGONAL open-field run
+            // (chordSafe recomputes an O(chord^2) swept box for every candidate k), which could stall path
+            // post-processing on a big obstacle-free field. The cap bounds it to O(L*cap^2); it costs ZERO on real
+            // terrain (merges are far shorter) and only splits a huge straight run into COLLINEAR chords -> same line,
+            // a few more nodes, no smoothness loss.
+            final int maxChord = Math.max(1, Princeps.settings().smoothMaxChord.value);
             int i = 0;
             while (i < n) {
                 final Movement start = movements.get(i);
@@ -196,7 +202,11 @@ class Path extends PathBase {
                     int k = i;
                     while (k < n && isFlatMergeable(movements.get(k))
                             && movements.get(k).getSrc().y == src.y && movements.get(k).getDest().y == src.y) {
-                        if (chordSafe(src, movements.get(k).getDest())) {
+                        final BetterBlockPos dk = movements.get(k).getDest();
+                        if (Math.max(Math.abs(dk.x - src.x), Math.abs(dk.z - src.z)) > maxChord) {
+                            break; // chord would exceed the cap; longer runs continue as a fresh (collinear) chord
+                        }
+                        if (chordSafe(src, dk)) {
                             best = k;
                         }
                         k++;

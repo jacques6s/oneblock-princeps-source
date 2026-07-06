@@ -98,12 +98,21 @@ def astar(grid, start, goal):
                 g[nb] = ng; came[nb] = cur; heapq.heappush(openq, (ng + h(nb), ng, nb))
     return [start]
 
-def string_pull(grid, path):
-    """greedy line-of-sight smoothing: from each kept node, jump to the FURTHEST node still walkable in a straight line."""
+MAX_CHORD = 24   # cap a single smoothed chord's block-length (Chebyshev). Bounds the O(L^3) diagonal-open-field
+                 # greedy-scan cost to O(L*cap^2); costs ZERO on real terrain (merges are far shorter) and only
+                 # splits a huge straight run into COLLINEAR chords (same line, a few more nodes -> no smoothness loss).
+
+def string_pull(grid, path, max_chord=None):
+    """greedy line-of-sight smoothing: from each kept node, jump to the FURTHEST node still walkable in a straight line
+       (bounded to max_chord blocks so the cost stays linear on large open fields)."""
     if len(path) < 3: return list(path)
+    cap = MAX_CHORD if max_chord is None else max_chord
     out = [path[0]]; i = 0
     while i < len(path) - 1:
         j = len(path) - 1
+        # cap the chord length first (never consider a node further than `cap` blocks from i), then pull in for safety
+        while j > i + 1 and max(abs(path[j][0] - path[i][0]), abs(path[j][1] - path[i][1])) > cap:
+            j -= 1
         while j > i + 1 and not los(grid, path[i], path[j]):
             j -= 1
         out.append(path[j]); i = j

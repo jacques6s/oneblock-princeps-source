@@ -883,6 +883,12 @@ public final class Settings {
      *  test. */
     public final Setting<Boolean> smoothPath = new Setting<>(false);
 
+    /** Max block-length (Chebyshev) of a single {@code smoothPath} chord. Bounds the string-pull's greedy-scan cost
+     *  from O(L^3) to O(L*cap^2) on a large diagonal open field (so path post-processing can't stall there). Costs
+     *  nothing on real terrain — merges are far shorter — and a longer run just splits into COLLINEAR chords on the
+     *  same straight line (no smoothness loss). Set very high to disable the cap. */
+    public final Setting<Integer> smoothMaxChord = new Setting<>(24);
+
     /** Pure-pursuit cruising steer for flat walks (traverse/diagonal): the gaze chases a far carrot ahead on the
      *  path (eyes lead into corners) while the feet follow a near carrot ahead via W/A/D octant inputs — smooth arcs
      *  instead of node-center snaps. Decouples the walked track from the look, so even a slow/smooth look profile
