@@ -119,7 +119,18 @@ public class MovementFall extends Movement {
         if (targetRotation != null) {
             state.setTarget(new MovementTarget(targetRotation, true));
         } else {
-            state.setTarget(new MovementTarget(toDest, false));
+            // Stable fall look. Aiming at the dest CENTER is singular while we're nearly above it — the horizontal
+            // bearing swings 180/360 deg (the observed drop spin). Instead face the drop's fixed travel direction
+            // (src -> dest) and look moderately DOWN toward the landing: natural = look where you'll walk after the
+            // drop, angled down. A purely vertical drop has no travel direction, so keep the current yaw.
+            int dhx = dest.getX() - src.getX();
+            int dhz = dest.getZ() - src.getZ();
+            float fallYaw = (dhx * dhx + dhz * dhz >= 1)
+                    ? RotationUtils.calcRotationFromVec3d(VecUtils.getBlockPosCenter(src),
+                            VecUtils.getBlockPosCenter(dest), ctx.playerRotations()).getYaw()
+                    : ctx.playerRotations().getYaw();
+            float fallPitch = Math.max(25.0F, Math.min(60.0F, toDest.getPitch())); // mostly down, never the singular ~90
+            state.setTarget(new MovementTarget(new Rotation(fallYaw, fallPitch), false));
         }
         if (playerFeet.equals(dest) && (ctx.player().position().y - playerFeet.getY() < 0.094 || isWater)) { // 0.094 because lilypads
             if (isWater) { // only match water, not flowing water (which we cannot pick up with a bucket)

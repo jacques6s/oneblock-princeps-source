@@ -126,6 +126,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                         Princeps.settings().humanizedLook.value
                                 && Princeps.settings().humanizedLookCapBreakTurn.value
                                 && breaking && !jumpLaunch);
+                // A plain FALL/descent (airborne, sinking, not a jump launch, not gliding, not a precise action):
+                // route the look through the smooth rate-limited turn so it eases toward the (now stabilized) travel
+                // heading + a downward pitch instead of snapping/spinning. Jump ascents (rising) and precise airborne
+                // aims keep the exact heading.
+                this.processor.setSmoothAirborne(
+                        !ctx.player().onGround() && !ctx.player().isFallFlying() && !jumpLaunch
+                                && !this.target.precise && ctx.player().getDeltaMovement().y < -0.08);
                 final Rotation actual = this.processor.peekRotation(this.target.rotation);
                 if (ctx.player().isFallFlying()) {
                     // Low-pass the *applied* look while gliding: ease toward the steering target instead of
@@ -308,6 +315,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private double tremorPitch;
         private boolean precise;
         private boolean capPreciseTurn; // when set, speed-limit the turn even during a precise BREAK (mining arc)
+        private boolean smoothAirborne; // a plain fall/descent — use the smooth rate-limited turn, not the exact aim
         private static final double SACCADE_EASE = 0.28; // fraction toward the fixation per tick (~4-tick flick)
         private static final double TREMOR_THETA = 0.35; // fast reversion → high-freq hand micro-jitter
         private static final double TREMOR_PITCH_RATIO = 0.70; // pitch tremor as a fraction of yaw tremor
@@ -331,6 +339,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.tremorPitch = source.tremorPitch;
             this.precise = source.precise;
             this.capPreciseTurn = source.capPreciseTurn;
+            this.smoothAirborne = source.smoothAirborne;
         }
 
         final void setPrecise(final boolean precise) {
@@ -339,6 +348,10 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         final void setCapPreciseTurn(final boolean capPreciseTurn) {
             this.capPreciseTurn = capPreciseTurn;
+        }
+
+        final void setSmoothAirborne(final boolean smoothAirborne) {
+            this.smoothAirborne = smoothAirborne;
         }
 
         @Override
@@ -377,55 +390,41 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // stay exact) and the break's crosshair stays on the target block.
                 desiredYaw += (float) this.tremorYaw;
                 desiredPitch += (float) this.tremorPitch;
-                if (!this.precise && !airborne) {
-                    // Cruising: saccadic wander + a PROPORTIONAL ("ballistic") turn. The old CONSTANT deg/tick cap
-                    // gave the walk (movement direction == applied yaw) a ~0.7-block minimum turning radius — after
-                    // overshooting a node center the pursuit point sat INSIDE the turning circle and the bot orbited
-                    // it (the observed near-circles). Humans are the opposite: big heading errors get a fast flick
-                    // (hundreds of deg/s) that eases out into a smooth settle. Step grows with the error, so orbiting
-                    // is impossible; small corrections stay gentle. Fed through calculateMouseMove below so the
-                    // emitted delta is still an integer number of mouse counts.
-                    final float rawYawErr = Math.abs(Mth.degreesDifference(prev.getYaw(), desiredYaw));
-                    // The wander must not fight an active turn: fade it out between 20° and 45° of true heading
-                    // error (deterministic in prev+target, so forked solver predictions replay it identically).
-                    final double wanderScale = rawYawErr <= 20.0f ? 1.0 : Math.max(0.0, 1.0 - (rawYawErr - 20.0) / 25.0);
-                    desiredYaw += (float) (this.ouYaw * wanderScale);
-                    desiredPitch += (float) (this.ouPitch * wanderScale);
+
+                final boolean cruising = !this.precise && !airborne;
+                // A SMOOTH, tightly rate-limited turn is used for cruising, for the base-hunt break-corner arc
+                // (capPreciseTurn), and for a plain fall/descent (smoothAirborne). In all three the SENT head
+                // movement is hard-capped at humanizedLookMaxCruiseYaw deg horizontally / MaxCruisePitch deg
+                // vertically per tick, so following the (blocky) path and easing DOWN into a drop look super smooth
+                // instead of snapping. The pursuit octant feet-steer keeps 100% node coverage under the slow head
+                // turn (bench-verified). The EXACT instant aim below is kept only where the heading must be exact
+                // THIS tick: an un-capped precise break (crosshair on the block for BlockBreakHelper), a jump launch
+                // (ballistic heading), or elytra.
+                if (cruising || (this.capPreciseTurn && !airborne) || this.smoothAirborne) {
+                    if (cruising) {
+                        // saccadic wander, faded out during an active turn (>20°) so it never fights the corner
+                        final float rawYawErr = Math.abs(Mth.degreesDifference(prev.getYaw(), desiredYaw));
+                        final double wanderScale = rawYawErr <= 20.0f ? 1.0 : Math.max(0.0, 1.0 - (rawYawErr - 20.0) / 25.0);
+                        desiredYaw += (float) (this.ouYaw * wanderScale);
+                        desiredPitch += (float) (this.ouPitch * wanderScale);
+                    }
+                    // proportional ease-out toward the target, then the tight per-tick smoothness cap
                     final double maxStep = Princeps.settings().humanizedLookTurnMaxSpeed.value;
-                    final float cappedYaw = prev.getYaw()
-                            + proportionalStep(Mth.degreesDifference(prev.getYaw(), desiredYaw), maxStep);
-                    final float cappedPitch = prev.getPitch()
-                            + proportionalStep(desiredPitch - prev.getPitch(), maxStep * 0.6);
+                    final float capY = (float) Math.max(1.0, Princeps.settings().humanizedLookMaxCruiseYaw.value);
+                    final float capP = (float) Math.max(1.0, Princeps.settings().humanizedLookMaxCruisePitch.value);
+                    final float stepY = Mth.clamp(
+                            proportionalStep(Mth.degreesDifference(prev.getYaw(), desiredYaw), maxStep), -capY, capY);
+                    final float stepP = Mth.clamp(
+                            proportionalStep(desiredPitch - prev.getPitch(), maxStep * 0.6), -capP, capP);
                     return new Rotation(
-                            this.calculateMouseMove(prev.getYaw(), cappedYaw),
-                            this.calculateMouseMove(prev.getPitch(), cappedPitch)
+                            this.calculateMouseMove(prev.getYaw(), prev.getYaw() + stepY),
+                            this.calculateMouseMove(prev.getPitch(), prev.getPitch() + stepP)
                     ).clamp();
                 }
-                // Precise APPLY (break/place, airborne jump/parkour, elytra): EXACT target + tremor only, no wander.
-                // Normally NO turn cap — the crosshair must sit on the target block THIS tick for BlockBreakHelper.
-                // Exception (capPreciseTurn, base-hunt only, breaking-on-ground): speed-limit the approach too. The
-                // head arcs to the new block over a few ticks and the crosshair breaks the blocks it sweeps across —
-                // a natural human mining arc through a corner instead of a 1-tick 90° snap. Safe here because the dig
-                // simply lands a few ticks later once the crosshair arrives (isLookingAt gates the actual break); the
-                // reach/place PREDICTIONS still use peekRotationExact (uncapped) so pathing plans correctly.
-                if (this.capPreciseTurn && !airborne) {
-                    final double maxStep = Princeps.settings().humanizedLookTurnMaxSpeed.value;
-                    final float cappedYaw = prev.getYaw()
-                            + proportionalStep(Mth.degreesDifference(prev.getYaw(), desiredYaw), maxStep);
-                    final float cappedPitch = prev.getPitch()
-                            + proportionalStep(desiredPitch - prev.getPitch(), maxStep * 0.6);
-                    return new Rotation(
-                            this.calculateMouseMove(prev.getYaw(), cappedYaw),
-                            this.calculateMouseMove(prev.getPitch(), cappedPitch)
-                    ).clamp();
-                }
-                // Turn-envelope backstop on the ONLY un-rate-limited apply path: a precise break/place re-aim can be
-                // 90°+ to the side and an airborne parkour retarget can flip ~180° in a single tick. Vanilla imposes
-                // no per-tick rotation limit, so that is not a protocol violation — but a lone superhuman snap inside
-                // an otherwise-smooth capped stream is a statistical outlier that does not match a calmly-pathing
-                // human. The cap spreads it over a few ticks (still fast, still human-possible); the dig/place fires
-                // once isLookingAt catches up. Inert in normal play (every intended delta <= the 55°/tick ballistic
-                // max, well under the cap), so it changes nothing except the rare pathological snap.
+                // Exact instant aim (un-capped precise break, jump launch, elytra): the crosshair/heading must be
+                // exact THIS tick. Only a lone superhuman snap is clamped by the 70°/tick hard cap — a re-aim 90°+
+                // to the side or a mid-air retarget flip — so it spreads over a few ticks (the dig fires once
+                // isLookingAt catches up), while normal exact aims (<= the ballistic max) pass through unchanged.
                 return new Rotation(
                         this.calculateMouseMove(prev.getYaw(), hardCap(prev.getYaw(), desiredYaw, true)),
                         this.calculateMouseMove(prev.getPitch(), hardCap(prev.getPitch(), desiredPitch, false))

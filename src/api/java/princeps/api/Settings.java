@@ -851,6 +851,16 @@ public final class Settings {
     /** Fraction of the remaining heading error taken per tick (ballistic ease-out profile). */
     public final Setting<Double> humanizedLookTurnGain = new Setting<>(0.55);
 
+    /** Hard per-tick smoothness cap (degrees) on the SENT horizontal head movement during a rate-limited turn
+     *  (cruising, the base-hunt break-corner arc, and plain falls). Keeps following the blocky path and easing into
+     *  a drop visually super-smooth — the head never yaws more than this per tick. The pursuit octant feet-steer
+     *  keeps node coverage under the slow head turn (bench-verified at 9°). */
+    public final Setting<Double> humanizedLookMaxCruiseYaw = new Setting<>(9.0);
+
+    /** Hard per-tick smoothness cap (degrees) on the SENT vertical head movement during a rate-limited turn — so
+     *  looking down into a drop, or up/down along terrain, eases instead of snapping. */
+    public final Setting<Double> humanizedLookMaxCruisePitch = new Setting<>(15.0);
+
     /** Absolute per-tick rotation-delta ceiling on the SENT rotation — a turn-envelope backstop above the normal
      *  ballistic max, so it is inert in normal play and only clamps lone superhuman one-tick snaps (an un-capped
      *  precise break re-aim 90°+ to the side, or a mid-air parkour retarget flipping ~180°) that would otherwise be

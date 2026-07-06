@@ -55,9 +55,13 @@ class Profile:
     curve_lookahead: float = 2.4  # blocks ahead to measure upcoming path curvature
     min_speed_factor: float = 0.42  # hardest slow-in (fraction of sprint accel) at the sharpest bend
     boundary_hyst: float = 20.0   # deg margin to switch octant (SHIPPED anti-chatter; humanizedSteeringHysteresis)
+    cruise_yaw_cap: float = 999.0   # hard smoothness cap on the per-tick sent yaw change (deg)
+    cruise_pitch_cap: float = 999.0 # hard smoothness cap on the per-tick sent pitch change (deg)
 
-DEPLOYED = Profile("deployed", gain=0.55, min_step=8.0, max_step=55.0, drift_deg=3.0, tremor_deg=0.14)
-INTENDED = Profile("intended", gain=0.22, min_step=1.6, max_step=24.0, drift_deg=0.0, tremor_deg=0.0)
+DEPLOYED = Profile("deployed", gain=0.55, min_step=8.0, max_step=55.0, drift_deg=3.0, tremor_deg=0.14,
+                   cruise_yaw_cap=9.0, cruise_pitch_cap=15.0)
+INTENDED = Profile("intended", gain=0.22, min_step=1.6, max_step=24.0, drift_deg=0.0, tremor_deg=0.0,
+                   cruise_yaw_cap=9.0, cruise_pitch_cap=15.0)
 
 def min_count(sens):
     f = sens * 0.6 + 0.2
@@ -196,6 +200,7 @@ def simulate(nodes, profile, seed=0, flip_at=None, max_ticks=None):
         desired = gaze + ou*wscale + trem
         step = prop_step(wrap(desired - prev_yaw), p)
         capped = max(-p.hard_cap, min(p.hard_cap, step))       # hard cap
+        capped = max(-p.cruise_yaw_cap, min(p.cruise_yaw_cap, capped))   # tight smoothness cap (user: <=9 deg)
         qdelta = round(capped / mc) * mc                        # mouse-count quantize
         yaw = prev_yaw + qdelta
         dyaw = wrap(yaw - prev_yaw)
