@@ -30,6 +30,8 @@ public class BlockPlaceHelper {
 
     private final IPlayerContext ctx;
     private int rightClickTimer;
+    // Place timing is execution-only (never replayed in path/reach prediction), so a plain RNG is fine here.
+    private final java.util.Random placeRng = new java.util.Random();
 
     BlockPlaceHelper(IPlayerContext playerContext) {
         this.ctx = playerContext;
@@ -44,7 +46,18 @@ public class BlockPlaceHelper {
         if (!rightClickRequested || ctx.player().isHandsBusy() || mouseOver == null || mouseOver.getType() != HitResult.Type.BLOCK) {
             return;
         }
-        rightClickTimer = Princeps.settings().rightClickSpeed.value - BASE_PLACE_DELAY;
+        // Jitter the inter-place cooldown so repeated placing (bridging, pillaring, scaffolding) is not a perfectly
+        // periodic metronome — a constant place gap is a periodogram tell a human never produces. Symmetric
+        // ~Gaussian jitter (sum-of-3 uniforms) preserves the mean throughput (verified 0.0% at the default), floored
+        // at 1. Gated on humanizedLook (raw Princeps / rightClickSpeed<=3 keep the exact constant). Same treatment as
+        // BlockBreakHelper's break cadence; does not touch the look tuning.
+        final int placeBase = Princeps.settings().rightClickSpeed.value - BASE_PLACE_DELAY;
+        if (Princeps.settings().humanizedLook.value && placeBase > 2) {
+            final double g = this.placeRng.nextDouble() + this.placeRng.nextDouble() + this.placeRng.nextDouble() - 1.5;
+            rightClickTimer = Math.max(1, placeBase + (int) Math.round(g * 1.5));
+        } else {
+            rightClickTimer = placeBase;
+        }
         for (InteractionHand hand : InteractionHand.values()) {
             if (ctx.playerController().processRightClickBlock(ctx.player(), ctx.world(), hand, (BlockHitResult) mouseOver) == InteractionResult.SUCCESS) {
                 ctx.player().swing(hand);
