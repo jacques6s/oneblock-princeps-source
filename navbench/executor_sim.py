@@ -46,8 +46,13 @@ class Chord:
             return True
         if not self.is_chord:
             return False
-        s = (pos[0]-(self.src[0]+0.5))*self.axis[0] + (pos[1]-(self.src[1]+0.5))*self.axis[1]
-        return s >= self.len - 0.5
+        ex, ez = pos[0]-(self.src[0]+0.5), pos[1]-(self.src[1]+0.5)
+        s = ex*self.axis[0] + ez*self.axis[1]
+        # livelock-free lateral rule: promote ONLY from cells of the chord's own VERIFIED corridor. Whenever the
+        # executor containment accepts the feet (in-corridor) while the body is past the end, SUCCESS must fire
+        # (else cross-tick rewind ping-pong at sharp junction cuts -> timeout, bench-caught at a fixed 0.5 bound);
+        # outside the corridor (unverified ground, the knockback case) SUCCESS must never fire.
+        return s >= self.len - 0.5 and feet in self.valid
 
 def run_executor(poly, profile, seed=0, max_ticks=6000):
     """walk the polyline through pursuit physics + the executor state machine; returns (ok, reason, stats)."""
@@ -63,17 +68,22 @@ def run_executor(poly, profile, seed=0, max_ticks=6000):
     p = 0                      # executor pathPosition
     ticks_on, ticks_away = 0, 0
     max_timeout_frac = 0.0     # worst ticksOnCurrent/(cost+100) seen — headroom metric
+    guard_hits = 0             # times the same-tick recursion guard saturated (MUST stay 0)
 
     for tick in range(max_ticks):
         # ---------------- executor onTick (with same-tick recursion, bounded) ----------------
-        for _ in range(8):     # onTick recursion guard
+        no_rewind_below = 0    # per-tick floor: never rewind below a movement that JUST succeeded this tick
+        for it in range(9):    # onTick recursion guard (mirrors Java depth guard of 8)
+            if it == 8:
+                guard_hits += 1
+                break
             if p >= len(movements):
-                return True, "done", max_timeout_frac
+                return (guard_hits == 0), ("done" if guard_hits == 0 else "RECURSION-GUARD-HIT"), max_timeout_frac
             m = movements[p]
             feet = (math.floor(pos[0]), math.floor(pos[1]))
             if feet not in m.valid:
                 jumped = False
-                for i in range(p):                       # back-skip (lag/teleport)
+                for i in range(no_rewind_below, p):      # back-skip (lag/teleport), floored per tick
                     if feet in movements[i].valid:
                         p, ticks_on, jumped = i, 0, True
                         break
@@ -107,10 +117,11 @@ def run_executor(poly, profile, seed=0, max_ticks=6000):
                     continue
             if m.done(pos, feet):                         # SmoothTraverse SUCCESS (dest cell or end region)
                 p += 1; ticks_on = 0
+                no_rewind_below = max(no_rewind_below, p)
                 continue
             break
         if p >= len(movements):
-            return True, "done", max_timeout_frac
+            return (guard_hits == 0), ("done" if guard_hits == 0 else "RECURSION-GUARD-HIT"), max_timeout_frac
 
         # distance gate: nearest valid CELL CENTER across all movements (closestPathPos)
         best = min(min(math.hypot(pos[0]-(c[0]+0.5), pos[1]-(c[1]+0.5)) for c in mm.valid)
@@ -150,9 +161,13 @@ def run_executor(poly, profile, seed=0, max_ticks=6000):
         capped = max(-profile.cruise_yaw_cap, min(profile.cruise_yaw_cap, capped))
         yaw = prev_yaw + round(capped/mc)*mc
         rel = navsim.wrap(navsim.yaw_to(pos, near) - prev_yaw)
-        if strafing and abs(rel) < profile.release_deg: strafing = False
-        elif not strafing and abs(rel) >= profile.engage_deg: strafing = True
-        octo = min(navsim.OCTANTS, key=lambda o: abs(navsim.wrap(rel-o))) if strafing else 0
+        bearing_wants = (abs(rel) >= 12.0) if strafing else (abs(rel) >= profile.engage_deg)
+        xt_wants = (abs(cross) > 0.12) if strafing else (abs(cross) >= 0.30)
+        strafing = bearing_wants or xt_wants
+        if strafing and abs(rel) < 22.5 and abs(cross) > 0.12:
+            octo = 45 if cross > 0 else -45              # lateral actuation from the cross-track sign
+        else:
+            octo = min(navsim.OCTANTS, key=lambda o: abs(navsim.wrap(rel-o))) if strafing else 0
         if profile.boundary_hyst > 0 and strafing and held[0] != 0 and octo != held[0]:
             if abs(navsim.wrap(rel-octo)) > abs(navsim.wrap(rel-held[0])) - profile.boundary_hyst:
                 octo = held[0]

@@ -786,7 +786,17 @@ public interface MovementHelper extends ActionCosts, Helper {
             state.setInput(Input.MOVE_FORWARD, true);
         } else {
             Steering.strafing = true;
-            strafeToward(state, Mth.degreesDifference(ctx.playerRotations().getYaw(), idealYaw));
+            final float relSigned = Mth.degreesDifference(ctx.playerRotations().getYaw(), idealYaw);
+            // ACTUATION fix (review-confirmed): at the xt engage point the near-carrot bearing is only ~18-23 deg,
+            // which Math.round(rel/45) snaps to octant 0 = plain W = no lateral input at all — the drift correction
+            // was a no-op across its whole design envelope. When the LATERAL trigger demands the strafe (bearing
+            // still inside the deadzone), actuate laterally: force the forward diagonal TOWARD the line from the
+            // SIGN of the cross-track. crossTrack > 0 = body left of the track direction -> steer right (W+D, +45).
+            if (Math.abs(relSigned) < 22.5f && Math.abs(crossTrack) > xtRelease) {
+                strafeToward(state, crossTrack > 0 ? 45f : -45f);
+            } else {
+                strafeToward(state, relSigned);
+            }
         }
 
         // Curvature-aware speed: release SPRINT approaching a sharp path bend (walk speed) so the tight per-tick

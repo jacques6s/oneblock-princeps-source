@@ -83,7 +83,13 @@ public class SmoothTraverse extends Movement {
         // can never fire again — the movement would strand until its timeout (bench-caught: stuck-at-goal case).
         // The chord is factually complete once the body's projection along the chord axis reaches the final half
         // block, on the chord's own level.
-        if (ctx.playerFeet().y == dest.y) {
+        if (ctx.playerFeet().y == dest.y && this.getValidPositions().contains(ctx.playerFeet())) {
+            // LATERAL rule (review-confirmed + bench-tuned): the axial projection alone is laterally unbounded — a
+            // body knocked blocks BESIDE the line (cells chordSafe never verified) would "succeed" into unverified
+            // ground. Promote ONLY from the chord's own verified corridor. This is also the livelock-free choice:
+            // whenever the executor containment accepts the feet while the body is past the end, SUCCESS fires
+            // (a tighter fixed bound left a containment-yes/success-no gap that rewind-ping-ponged into timeouts
+            // at sharp junction cuts); outside the corridor SUCCESS can never fire and the pursuit steers back.
             final double dx = dest.x - src.x, dz = dest.z - src.z;
             final double len = Math.hypot(dx, dz);
             if (len > 1e-6) {

@@ -83,6 +83,13 @@ public class PathExecutor implements IPathExecutor, Helper {
         this.pathPosition = 0;
     }
 
+    /** Same-tick re-entrancy depth of {@link #onTick()} (SUCCESS-advance / skips recurse); 0 = outermost call. */
+    private int tickRecursionDepth;
+    /** Floor for the backward rewind scan within ONE tick: a movement that just reported SUCCESS this tick must
+     *  never be rewound to in the SAME tick — with wide chord corridors (which contain cells past their own dest)
+     *  a success->rewind->success cycle otherwise mutually recurses to a StackOverflowError (review-confirmed). */
+    private int noRewindBelow;
+
     /**
      * Tick this executor
      *
@@ -90,6 +97,23 @@ public class PathExecutor implements IPathExecutor, Helper {
      * not sneaking out over lava), false otherwise
      */
     public boolean onTick() {
+        if (tickRecursionDepth == 0) {
+            noRewindBelow = 0;
+        }
+        if (tickRecursionDepth >= 8) {
+            // Defense-in-depth: no success/skip/rewind pairing may ever recurse unboundedly within one game tick.
+            // Bail out and let the next real tick re-evaluate from settled state instead of overflowing the stack.
+            return false;
+        }
+        tickRecursionDepth++;
+        try {
+            return onTickInternal();
+        } finally {
+            tickRecursionDepth--;
+        }
+    }
+
+    private boolean onTickInternal() {
         if (pathPosition == path.length() - 1) {
             pathPosition++;
         }
@@ -99,7 +123,7 @@ public class PathExecutor implements IPathExecutor, Helper {
         Movement movement = (Movement) path.movements().get(pathPosition);
         BetterBlockPos whereAmI = ctx.playerFeet();
         if (!movement.getValidPositions().contains(whereAmI)) {
-            for (int i = 0; i < pathPosition && i < path.length(); i++) {//this happens for example when you lag out and get teleported back a couple blocks
+            for (int i = noRewindBelow; i < pathPosition && i < path.length(); i++) {//this happens for example when you lag out and get teleported back a couple blocks
                 if (((Movement) path.movements().get(i)).getValidPositions().contains(whereAmI)) {
                     int previousPos = pathPosition;
                     pathPosition = i;
@@ -254,6 +278,11 @@ public class PathExecutor implements IPathExecutor, Helper {
         if (movementStatus == SUCCESS) {
             //System.out.println("Movement done, next path");
             pathPosition++;
+            // A movement that just SUCCEEDED must not be rewound to within the SAME tick: a chord's wide corridor
+            // contains cells past its own dest, so the backward scan would otherwise bounce success<->rewind in
+            // unbounded same-tick recursion (review-confirmed StackOverflowError). Cross-tick rewinds (real lag
+            // teleports) are unaffected — the floor resets on the next outermost tick.
+            noRewindBelow = Math.max(noRewindBelow, pathPosition);
             onChangeInPathPosition();
             onTick();
             return true;
