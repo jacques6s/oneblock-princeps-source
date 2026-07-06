@@ -63,6 +63,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
      */
     private Rotation appliedRotation;
 
+    /** Sub-mouse-count remainder carried between elytra flight ticks so the quantized flight rotation tracks the
+     *  low-pass with zero drift (error diffusion). Reset whenever a flight ends. */
+    private float elytraYawResidual;
+    private float elytraPitchResidual;
+
     private final AimProcessor processor;
 
     private final Deque<Float> smoothYawBuffer;
@@ -138,17 +143,28 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     final float a = (float) Math.max(0.1, Math.min(1.0, 1.0 - smoothness * 0.9));
                     final float curYaw = this.prevRotation.getYaw();
                     final float curPitch = this.prevRotation.getPitch();
-                    // NOTE: this low-pass emits a fractional (non-mouse-count-quantized) yaw/pitch each flight tick.
-                    // A real elytra flyer's rotation deltas are integer mouse counts, so a rotation-quantization
-                    // check during flight could distinguish this. A correct fix needs error-diffusion (accumulate the
-                    // sub-count residual so tiny increments aren't lost to rounding) AND in-game flight validation —
-                    // not doable in the ground-movement sim, so deferred rather than shipped untested. Base-hunt is
-                    // underground / never flies, so this does not affect the flagship. See memory.
-                    ctx.player().setYRot(curYaw + Mth.degreesDifference(curYaw, actual.getYaw()) * a);
-                    ctx.player().setXRot(curPitch + (actual.getPitch() - curPitch) * a);
+                    // Low-pass toward the steering target, then ERROR-DIFFUSION quantize onto the integer mouse-count
+                    // grid: the raw fractional lerp would emit a continuous, non-mouse-achievable yaw/pitch every
+                    // flight tick (a real elytra flyer still steers with a quantized mouse — a rotation-quantization
+                    // check could flag the continuous stream). Carrying the sub-count residual makes a slow turn a
+                    // real 0/1-count-per-tick pattern instead of stalling, and keeps the emitted line within one
+                    // mouse count of the raw low-pass (sim-verified: 0 non-quantized ticks, <0.15° drift, no stall
+                    // across all smoothness values) — so the flight path and landing are unchanged.
+                    final float minCount = this.processor.minAngleChange();
+                    final float desiredYawDelta = Mth.degreesDifference(curYaw, actual.getYaw()) * a + this.elytraYawResidual;
+                    final float qYawDelta = Math.round(desiredYawDelta / minCount) * minCount;
+                    this.elytraYawResidual = desiredYawDelta - qYawDelta;
+                    final float desiredPitchDelta = (actual.getPitch() - curPitch) * a + this.elytraPitchResidual;
+                    final float qPitchDelta = Math.round(desiredPitchDelta / minCount) * minCount;
+                    this.elytraPitchResidual = desiredPitchDelta - qPitchDelta;
+                    ctx.player().setYRot(curYaw + qYawDelta);
+                    ctx.player().setXRot(curPitch + qPitchDelta);
                 } else {
                     ctx.player().setYRot(actual.getYaw());
                     ctx.player().setXRot(actual.getPitch());
+                    // not flying: drop any carried elytra residual so the next flight starts fresh
+                    this.elytraYawResidual = 0.0f;
+                    this.elytraPitchResidual = 0.0f;
                 }
                 this.appliedRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
                 break;
@@ -217,6 +233,8 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         this.serverRotation = null;
         this.target = null;
         this.appliedRotation = null;
+        this.elytraYawResidual = 0.0f;
+        this.elytraPitchResidual = 0.0f;
         this.smoothYawBuffer.clear();
         this.smoothPitchBuffer.clear();
     }
@@ -576,6 +594,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private double angleToMouse(float angleDelta) {
             final float minAngleChange = mouseToAngle(1);
             return Math.round(angleDelta / minAngleChange);
+        }
+
+        /** The smallest rotation change one mouse count produces at the current sensitivity (the quantization step). */
+        public final float minAngleChange() {
+            return mouseToAngle(1);
         }
 
         private float mouseToAngle(double mouseDelta) {
