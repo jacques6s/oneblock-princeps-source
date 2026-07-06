@@ -86,25 +86,58 @@ public class SmoothTraverse extends Movement {
     }
 
     /**
-     * Every block cell (at the flat run's Y) that a body of half-width {@code half} sweeps along the {@code src}->{@code
-     * dest} chord — the supercover corners. Used both for {@link #calculateValidPositions()} and, at merge time, for
-     * the collision-safety predicate (each of these cells must have floor + body + head clearance and no hazard).
+     * EXACT (sampling-free) supercover: every block cell (at the flat run's Y) that an AABB body of half-width {@code
+     * half} overlaps while its centre travels the straight {@code src}->{@code dest} chord. Used both for {@link
+     * #calculateValidPositions()} and, at merge time, for the collision-safety predicate (each of these cells must have
+     * floor + body + head clearance and no hazard).
+     *
+     * <p>A body-square overlaps cell {@code [cx,cx+1]x[cz,cz+1]} iff its centre passes within {@code half} of the cell
+     * on both axes, i.e. the chord intersects that cell-rect expanded by {@code half} on all sides. We enumerate the
+     * bounding box and do an exact segment/rect test (Liang-Barsky). The previous version point-sampled the four body
+     * corners along the chord, which MISSED cells the body only grazes at a corner between samples — a real collision
+     * gap the random-terrain stress bench caught (finer sampling did not close it; only the exact test does).
      */
     public static Set<BetterBlockPos> sweptCells(BetterBlockPos src, BetterBlockPos dest, double half) {
         Set<BetterBlockPos> cells = new HashSet<>();
         final double ax = src.x + 0.5, az = src.z + 0.5, bx = dest.x + 0.5, bz = dest.z + 0.5;
-        final double dist = Math.hypot(bx - ax, bz - az);
-        final int steps = Math.max(1, (int) (dist / 0.1));
-        for (int s = 0; s <= steps; s++) {
-            final double t = (double) s / steps;
-            final double x = ax + (bx - ax) * t, z = az + (bz - az) * t;
-            cells.add(new BetterBlockPos((int) Math.floor(x - half), src.y, (int) Math.floor(z - half)));
-            cells.add(new BetterBlockPos((int) Math.floor(x + half), src.y, (int) Math.floor(z - half)));
-            cells.add(new BetterBlockPos((int) Math.floor(x - half), src.y, (int) Math.floor(z + half)));
-            cells.add(new BetterBlockPos((int) Math.floor(x + half), src.y, (int) Math.floor(z + half)));
+        final int xlo = (int) Math.floor(Math.min(ax, bx) - half - 1);
+        final int xhi = (int) Math.floor(Math.max(ax, bx) + half + 1);
+        final int zlo = (int) Math.floor(Math.min(az, bz) - half - 1);
+        final int zhi = (int) Math.floor(Math.max(az, bz) + half + 1);
+        for (int cx = xlo; cx <= xhi; cx++) {
+            for (int cz = zlo; cz <= zhi; cz++) {
+                if (segIntersectsRect(ax, az, bx, bz, cx - half, cz - half, cx + 1 + half, cz + 1 + half)) {
+                    cells.add(new BetterBlockPos(cx, src.y, cz));
+                }
+            }
         }
-        cells.add(src);
+        cells.add(src);   // endpoints are always swept; add explicitly to be robust against FP corner cases
         cells.add(dest);
         return cells;
+    }
+
+    /** Liang-Barsky segment/AABB clip: does segment (ax,az)->(bx,bz) intersect axis-aligned rect [xmin,xmax]x[zmin,zmax]? */
+    private static boolean segIntersectsRect(double ax, double az, double bx, double bz,
+                                             double xmin, double zmin, double xmax, double zmax) {
+        final double dx = bx - ax, dz = bz - az;
+        double t0 = 0.0, t1 = 1.0;
+        final double[] ps = {-dx, dx, -dz, dz};
+        final double[] qs = {ax - xmin, xmax - ax, az - zmin, zmax - az};
+        for (int i = 0; i < 4; i++) {
+            final double p = ps[i], q = qs[i];
+            if (Math.abs(p) < 1e-12) {
+                if (q < 0) return false;              // parallel to this edge and outside the slab
+            } else {
+                final double r = q / p;
+                if (p < 0) {
+                    if (r > t1) return false;
+                    if (r > t0) t0 = r;
+                } else {
+                    if (r < t0) return false;
+                    if (r < t1) t1 = r;
+                }
+            }
+        }
+        return t0 <= t1;
     }
 }

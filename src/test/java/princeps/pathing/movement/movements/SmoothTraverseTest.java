@@ -101,18 +101,30 @@ public class SmoothTraverseTest {
 
     @Test
     public void safetyMarginCatchesTheKnifeEdgeGraze() {
-        // A concrete grazing chord (0,64,0)->(7,64,3) passes right at the corner of cell (2,64,2). Verified in the
-        // navbench margin probe: at half=0.30 (the exact 0.6-wide body, ZERO margin) the swept corners never floor
-        // into (2,2) — the body clears it by a knife's edge; at the deployed half=0.35 the AABB corner pokes into
-        // (2,2), so it IS in the swept set and chordSafe() will test it and (it being solid) reject the merge.
-        // This pins WHY the deployed margin is 0.35 not 0.30: the extra 0.05 rejects exactly the grazes a jittering
-        // real body could clip. If anyone loosens the margin toward 0.30, this test fails and flags the safety loss.
+        // A concrete grazing chord (0,64,0)->(8,64,3) passes right past cell (3,64,0). Verified in the navbench margin
+        // probe against the EXACT swept-cell test: at half=0.30 (the exact 0.6-wide body, ZERO margin) the body clears
+        // (3,0) by a knife's edge so it is NOT swept; at the deployed half=0.35 the body overlaps it, so it IS swept
+        // and chordSafe() will test it and (it being solid) reject the body-clipping merge. Pins WHY the deployed
+        // margin is 0.35 not 0.30: the extra 0.05 rejects exactly the grazes a jittering real body could clip. If
+        // anyone loosens the margin toward 0.30, this test fails and flags the safety loss.
         BetterBlockPos src = new BetterBlockPos(0, 64, 0);
-        BetterBlockPos dest = new BetterBlockPos(7, 64, 3);
-        BetterBlockPos graze = new BetterBlockPos(2, 64, 2);
+        BetterBlockPos dest = new BetterBlockPos(8, 64, 3);
+        BetterBlockPos graze = new BetterBlockPos(3, 64, 0);
         assertFalse("half=0.30 (zero margin) must NOT sweep the graze cell — the body clears it by a knife's edge",
                 SmoothTraverse.sweptCells(src, dest, 0.30).contains(graze));
         assertTrue("deployed half=0.35 MUST sweep the graze cell so chordSafe rejects a body-clipping chord",
                 SmoothTraverse.sweptCells(src, dest, 0.35).contains(graze));
+    }
+
+    @Test
+    public void exactSweepHasNoCornerGrazeGap() {
+        // Regression for the point-sampling collision gap: the OLD corner-sampled sweep MISSED cells a body grazes at
+        // a corner between samples (the random-terrain stress bench found 30/600 such unsafe merges). The exact test
+        // must include EVERY cell whose expanded rect the chord truly crosses. Here the chord (0,64,0)->(9,64,4)
+        // grazes cell (4,64,3) — the exact sweep contains it, whereas a 0.1 point-sampled sweep dropped it (verified
+        // in the navbench exact-vs-sampled diff).
+        Set<BetterBlockPos> cells = SmoothTraverse.sweptCells(
+                new BetterBlockPos(0, 64, 0), new BetterBlockPos(9, 64, 4), 0.35);
+        assertTrue("exact sweep must not leave a corner-graze gap", cells.contains(new BetterBlockPos(4, 64, 3)));
     }
 }

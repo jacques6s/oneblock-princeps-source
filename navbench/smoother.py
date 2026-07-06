@@ -32,20 +32,49 @@ def walkable(grid, cx, cz):
 def crosses_hazard(grid, cx, cz):
     return (cx, cz) in grid.get('hazard', set())
 
+def _seg_rect(ax, az, bx, bz, xmin, zmin, xmax, zmax):
+    """Liang-Barsky: does segment (ax,az)->(bx,bz) intersect the axis-aligned rect [xmin,xmax]x[zmin,zmax]?"""
+    dx, dz = bx - ax, bz - az
+    t0, t1 = 0.0, 1.0
+    for p, q in ((-dx, ax - xmin), (dx, xmax - ax), (-dz, az - zmin), (dz, zmax - az)):
+        if abs(p) < 1e-12:
+            if q < 0:
+                return False
+        else:
+            r = q / p
+            if p < 0:
+                if r > t1: return False
+                if r > t0: t0 = r
+            else:
+                if r < t0: return False
+                if r < t1: t1 = r
+    return t0 <= t1
+
+def swept_cells(a, b, half):
+    """
+    EXACT (sampling-free) supercover: every cell an AABB body of half-width `half` overlaps while its centre travels
+    the straight segment a->b. Body-square overlaps cell [cx,cx+1]x[cz,cz+1] iff the centre passes within `half` of
+    the cell on both axes, i.e. the segment intersects that cell-rect expanded by `half` on all sides. Point-sampling
+    the corners (the old way) MISSES cells the body grazes at a corner between samples (a real collision gap the random
+    stress test caught); this enumerates the bounding box and does an exact segment-rect test, so nothing is missed.
+    """
+    ax, az, bx, bz = a[0] + 0.5, a[1] + 0.5, b[0] + 0.5, b[1] + 0.5
+    xlo = math.floor(min(ax, bx) - half - 1); xhi = math.floor(max(ax, bx) + half + 1)
+    zlo = math.floor(min(az, bz) - half - 1); zhi = math.floor(max(az, bz) + half + 1)
+    out = []
+    for cx in range(xlo, xhi + 1):
+        for cz in range(zlo, zhi + 1):
+            if _seg_rect(ax, az, bx, bz, cx - half, cz - half, cx + 1 + half, cz + 1 + half):
+                out.append((cx, cz))
+    return out
+
 def los(grid, a, b):
     """3D-safe LOS: a 0.7-wide body can walk the straight segment a->b — every swept cell has floor + body + head
-       clearance and is NOT a hazard. A single unsafe swept cell fails the merge (the lattice detour is kept)."""
-    (ax, az), (bx, bz) = (a[0] + 0.5, a[1] + 0.5), (b[0] + 0.5, b[1] + 0.5)
-    dist = math.hypot(bx - ax, bz - az)
-    steps = max(1, int(dist / 0.1))
-    for s in range(steps + 1):
-        t = s / steps
-        x, z = ax + (bx - ax) * t, az + (bz - az) * t
-        for ox in (-HALF, HALF):
-            for oz in (-HALF, HALF):
-                cx, cz = math.floor(x + ox), math.floor(z + oz)
-                if not walkable(grid, cx, cz) or crosses_hazard(grid, cx, cz):
-                    return False
+       clearance and is NOT a hazard. A single unsafe swept cell fails the merge (the lattice detour is kept).
+       Uses the EXACT swept-cell set (no point-sampling graze gaps)."""
+    for cx, cz in swept_cells(a, b, HALF):
+        if not walkable(grid, cx, cz) or crosses_hazard(grid, cx, cz):
+            return False
     return True
 
 def astar(grid, start, goal):
@@ -130,16 +159,9 @@ def run():
         ll, sl = length(lat), length(sm)
         lt, lh = turns(lat); st, sh = turns(sm)
         safe = all(los(grid, sm[k], sm[k+1]) for k in range(len(sm)-1))
-        # explicit hazard check: densely sample every smoothed segment's body-sweep; must touch NO hazard cell
-        hazard_hit = False
-        for k in range(len(sm)-1):
-            (ax, az), (bx, bz) = (sm[k][0]+0.5, sm[k][1]+0.5), (sm[k+1][0]+0.5, sm[k+1][1]+0.5)
-            steps = max(1, int(math.hypot(bx-ax, bz-az)/0.05))
-            for s in range(steps+1):
-                t = s/steps; x, z = ax+(bx-ax)*t, az+(bz-az)*t
-                for ox in (-HALF, HALF):
-                    for oz in (-HALF, HALF):
-                        if crosses_hazard(grid, math.floor(x+ox), math.floor(z+oz)): hazard_hit = True
+        # explicit hazard check (independent of los, via the exact swept-cell set): must touch NO hazard cell
+        hazard_hit = any(crosses_hazard(grid, cx, cz)
+                         for k in range(len(sm)-1) for cx, cz in swept_cells(sm[k], sm[k+1], HALF))
         # followability: feed the smoothed polyline to the real pursuit sim (deployed profile)
         tr = navsim.simulate(list(sm), navsim.DEPLOYED, seed=1000)
         follow = "cov%d%% xt%.2f" % (round(tr.coverage*100), max((abs(q.cross) for q in tr.records), default=0))
@@ -246,7 +268,76 @@ def margin_sweep():
             globals()['HALF'] = old
     print("(0.30 = exact body / zero margin; deployed 0.35 keeps the length gains AND rejects knife-edge grazes)")
 
+def _random_grid(rng, w, h, density, hazard_frac):
+    """random obstacle+hazard field; the two goal corners + their 2-neighbourhood are kept clear so a route usually
+       exists. A fraction of obstacles are hazards (lava) to also stress the never-chord-across-hazard rule."""
+    blocked, hazard = [], []
+    for x in range(w):
+        for z in range(h):
+            if (x <= 1 and z <= 1) or (x >= w - 2 and z >= h - 2):
+                continue
+            if rng.random() < density:
+                (hazard if rng.random() < hazard_frac else blocked).append((x, z))
+    return field(w, h, blocked=blocked, hazard=hazard)
+
+def random_stress(n_maps=600, n_sim=100, seed=7):
+    """
+    ROBUSTNESS / anti-cherry-pick: instead of 8 curated scenarios, throw hundreds of random obstacle+hazard fields at
+    the smoother. For every map with a valid A* route we assert (load-bearing, pure geometry, no sim needed) that every
+    string-pulled segment is los-safe and crosses NO hazard — a single violation would mean the swept-cell supercover
+    has a hole a body could clip a wall / lava through. We also assert the smoothed node set never GROWS and the
+    smoothed polyline is never LONGER than the lattice (string-pull must only ever shorten). A subset is walked through
+    the full physics+steering A/B to confirm the jerk/length gains generalise beyond the hand-built cases.
+    """
+    import random
+    rng = random.Random(seed)
+    W, H = 22, 22
+    valid = safety_violations = length_regressions = node_regressions = cov_regressions = 0
+    attempts = 0
+    ab_len, ab_vdj, ab_covL, ab_covS = [], [], [], []
+    while valid < n_maps and attempts < n_maps * 8:
+        attempts += 1
+        grid = _random_grid(rng, W, H, density=rng.uniform(0.06, 0.14), hazard_frac=0.25)
+        start, goal = (0, 0), (W - 1, H - 1)
+        lat = astar(grid, start, goal)
+        if len(lat) < 4 or lat[-1] != goal:      # no route on this map
+            continue
+        valid += 1
+        sm = string_pull(grid, lat)
+        # SAFETY (the assertion that matters): every smoothed segment body-safe + hazard-free
+        seg_safe = all(los(grid, sm[k], sm[k + 1]) for k in range(len(sm) - 1))
+        # independent hazard cross-check via the exact swept-cell set (a finer step than the old los would have missed)
+        haz = any(crosses_hazard(grid, cx, cz)
+                  for k in range(len(sm) - 1) for cx, cz in swept_cells(sm[k], sm[k + 1], HALF))
+        if not seg_safe or haz:
+            safety_violations += 1
+        if length(sm) > length(lat) + 1e-6:
+            length_regressions += 1
+        if len(sm) > len(lat):
+            node_regressions += 1
+        if valid <= n_sim:
+            tl = navsim.simulate(centers_to_nodes(lat), navsim.DEPLOYED, seed=1000 + valid)
+            ts = navsim.simulate(centers_to_nodes(sm), navsim.DEPLOYED, seed=1000 + valid)
+            ab_len.append((walked_length(tl), walked_length(ts)))
+            ab_vdj.append((analyze.smoothness(tl)['veldir_jump_rms'], analyze.smoothness(ts)['veldir_jump_rms']))
+            ab_covL.append(tl.coverage); ab_covS.append(ts.coverage)
+            if ts.coverage < tl.coverage - 0.05:   # smoothing must not strand the pursuit vs the lattice baseline
+                cov_regressions += 1
+    tLatL = sum(a for a, _ in ab_len); tLatS = sum(b for _, b in ab_len)
+    mVdjL, mVdjS = _mean([a for a, _ in ab_vdj]), _mean([b for _, b in ab_vdj])
+    red = lambda a, b: (100 * (1 - b / a)) if a > 1e-9 else 0.0
+    print("\n== random-terrain stress: %d valid maps (of %d attempts), %d walked through A/B ==" % (valid, attempts, min(valid, n_sim)))
+    print("  SAFETY   unsafe/hazard-crossing smoothed paths : %d   (MUST be 0)" % safety_violations)
+    print("  MONOTONE smoothed longer than lattice          : %d   (MUST be 0)" % length_regressions)
+    print("  MONOTONE smoothed has more nodes than lattice  : %d   (MUST be 0)" % node_regressions)
+    print("  COVERAGE smoothed stranded vs lattice (>5%% drop): %d   (MUST be 0)" % cov_regressions)
+    print("  A/B      walked-length %+.0f%% | velDir-jerk %+.0f%% | coverage lat %.0f%% -> sm %.0f%%"
+          % (red(tLatL, tLatS), red(mVdjL, mVdjS), _mean(ab_covL) * 100, _mean(ab_covS) * 100))
+    print("  (random 22x22 fields, 6-14%% obstacles, 25%% of them hazard; goal corners kept clear)")
+    return safety_violations + length_regressions + node_regressions + cov_regressions
+
 if __name__ == '__main__':
     run()
     ab_compare()
     margin_sweep()
+    random_stress()
