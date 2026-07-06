@@ -414,8 +414,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // a bimodal "silence keyed to interactions" tell. Bounded < ~0.5° so at reach distance the aim moves
                 // < 0.04 blocks and never leaves the target face → reach/place hit<->miss is unchanged (predictions
                 // stay exact) and the break's crosshair stays on the target block.
-                desiredYaw += (float) this.tremorYaw;
-                desiredPitch += (float) this.tremorPitch;
+                // While a precise block interaction holds, the hand STEADIES: scale the tremor down (default 1/10,
+                // user spec — the full cruising tremor reads as nervous first-person drift while mining). Kept
+                // nonzero so the mid-interaction noise floor never collapses to exactly 0.
+                final double tremorScale = this.precise
+                        ? Math.max(0.0, Princeps.settings().humanizedBreakTremorScale.value) : 1.0;
+                desiredYaw += (float) (this.tremorYaw * tremorScale);
+                desiredPitch += (float) (this.tremorPitch * tremorScale);
 
                 final boolean cruising = !this.precise && !airborne;
                 // A SMOOTH, tightly rate-limited turn is used for cruising, for the base-hunt break-corner arc
@@ -607,12 +612,19 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         protected abstract Rotation getPrevRotation();
 
         /**
-         * Nudges the player's pitch to a regular level. (Between {@code -20} and {@code 10}, increments are by {@code 1})
+         * Nudges the player's pitch to a regular level, 1 degree per tick. Legacy band [-20, 10]; with humanizedLook
+         * the natural WALK-GAZE band (default [6, 12] degrees downward — user spec) applies instead. Only ever runs
+         * for pitch-agnostic targets (cruising), so break/place/pearl/elytra/drop aims are never fought.
          */
         private float nudgeToLevel(float pitch) {
-            if (pitch < -20) {
+            float lo = -20.0f, hi = 10.0f;
+            if (Princeps.settings().humanizedLook.value) {
+                lo = Princeps.settings().humanizedWalkPitchMin.value.floatValue();
+                hi = Math.max(lo, Princeps.settings().humanizedWalkPitchMax.value.floatValue());
+            }
+            if (pitch < lo) {
                 return pitch + 1;
-            } else if (pitch > 10) {
+            } else if (pitch > hi) {
                 return pitch - 1;
             }
             return pitch;

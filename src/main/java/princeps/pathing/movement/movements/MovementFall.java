@@ -17,6 +17,7 @@
 
 package princeps.pathing.movement.movements;
 
+import princeps.Princeps;
 import princeps.api.IPrinceps;
 import princeps.api.pathing.movement.MovementStatus;
 import princeps.api.utils.BetterBlockPos;
@@ -129,7 +130,12 @@ public class MovementFall extends Movement {
                     ? RotationUtils.calcRotationFromVec3d(VecUtils.getBlockPosCenter(src),
                             VecUtils.getBlockPosCenter(dest), ctx.playerRotations()).getYaw()
                     : ctx.playerRotations().getYaw();
-            float fallPitch = Math.max(25.0F, Math.min(60.0F, toDest.getPitch())); // mostly down, never the singular ~90
+            // STEEP down-look during the fall (user spec: 70..80 deg), stable per drop: a fixed per-dest fraction
+            // picks a point inside the band so consecutive drops vary but the look never flickers within one drop,
+            // and never hits the singular straight-down 90.
+            final float fpLo = Princeps.settings().humanizedFallPitchMin.value.floatValue();
+            final float fpHi = Math.max(fpLo, Princeps.settings().humanizedFallPitchMax.value.floatValue());
+            float fallPitch = fpLo + ((Long.hashCode(dest.asLong()) & 15) / 15.0f) * (fpHi - fpLo);
             state.setTarget(new MovementTarget(new Rotation(fallYaw, fallPitch), false));
         }
         if (playerFeet.equals(dest) && (ctx.player().position().y - playerFeet.getY() < 0.094 || isWater)) { // 0.094 because lilypads

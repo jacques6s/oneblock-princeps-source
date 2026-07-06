@@ -893,6 +893,27 @@ public final class Settings {
      *  throughput is nearly unchanged. */
     public final Setting<Boolean> humanizedBreakSightDelay = new Setting<>(true);
 
+    /** While plainly WALKING (pitch-agnostic cruising targets), the gaze settles into this natural walk band —
+     *  degrees DOWNWARD, nudged 1 deg/tick, saccadic wander rides on top. Aims that set their own pitch (break,
+     *  place, pearl throws, elytra, drops) are untouched, so the band never fights a block interaction. */
+    public final Setting<Double> humanizedWalkPitchMin = new Setting<>(6.0);
+
+    /** Upper edge of the walking gaze band (see {@link #humanizedWalkPitchMin}). */
+    public final Setting<Double> humanizedWalkPitchMax = new Setting<>(12.0);
+
+    /** During a plain FALL the look eases to the post-drop travel yaw and a STEEP downward pitch inside this band
+     *  (stable per drop — varies drop to drop, never the singular straight-down 90). */
+    public final Setting<Double> humanizedFallPitchMin = new Setting<>(70.0);
+
+    /** Upper edge of the fall gaze band (see {@link #humanizedFallPitchMin}). */
+    public final Setting<Double> humanizedFallPitchMax = new Setting<>(80.0);
+
+    /** Tremor scale while a precise block interaction is active (mining/placing): a human hand STEADIES to a light
+     *  rest tremor when holding on a target — full cruising tremor there reads as nervous first-person drift. 1.0 =
+     *  unchanged, 0.1 = one tenth (user-tuned). Note the tradeoff: near-zero mid-break tremor re-approaches the
+     *  "noise floor keyed to interactions" pattern; 0.1 keeps a nonzero floor while calming the visible drift. */
+    public final Setting<Double> humanizedBreakTremorScale = new Setting<>(0.1);
+
     /** ANY-ANGLE path smoothing: after A*, string-pull flat obstacle-free runs of the block-center lattice into taut
      *  straight SmoothTraverse chords (walk diagonally across many blocks instead of 45/90-deg zig-zags). Shorter and
      *  much smoother. Collision-safe: a run only merges if every cell the body sweeps along the chord has floor + body
