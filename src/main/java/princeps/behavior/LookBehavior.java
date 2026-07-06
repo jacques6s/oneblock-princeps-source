@@ -138,6 +138,12 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     final float a = (float) Math.max(0.1, Math.min(1.0, 1.0 - smoothness * 0.9));
                     final float curYaw = this.prevRotation.getYaw();
                     final float curPitch = this.prevRotation.getPitch();
+                    // NOTE: this low-pass emits a fractional (non-mouse-count-quantized) yaw/pitch each flight tick.
+                    // A real elytra flyer's rotation deltas are integer mouse counts, so a rotation-quantization
+                    // check during flight could distinguish this. A correct fix needs error-diffusion (accumulate the
+                    // sub-count residual so tiny increments aren't lost to rounding) AND in-game flight validation —
+                    // not doable in the ground-movement sim, so deferred rather than shipped untested. Base-hunt is
+                    // underground / never flies, so this does not affect the flagship. See memory.
                     ctx.player().setYRot(curYaw + Mth.degreesDifference(curYaw, actual.getYaw()) * a);
                     ctx.player().setXRot(curPitch + (actual.getPitch() - curPitch) * a);
                 } else {
