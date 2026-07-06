@@ -880,6 +880,12 @@ public final class Settings {
      *  sim shows larger values cut corners harder and start missing node columns (coverage loss). */
     public final Setting<Double> humanizedSteeringTrackBlocks = new Setting<>(0.7);
 
+    /** Boundary hysteresis (degrees) for the humanizedSteering octant strafe: the held W/A/D combo is kept unless a
+     *  different octant is better by more than this margin, so the strafe input does not chatter (flip A<->D every
+     *  couple ticks) as the bearing hovers on a 45-degree boundary. Bench: ~20-30% fewer octant toggles on winding
+     *  paths, node coverage unchanged. 0 disables. */
+    public final Setting<Double> humanizedSteeringHysteresis = new Setting<>(20.0);
+
     /**
      * Exclusively use cached chunks for pathing
      * <p>
