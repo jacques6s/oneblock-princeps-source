@@ -90,14 +90,9 @@ public class SmoothTraverse extends Movement {
             // whenever the executor containment accepts the feet while the body is past the end, SUCCESS fires
             // (a tighter fixed bound left a containment-yes/success-no gap that rewind-ping-ponged into timeouts
             // at sharp junction cuts); outside the corridor SUCCESS can never fire and the pursuit steers back.
-            final double dx = dest.x - src.x, dz = dest.z - src.z;
-            final double len = Math.hypot(dx, dz);
-            if (len > 1e-6) {
-                final net.minecraft.world.phys.Vec3 p = ctx.player().position();
-                final double s = ((p.x - (src.x + 0.5)) * dx + (p.z - (src.z + 0.5)) * dz) / len;
-                if (s >= len - 0.5) {
-                    return state.setStatus(MovementStatus.SUCCESS);
-                }
+            final net.minecraft.world.phys.Vec3 p = ctx.player().position();
+            if (endRegionReached(p.x, p.z, src, dest)) {
+                return state.setStatus(MovementStatus.SUCCESS);
             }
         }
         // Walk the smoothed line: the pure-pursuit follows the (now-sparse) smoothed polyline of the executor's path,
@@ -136,6 +131,25 @@ public class SmoothTraverse extends Movement {
         cells.add(src);   // endpoints are always swept; add explicitly to be robust against FP corner cases
         cells.add(dest);
         return cells;
+    }
+
+    /**
+     * PURE axial end-region predicate (unit-tested): the body's projection along the src->dest chord axis has
+     * reached the final half block. The CALLER must additionally require the feet cell to be inside the chord's own
+     * verified corridor (getValidPositions) — that pairing is load-bearing twice over: it blocks promotion from
+     * laterally-unverified ground (knockback), and it is the livelock-free choice (any position the executor
+     * containment accepts past the end MUST succeed, else containment-yes/success-no rewind-ping-pongs; a tighter
+     * fixed lateral bound bench-failed exactly that way). Same-tick rewind loops are additionally impossible via
+     * PathExecutor's noRewindBelow floor + recursion depth guard.
+     */
+    static boolean endRegionReached(final double px, final double pz, final BetterBlockPos src, final BetterBlockPos dest) {
+        final double dx = dest.x - src.x, dz = dest.z - src.z;
+        final double len = Math.hypot(dx, dz);
+        if (len <= 1e-6) {
+            return false;
+        }
+        final double s = ((px - (src.x + 0.5)) * dx + (pz - (src.z + 0.5)) * dz) / len;
+        return s >= len - 0.5;
     }
 
     /** Liang-Barsky segment/AABB clip: does segment (ax,az)->(bx,bz) intersect axis-aligned rect [xmin,xmax]x[zmin,zmax]? */

@@ -129,6 +129,36 @@ public class SmoothTraverseTest {
     }
 
     @Test
+    public void endRegionAxialPredicate() {
+        // east chord (0,64,0)->(10,64,0), centers 0.5..10.5, len 10: the end region begins at s = 9.5 (x = 10.0)
+        BetterBlockPos src = new BetterBlockPos(0, 64, 0), dest = new BetterBlockPos(10, 64, 0);
+        assertFalse("mid-chord must not be end region", SmoothTraverse.endRegionReached(5.0, 0.5, src, dest));
+        assertFalse("just before the final half block", SmoothTraverse.endRegionReached(9.9, 0.5, src, dest));
+        assertTrue("inside the final half block", SmoothTraverse.endRegionReached(10.1, 0.5, src, dest));
+        assertTrue("at the dest center", SmoothTraverse.endRegionReached(10.5, 0.5, src, dest));
+        assertTrue("slid PAST the end (the overshoot case the rule exists for)",
+                SmoothTraverse.endRegionReached(11.4, 0.5, src, dest));
+        assertTrue("laterally offset but past the end — the AXIAL predicate accepts; the CALLER's corridor-"
+                + "membership requirement is what blocks unverified ground",
+                SmoothTraverse.endRegionReached(10.2, 3.5, src, dest));
+        assertFalse("degenerate zero-length chord never end-regions",
+                SmoothTraverse.endRegionReached(0.5, 0.5, src, src));
+    }
+
+    @Test
+    public void corridorExtendsPastItsOwnDest() {
+        // Pins the property that made the executor guards NECESSARY (review-confirmed crash chain): the wide swept
+        // corridor contains cells PAST and BESIDE the chord's own dest, so a body can sit there containment-valid
+        // while feet != dest. Without end-region SUCCESS it would strand (timeout); without PathExecutor's
+        // noRewindBelow floor + depth guard, success->rewind->success would recurse to a StackOverflowError.
+        // If this property ever changes (corridor no longer overshoots), those guards may be revisited.
+        BetterBlockPos src = new BetterBlockPos(0, 64, 0), dest = new BetterBlockPos(20, 64, 0);
+        Set<BetterBlockPos> corridor = SmoothTraverse.sweptCells(src, dest, 0.65);
+        assertTrue("cell straight past dest is in the corridor", corridor.contains(new BetterBlockPos(21, 64, 0)));
+        assertTrue("cell beside dest is in the corridor", corridor.contains(new BetterBlockPos(20, 64, 1)));
+    }
+
+    @Test
     public void diagonalThroughGridCornerSweepsAllFourMeetingCells() {
         // Tangent edge case for the Liang-Barsky clip: a 45deg chord (0,64,0)->(4,64,4) passes EXACTLY through the grid
         // corners (1,1),(2,2),(3,3). At corner (2,2) the body straddles all four meeting cells, so the conservative
