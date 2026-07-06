@@ -537,7 +537,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // only change look direction if it's safe (don't want to fuck up an in progress parkour for example
             Rotation rot = toBreak.get().getB();
             BetterBlockPos pos = toBreak.get().getA();
-            princeps.getLookBehavior().updateTarget(rot, true);
+            princeps.getLookBehavior().updateTarget(rot, true, true); // break aim -> bell-curve arc
             MovementHelper.switchToBestToolFor(ctx, bcc.get(pos));
             if (ctx.player().isCrouching()) {
                 // really horrible bug where a block is visible for breaking while sneaking but not otherwise

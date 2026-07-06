@@ -250,10 +250,18 @@ public class MovementPillar extends Movement {
                 // TODO: Evaluate usage of getMaterial().isReplaceable()
                 if (!(fr instanceof AirBlock || frState.canBeReplaced())) {
                     RotationUtils.reachable(ctx, src, ctx.playerController().getBlockReachDistance())
-                            .map(rot -> new MovementState.MovementTarget(rot, true))
+                            .map(rot -> new MovementState.MovementTarget(rot, true, true))
                             .ifPresent(state::setTarget);
                     state.setInput(Input.JUMP, false); // breaking is like 5x slower when you're jumping
-                    state.setInput(Input.CLICK_LEFT, true);
+                    // Gate the press on the crosshair actually being ON the block, like every other break site.
+                    // This press used to be unconditional, which was tolerable while the precise aim snapped in a
+                    // single tick — but with the bell-curve arc the aim sweeps here over several ticks, and a held
+                    // CLICK_LEFT digs whatever foreground block the LIVE trace crosses mid-arc (wrong-block digs,
+                    // confirmed in the adversarial review). The gate binds the dig to the intended block; the
+                    // slower aim just means the dig starts once the crosshair lands.
+                    if (ctx.isLookingAt(src)) {
+                        state.setInput(Input.CLICK_LEFT, true);
+                    }
                     blockIsThere = false;
                 } else if (ctx.player().isCrouching() && (ctx.isLookingAt(src.below()) || ctx.isLookingAt(src)) && ctx.player().position().y > dest.getY() + 0.1) {
                     state.setInput(Input.CLICK_RIGHT, true);

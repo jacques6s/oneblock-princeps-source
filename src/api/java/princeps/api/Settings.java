@@ -869,10 +869,29 @@ public final class Settings {
     public final Setting<Double> humanizedLookMaxTurnHardCap = new Setting<>(70.0);
 
     /** Also speed-limit the turn while BREAKING (not just cruising), so tunneling around a corner arcs the head over
-     *  a few ticks and mines the swept blocks — instead of a 1-tick 90° snap to each new block center. Off by default
-     *  (normal precise mining stays an exact instant aim); the Base Hunter enables it (widening a tunnel corner
-     *  slightly is fine there, and it removes the last robotic snap). Never affects place / jump / elytra. */
-    public final Setting<Boolean> humanizedLookCapBreakTurn = new Setting<>(false);
+     *  a few ticks and mines the swept blocks — instead of a 1-tick 90° snap to each new block center. ON by default
+     *  since the bell-curve mining aim landed (user feedback: the mining flick must never happen); the dig simply
+     *  fires once isLookingAt catches up, so hit/miss is unchanged. Never affects place / jump / elytra. */
+    public final Setting<Boolean> humanizedLookCapBreakTurn = new Setting<>(true);
+
+    /** Human ACCELERATION BELL for the mining aim (requires {@link #humanizedLookCapBreakTurn}): instead of jumping
+     *  straight to the max turn rate (a visible velocity kick), the head EASES IN (accelerates ~peak/3 per tick^2),
+     *  rides the mode's peak, then EASES OUT proportionally into the target — the classic fast-rise/long-tail human
+     *  re-aim curve. A tiny per-arc random variance (0.01%..0.1%) makes no two arcs numerically identical; the mode
+     *  ceiling is never exceeded. Sim-validated (navbench/aim_curve_sim.py): peak accel 3x lower than the flat
+     *  rate-limit, 30x lower than the old snap; tremor-sized corrections stay sub-degree so the crosshair never
+     *  leaves the block face (the break keeps firing). */
+    public final Setting<Boolean> humanizedLookAimCurve = new Setting<>(true);
+
+    /** Bell-curve mode = the PEAK head-turn speed (deg/tick) of the mining aim: 0 = superSmooth (5), 1 = standard (9),
+     *  2 = fast (20). The standard peak matches the 9-deg cruising cap the whole look system is tuned around. */
+    public final Setting<Integer> humanizedLookAimCurveMode = new Setting<>(1);
+
+    /** Human sighting reaction for the dig: when the crosshair NEWLY lands on a target block, wait 1..3 ticks before
+     *  the first press instead of clicking the same tick (an instant same-tick press is a machine tell). The wait is
+     *  tracked while the post-break cooldown runs, so it overlaps the mining rhythm instead of stacking onto it —
+     *  throughput is nearly unchanged. */
+    public final Setting<Boolean> humanizedBreakSightDelay = new Setting<>(true);
 
     /** ANY-ANGLE path smoothing: after A*, string-pull flat obstacle-free runs of the block-center lattice into taut
      *  straight SmoothTraverse chords (walk diagonally across many blocks instead of 45/90-deg zig-zags). Shorter and

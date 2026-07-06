@@ -126,7 +126,7 @@ public final class MineProcess extends PrincepsProcessHelper implements IMinePro
             if (!MovementHelper.avoidBreaking(princeps.bsi, pos.getX(), pos.getY(), pos.getZ(), state)) {
                 Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
                 if (rot.isPresent() && isSafeToCancel) {
-                    princeps.getLookBehavior().updateTarget(rot.get(), true);
+                    princeps.getLookBehavior().updateTarget(rot.get(), true, true); // break aim -> bell-curve arc
                     MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
                     if (ctx.isLookingAt(pos) || ctx.playerRotations().isReallyCloseTo(rot.get())) {
                         princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);

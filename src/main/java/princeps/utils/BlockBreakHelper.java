@@ -20,6 +20,7 @@ package princeps.utils;
 import princeps.api.PrincepsAPI;
 import princeps.api.utils.IPlayerContext;
 import princeps.utils.accessor.IPlayerControllerMP;
+import net.minecraft.core.BlockPos;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -37,6 +38,16 @@ public final class BlockBreakHelper {
     private int breakDelayTimer = 0;
     // Break timing is execution-only (never replayed in path/reach prediction), so a plain RNG is fine here.
     private final java.util.Random breakRng = new java.util.Random();
+    // Human sighting reaction (humanizedBreakSightDelay): the block the crosshair currently rests on, and the
+    // remaining 1..3-tick wait between FIRST sighting it and the first press. Tracked every tick — including while
+    // the post-break cooldown runs — so the reaction overlaps the mining rhythm instead of stacking onto it.
+    private BlockPos sightedPos;
+    private int sightDelayTimer;
+    // Mining-rhythm window: >0 while a block broke within the last few ticks. During a held-button rhythm
+    // (instamine runs: no post-break cooldown at all) a human does NOT re-react per block — without this window
+    // every consecutive instamined block would pay a fresh 1..3-tick sighting stall (a 2-4x cadence regression,
+    // confirmed in review). The full reaction only applies when the crosshair lands after a genuine idle/re-aim.
+    private int rhythmTimer;
 
     BlockBreakHelper(IPlayerContext ctx) {
         this.ctx = ctx;
@@ -52,16 +63,48 @@ public final class BlockBreakHelper {
     }
 
     public void tick(boolean isLeftClick) {
+        HitResult trace = ctx.objectMouseOver();
+        boolean isBlockTrace = trace != null && trace.getType() == HitResult.Type.BLOCK;
+        if (rhythmTimer > 0) {
+            rhythmTimer--;
+        }
+
+        // Sighting reaction: when the crosshair NEWLY lands on a target block, a human doesn't press the same tick —
+        // arm a 1..3 tick wait from the moment of sighting. This runs BEFORE the cooldown early-return so the wait
+        // counts down in parallel with the post-break cooldown (overlap, not stack: throughput ~unchanged). Leaving
+        // the block resets the sighting, so re-acquiring it re-arms — "erst bei anvisieren starten".
+        if (PrincepsAPI.getSettings().humanizedLook.value && PrincepsAPI.getSettings().humanizedBreakSightDelay.value) {
+            if (isLeftClick && isBlockTrace) {
+                BlockPos pos = ((BlockHitResult) trace).getBlockPos();
+                if (!pos.equals(sightedPos)) {
+                    sightedPos = pos;
+                    sightDelayTimer = 1 + breakRng.nextInt(3); // fire 1..3 ticks after the crosshair lands
+                } else if (sightDelayTimer > 0) {
+                    sightDelayTimer--;
+                }
+            } else {
+                sightedPos = null;
+                sightDelayTimer = 0;
+            }
+        } else {
+            sightedPos = null;
+            sightDelayTimer = 0;
+        }
+
         if (breakDelayTimer > 0) {
             breakDelayTimer--;
             return;
         }
-        HitResult trace = ctx.objectMouseOver();
-        boolean isBlockTrace = trace != null && trace.getType() == HitResult.Type.BLOCK;
 
         if (isLeftClick && isBlockTrace) {
+            // still reacting to a freshly sighted block — but never delay an in-progress multi-tick break, and never
+            // interrupt a live mining rhythm (held button, block broke moments ago: a human doesn't re-react per block)
+            if (!wasHitting && sightDelayTimer > 0 && rhythmTimer == 0) {
+                return;
+            }
             ctx.playerController().setHittingBlock(wasHitting);
             if (ctx.playerController().hasBrokenBlock()) {
+                rhythmTimer = 3; // a break just completed; the follow-up press below continues the rhythm
                 ctx.playerController().syncHeldItem();
                 ctx.playerController().clickBlock(((BlockHitResult) trace).getBlockPos(), ((BlockHitResult) trace).getDirection());
                 ctx.player().swing(InteractionHand.MAIN_HAND);
@@ -70,6 +113,7 @@ public final class BlockBreakHelper {
                     ctx.player().swing(InteractionHand.MAIN_HAND);
                 }
                 if (ctx.playerController().hasBrokenBlock()) { // block broken this tick
+                    rhythmTimer = 3; // keep the held-button rhythm alive across the cooldown boundary
                     // break delay timer only applies for multi-tick block breaks like vanilla
                     final int base = PrincepsAPI.getSettings().blockBreakSpeed.value - BASE_BREAK_DELAY;
                     // Jitter the post-break cooldown so the mining cadence is not a perfectly periodic metronome — a

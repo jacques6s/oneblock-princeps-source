@@ -40,6 +40,22 @@ public interface ILookBehavior extends IBehavior {
     void updateTarget(Rotation rotation, boolean blockInteract);
 
     /**
+     * Like {@link #updateTarget(Rotation, boolean)}, additionally signalling that the interaction this aim serves is
+     * a block BREAK (never a place/use). Break aims may be shaped by the humanized bell-curve turn — the dig itself
+     * stays gated on the live crosshair raytrace at the press site, so a slower aim only ever means a later dig,
+     * never a wrong-block dig. The intent cannot be derived from the CLICK_LEFT input state: break sites correctly
+     * press only after the crosshair has arrived, so input-derived detection is circular and would leave the
+     * first-aim snap (the "flick") in place.
+     *
+     * @param rotation      The target rotations
+     * @param blockInteract Whether the target rotations are needed for a block interaction
+     * @param breakIntent   Whether this aim targets a block that is about to be broken
+     */
+    default void updateTarget(Rotation rotation, boolean blockInteract, boolean breakIntent) {
+        this.updateTarget(rotation, blockInteract);
+    }
+
+    /**
      * The aim processor instance for this {@link ILookBehavior}, which is responsible for applying additional,
      * deterministic transformations to the target rotation set by {@link #updateTarget}.
      *

@@ -72,13 +72,27 @@ public class MovementState {
          */
         private boolean forceRotations;
 
+        /**
+         * {@code true} when this forced rotation aims at a block we intend to BREAK (not place). Carried through to
+         * LookBehavior so the bell-curve mining arc engages from the FIRST aim tick. The CLICK_LEFT input alone
+         * cannot signal this: every break site correctly gates the press on the crosshair having ARRIVED, so
+         * deriving the arc from the live input is circular (curve waits for the click, the click waits for the
+         * arrival — the aim would snap exactly like the flick the curve exists to remove).
+         */
+        private boolean breakIntent;
+
         public MovementTarget() {
             this(null, false);
         }
 
         public MovementTarget(Rotation rotation, boolean forceRotations) {
+            this(rotation, forceRotations, false);
+        }
+
+        public MovementTarget(Rotation rotation, boolean forceRotations, boolean breakIntent) {
             this.rotation = rotation;
             this.forceRotations = forceRotations;
+            this.breakIntent = breakIntent;
         }
 
         public final Optional<Rotation> getRotation() {
@@ -87,6 +101,10 @@ public class MovementState {
 
         public boolean hasToForceRotations() {
             return this.forceRotations;
+        }
+
+        public boolean isBreakIntent() {
+            return this.breakIntent;
         }
     }
 }

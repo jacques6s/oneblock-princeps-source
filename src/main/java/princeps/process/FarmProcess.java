@@ -275,7 +275,7 @@ public final class FarmProcess extends PrincepsProcessHelper implements IFarmPro
             }
             Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
             if (rot.isPresent() && isSafeToCancel) {
-                princeps.getLookBehavior().updateTarget(rot.get(), true);
+                princeps.getLookBehavior().updateTarget(rot.get(), true, true); // harvest break aim -> bell-curve arc
                 MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
                 if (ctx.isLookingAt(pos)) {
                     princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);

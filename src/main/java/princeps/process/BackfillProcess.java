@@ -80,8 +80,9 @@ public final class BackfillProcess extends PrincepsProcessHelper {
                     princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
                     return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
                 case ATTEMPTING:
-                    // patience
-                    princeps.getLookBehavior().updateTarget(fake.getTarget().getRotation().get(), true);
+                    // patience (forward the fake movement's break intent so a break aim keeps its arc shape)
+                    princeps.getLookBehavior().updateTarget(fake.getTarget().getRotation().get(), true,
+                            fake.getTarget().isBreakIntent());
                     return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
                 default:
                     throw new IllegalStateException();

@@ -215,7 +215,7 @@ public class MovementTraverse extends Movement {
                 pitchToBreak = 26f + ((Long.hashCode(dest.asLong()) & 7) - 3) * 1.1f; // ~23..30, stable per block
             }
 
-            return state.setTarget(new MovementState.MovementTarget(new Rotation(yawToDest, pitchToBreak), true))
+            return state.setTarget(new MovementState.MovementTarget(new Rotation(yawToDest, pitchToBreak), true, true))
                     .setInput(Input.MOVE_FORWARD, true)
                     .setInput(Input.SPRINT, true);
         }

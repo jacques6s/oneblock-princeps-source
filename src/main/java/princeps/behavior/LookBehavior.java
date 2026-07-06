@@ -82,9 +82,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
     @Override
     public void updateTarget(Rotation rotation, boolean blockInteract) {
+        this.updateTarget(rotation, blockInteract, false);
+    }
+
+    @Override
+    public void updateTarget(Rotation rotation, boolean blockInteract, boolean breakIntent) {
         // blockInteract == "this movement needs an EXACT facing" (break/place/bridge) → carry it as the precise
-        // flag so the humanized-look filter hard-bypasses its wander for this target.
-        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract), blockInteract);
+        // flag so the humanized-look filter hard-bypasses its wander for this target. breakIntent additionally
+        // marks BREAK aims (never place/use) so the bell-curve mining arc can engage from the FIRST aim tick —
+        // the CLICK_LEFT input can't signal that, because break sites press only after the crosshair arrived.
+        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract), blockInteract, breakIntent);
     }
 
     @Override
@@ -118,10 +125,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // bypass only engages next tick once physics leave the ground, so a forced-jump tick counts precise.
                 final boolean jumpLaunch = princeps.getInputOverrideHandler().isInputForcedDown(Input.JUMP);
                 this.processor.setPrecise(this.target.precise || jumpLaunch);
-                // Optionally arc the head through a mining corner instead of snapping: cap the turn even while a
-                // BREAK is forced (CLICK_LEFT), on the ground, and not launching a jump (a jump must fly its exact
-                // heading). Off by default (normal precise stays a 1-tick exact aim); the Base Hunter turns it on.
-                final boolean breaking = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT);
+                // Arc the head through a mining aim instead of snapping: cap the turn while a BREAK is forced OR
+                // while the target itself is a declared break aim, on the ground, and not launching a jump (a jump
+                // must fly its exact heading). The breakIntent flag is essential: every break site correctly gates
+                // its CLICK_LEFT press on the crosshair having ARRIVED, so on the acquisition tick the input alone
+                // is always false — deriving the arc from the input is circular (curve waits for click, click waits
+                // for arrival) and the first-aim snap ("flick") would survive. Place/use aims never set breakIntent
+                // and never force CLICK_LEFT, so they keep the exact 1-tick aim (bridging timing untouched).
+                final boolean breaking = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
+                        || this.target.breakIntent;
                 this.processor.setCapPreciseTurn(
                         Princeps.settings().humanizedLook.value
                                 && Princeps.settings().humanizedLookCapBreakTurn.value
@@ -316,6 +328,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private boolean precise;
         private boolean capPreciseTurn; // when set, speed-limit the turn even during a precise BREAK (mining arc)
         private boolean smoothAirborne; // a plain fall/descent — use the smooth rate-limited turn, not the exact aim
+        // Bell-curve mining aim state (humanizedLookAimCurve): current angular speed of the arc + the tick stamps
+        // that detect "a fresh arc started" (reset speed to 0 = ease-in) and guard the once-per-tick advance.
+        private double curveVel;       // current head-turn speed of the running arc (deg/tick)
+        private long tickCount;        // advanced once per tick() — forks replay it deterministically via advance()
+        private long curveTickStamp = Long.MIN_VALUE; // last tickCount the curve advanced (gap > 1 tick = fresh arc)
+        private double curveVarAmp;    // this arc's random variance amplitude (drawn per arc: 0.01%..0.1%)
+        // Execution-only variance RNG: NEVER drawn from this.rand — the forked solver replays this.rand via tick()
+        // and consuming it here would desync its place-predictions from reality. The curve only shapes the APPLY
+        // path (predictions use peekRotationExact), so untracked randomness is safe here, like BlockBreakHelper's.
+        private final java.util.Random curveRng = new java.util.Random();
         private static final double SACCADE_EASE = 0.28; // fraction toward the fixation per tick (~4-tick flick)
         private static final double TREMOR_THETA = 0.35; // fast reversion → high-freq hand micro-jitter
         private static final double TREMOR_PITCH_RATIO = 0.70; // pitch tremor as a fraction of yaw tremor
@@ -340,6 +362,10 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.precise = source.precise;
             this.capPreciseTurn = source.capPreciseTurn;
             this.smoothAirborne = source.smoothAirborne;
+            this.curveVel = source.curveVel;
+            this.tickCount = source.tickCount;
+            this.curveTickStamp = source.curveTickStamp;
+            this.curveVarAmp = source.curveVarAmp;
         }
 
         final void setPrecise(final boolean precise) {
@@ -408,6 +434,14 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                         desiredYaw += (float) (this.ouYaw * wanderScale);
                         desiredPitch += (float) (this.ouPitch * wanderScale);
                     }
+                    // BELL-CURVE mining aim: this.precise inside this branch implies the capPreciseTurn break path
+                    // (cruising and smoothAirborne both require !precise). Instead of jumping straight to the flat
+                    // rate limit (a 0->9 velocity kick in one tick — the "flick"), the head eases IN, rides the
+                    // mode's peak, and eases OUT into the block. The dig itself still only fires once the live
+                    // crosshair raytrace lands on the target (BlockBreakHelper), so hit/miss is untouched.
+                    if (this.precise && Princeps.settings().humanizedLookAimCurve.value) {
+                        return this.aimCurveTurn(prev, desiredYaw, desiredPitch);
+                    }
                     // proportional ease-out toward the target, then the tight per-tick smoothness cap
                     final double maxStep = Princeps.settings().humanizedLookTurnMaxSpeed.value;
                     final float capY = (float) Math.max(1.0, Princeps.settings().humanizedLookMaxCruiseYaw.value);
@@ -442,8 +476,44 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             ).clamp();
         }
 
+        /**
+         * One tick of the bell-curve mining arc: the head's TOTAL angular speed follows ease-in (accelerate by
+         * ~peak/3 per tick) → the mode's peak → proportional ease-out into the target, and the step is taken along
+         * the straight (yaw,pitch) error vector so the arc is one clean sweep. The velocity advances exactly once
+         * per game tick (guarded by {@code tickCount}), so a same-tick re-peek can never double-accelerate; a gap
+         * in curve ticks (the arc ended or was interrupted) resets the speed to 0 = the next aim eases in fresh.
+         * Per-arc random variance (amplitude drawn 0.01%..0.1%) makes no two arcs numerically identical, and is
+         * clamped so the mode ceiling is NEVER exceeded. Mouse-quantization happens in calculateMouseMove as usual.
+         */
+        private Rotation aimCurveTurn(final Rotation prev, final float desiredYaw, final float desiredPitch) {
+            final float yawErr = Mth.degreesDifference(prev.getYaw(), desiredYaw);
+            final float pitchErr = desiredPitch - prev.getPitch();
+            final double errMag = Math.hypot(yawErr, pitchErr);
+            if (this.curveTickStamp != this.tickCount) {
+                final boolean fresh = this.curveTickStamp != this.tickCount - 1;
+                this.curveTickStamp = this.tickCount;
+                if (fresh) {
+                    this.curveVel = 0.0;
+                    this.curveVarAmp = 1.0e-4 + this.curveRng.nextDouble() * 9.0e-4; // 0.01%..0.1% per arc
+                }
+                final double peak = aimCurvePeak();
+                double v = aimCurveNextVel(this.curveVel, errMag, peak);
+                v *= 1.0 + (this.curveRng.nextDouble() * 2.0 - 1.0) * this.curveVarAmp;
+                this.curveVel = Math.min(v, peak); // variance never lifts the speed above the mode's hard ceiling
+            }
+            final double step = Math.min(errMag, this.curveVel);
+            final double s = errMag > 1e-9 ? step / errMag : 0.0;
+            return new Rotation(
+                    this.calculateMouseMove(prev.getYaw(), prev.getYaw() + (float) (yawErr * s)),
+                    this.calculateMouseMove(prev.getPitch(), prev.getPitch() + (float) (pitchErr * s))
+            ).clamp();
+        }
+
         @Override
         public final void tick() {
+            // Advance the tick stamp FIRST (before any early return): the bell-curve arc keys its once-per-tick
+            // velocity update and its fresh-arc detection to this counter, and forks replay it via advance().
+            this.tickCount++;
             // No anti-aim wobble while gliding: a real elytra flyer holds a smooth line, so the randomLooking
             // jitter both looks robotic to the server AND is the dominant source of the visible per-tick twitch.
             // Skipping it here (and in the forked solver processor, which shares this method) keeps the simulated
@@ -613,11 +683,14 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         public final Mode mode;
         /** True when the movement needs an EXACT facing (break/place/bridge) — humanized wander is bypassed. */
         public final boolean precise;
+        /** True when this precise aim targets a block about to be BROKEN — eligible for the bell-curve arc. */
+        public final boolean breakIntent;
 
-        public Target(Rotation rotation, Mode mode, boolean precise) {
+        public Target(Rotation rotation, Mode mode, boolean precise, boolean breakIntent) {
             this.rotation = rotation;
             this.mode = mode;
             this.precise = precise;
+            this.breakIntent = breakIntent;
         }
 
         enum Mode {
@@ -658,5 +731,40 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 return CLIENT;
             }
         }
+    }
+
+    /** The bell-curve mode's peak head-turn speed (deg/tick): 0 = superSmooth (5), 1 = standard (9), 2 = fast (20). */
+    static double aimCurvePeak() {
+        final int mode = Princeps.settings().humanizedLookAimCurveMode.value;
+        if (mode <= 0) {
+            return 5.0;
+        }
+        if (mode >= 2) {
+            return 20.0;
+        }
+        return 9.0;
+    }
+
+    /**
+     * PURE core of the bell-curve mining aim (unit-tested; no settings, no MC): the next angular speed of the arc.
+     * <pre>
+     *   rise = min(vPrev + peak/3, peak)          ease-IN: 0 -> peak in ~3 ticks (the fast rise of the bell)
+     *   tail = max(max(0.9, peak/8), err * 0.45)  ease-OUT: proportional deceleration with a floor (no end-crawl)
+     *   v    = min(rise, tail)
+     * </pre>
+     * Yields the user's right-skewed bell: fast rise, plateau at the mode peak while the error is large, then a
+     * longer proportional tail into the target. Sim-validated in navbench/aim_curve_sim.py: peak acceleration is
+     * peak/3 per tick^2 (3x below the old flat rate-limit's 0->peak kick, 30x below the exact-aim snap), the mode
+     * ceiling is never exceeded, and tremor-sized (<=0.5 deg) corrections step sub-degree so the crosshair never
+     * leaves the block face mid-break.
+     */
+    static double aimCurveNextVel(final double vPrev, final double errMag, final double peakDegPerTick) {
+        final double peak = Math.max(0.5, peakDegPerTick);
+        final double accel = Math.max(0.5, peak / 3.0);
+        final double gain = 0.45;
+        final double tailMin = Math.max(0.9, peak / 8.0);
+        final double rise = Math.min(vPrev + accel, peak);
+        final double tail = Math.max(tailMin, errMag * gain);
+        return Math.min(rise, tail);
     }
 }

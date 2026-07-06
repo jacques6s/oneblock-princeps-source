@@ -135,7 +135,8 @@ public abstract class Movement implements IMovement, MovementHelper {
         currentState.getTarget().getRotation().ifPresent(rotation ->
                 princeps.getLookBehavior().updateTarget(
                         rotation,
-                        currentState.getTarget().hasToForceRotations()));
+                        currentState.getTarget().hasToForceRotations(),
+                        currentState.getTarget().isBreakIntent()));
         princeps.getInputOverrideHandler().clearAllKeys();
         currentState.getInputStates().forEach((input, forced) -> {
             princeps.getInputOverrideHandler().setInputForceState(input, forced);
@@ -176,7 +177,7 @@ public abstract class Movement implements IMovement, MovementHelper {
                 Optional<Rotation> reachable = RotationUtils.reachable(ctx, blockPos, ctx.playerController().getBlockReachDistance());
                 if (reachable.isPresent()) {
                     Rotation rotTowardsBlock = reachable.get();
-                    state.setTarget(new MovementState.MovementTarget(rotTowardsBlock, true));
+                    state.setTarget(new MovementState.MovementTarget(rotTowardsBlock, true, true));
                     if (ctx.isLookingAt(blockPos) || ctx.playerRotations().isReallyCloseTo(rotTowardsBlock)) {
                         state.setInput(Input.CLICK_LEFT, true);
                     }
@@ -187,10 +188,16 @@ public abstract class Movement implements IMovement, MovementHelper {
                 //i dont care if theres snow in the way!!!!!!!
                 //you dont own me!!!!
                 state.setTarget(new MovementState.MovementTarget(RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
-                        VecUtils.getBlockPosCenter(blockPos), ctx.playerRotations()), true)
+                        VecUtils.getBlockPosCenter(blockPos), ctx.playerRotations()), true, true)
                 );
                 // don't check selectedblock on this one, this is a fallback when we can't see any face directly, it's intended to be breaking the "incorrect" block
-                state.setInput(Input.CLICK_LEFT, true);
+                // ...but only press once the aim has ARRIVED at the intended rotation (tremor-tolerant closeness —
+                // isLookingAt can never pass here, no visible face). With the bell-curve arc the aim sweeps over
+                // several ticks, and a held press would blind-dig every foreground block the crosshair crosses on
+                // the way; at arrival the deliberate blind dig proceeds exactly as before.
+                if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)) {
+                    state.setInput(Input.CLICK_LEFT, true);
+                }
                 return false;
             }
         }
