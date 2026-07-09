@@ -92,8 +92,11 @@ public final class NetherPathfinderContext {
 
     /**
      * Builds a context configured for the given dimension's flyable space:
-     * Nether {@code [0,128)} (roof kept — identical to the original behaviour), End {@code [0,256)},
-     * anything else (Overworld / modded) the world's real {@code [minY, minY+height)}.
+     * Nether the world's REAL {@code [minY, minY+height)} — i.e. the full 256-block space, so flight
+     * ABOVE the bedrock roof is plannable (with the old 128 cap a journey started on top of the roof
+     * was planned in the sub-roof space and the flight dove into the bedrock). Interior paths are
+     * unaffected: the roof packs as solid, so no path can cross it except through real openings.
+     * End {@code [0,256)}, anything else (Overworld / modded) the world's real {@code [minY, minY+height)}.
      */
     public static NetherPathfinderContext forLevel(final long seed, final Level level) {
         final int dim;
@@ -101,8 +104,8 @@ public final class NetherPathfinderContext {
         final int height;
         if (level.dimension() == Level.NETHER) {
             dim = NetherPathfinder.DIMENSION_NETHER;
-            minY = 0;
-            height = 128;
+            minY = level.getMinY();
+            height = level.getHeight();
         } else if (level.dimension() == Level.END) {
             dim = NetherPathfinder.DIMENSION_END;
             minY = 0;

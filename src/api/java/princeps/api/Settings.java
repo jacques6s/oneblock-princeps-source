@@ -697,7 +697,7 @@ public final class Settings {
     /**
      * Render the path as a line instead of a frickin thingy
      */
-    public final Setting<Boolean> renderPathAsLine = new Setting<>(false);
+    public final Setting<Boolean> renderPathAsLine = new Setting<>(true);
 
     /**
      * Render the goal
@@ -754,7 +754,7 @@ public final class Settings {
     /**
      * Move without having to force the client-sided rotations
      */
-    public final Setting<Boolean> freeLook = new Setting<>(true);
+    public final Setting<Boolean> freeLook = new Setting<>(false);
 
     /**
      * Break and place blocks without having to force the client-sided rotations. Requires {@link #freeLook}.
@@ -787,7 +787,7 @@ public final class Settings {
      * {@code 0} disables it (snap straight to the steering target). Tune it live with
      * {@code #elytra smooth <value>}.
      */
-    public final Setting<Double> elytraSmoothness = new Setting<>(0.85D);
+    public final Setting<Double> elytraSmoothness = new Setting<>(1.0D);
 
     /**
      * Smoothness used while the elytra is landing — approaching the chosen landing spot or in its final
@@ -824,16 +824,21 @@ public final class Settings {
      * quantizer — so the rotation looks like a real player rather than a bot (no rigid heading, no long runs of
      * identical/zero deltas, no impossible float angles). HARD-BYPASSED during precise phases (block break/place,
      * airborne jumps/parkour, elytra) so pathing stays 100% accurate — same or better result, just not robotic.
+     *
+     * <p>In this build the drift/tremor components default to 0 (see the settings below) and the bell-curve
+     * acceleration profile ({@code humanizedLookAimCurve}) applies to EVERY smooth head movement, so the real,
+     * sent rotation turns with an eased ramp capped at the mode peak — smooth for the server and every observer,
+     * while the local first-person camera is additionally frame-interpolated ({@code princeps.flownav.FlowCam}).
      */
     public final Setting<Boolean> humanizedLook = new Setting<>(true);
 
     /** Max degrees the humanized yaw may wander from the true heading while cruising (pitch uses half of this).
      *  Saccade-to-saccade changes land in [~0.5, 2*this] degrees — user spec for straight walking: only minimal
      *  0.5..3 deg head adjustments, no big wobble → default 1.5 (band ±1.5 = max 3 deg change, min 0.5). */
-    public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(1.5);
+    public final Setting<Double> humanizedLookDriftDegrees = new Setting<>(0.0);
 
     /** Max degrees of always-on hand micro-tremor (pitch uses ~70% of this). Set to 0 for fully stable cameras. */
-    public final Setting<Double> humanizedLookTremorDegrees = new Setting<>(0.14);
+    public final Setting<Double> humanizedLookTremorDegrees = new Setting<>(0.0);
 
     /**
      * @deprecated no longer read — the turn is proportional now (see {@link #humanizedLookTurnMaxSpeed},
@@ -857,7 +862,7 @@ public final class Settings {
      *  (cruising, the base-hunt break-corner arc, and plain falls). Keeps following the blocky path and easing into
      *  a drop visually super-smooth — the head never yaws more than this per tick. The pursuit octant feet-steer
      *  keeps node coverage under the slow head turn (bench-verified at 9°). */
-    public final Setting<Double> humanizedLookMaxCruiseYaw = new Setting<>(9.0);
+    public final Setting<Double> humanizedLookMaxCruiseYaw = new Setting<>(8.0);
 
     /** Hard per-tick smoothness cap (degrees) on the SENT vertical head movement during a rate-limited turn — so
      *  looking down into a drop, or up/down along terrain, eases instead of snapping. */
@@ -906,10 +911,10 @@ public final class Settings {
 
     /** During a plain FALL the look eases to the post-drop travel yaw and a STEEP downward pitch inside this band
      *  (stable per drop — varies drop to drop, never the singular straight-down 90). */
-    public final Setting<Double> humanizedFallPitchMin = new Setting<>(70.0);
+    public final Setting<Double> humanizedFallPitchMin = new Setting<>(12.0);
 
     /** Upper edge of the fall gaze band (see {@link #humanizedFallPitchMin}). */
-    public final Setting<Double> humanizedFallPitchMax = new Setting<>(80.0);
+    public final Setting<Double> humanizedFallPitchMax = new Setting<>(22.0);
 
     /** Tremor scale while a precise block interaction is active (mining/placing): a human hand STEADIES to a light
      *  rest tremor when holding on a target — full cruising tremor there reads as nervous first-person drift. 1.0 =
@@ -957,7 +962,7 @@ public final class Settings {
 
     /** Gaze lookahead (blocks) for humanizedSteering — how far ahead on the path the eyes lead. Larger = looks
      *  further into corners earlier. */
-    public final Setting<Double> humanizedSteeringGazeBlocks = new Setting<>(3.2);
+    public final Setting<Double> humanizedSteeringGazeBlocks = new Setting<>(1.5);
 
     /** Feet lookahead (blocks) for humanizedSteering — how far ahead the walked track aims. Clamped to <= 0.7: the
      *  sim shows larger values cut corners harder and start missing node columns (coverage loss). */
@@ -1516,7 +1521,7 @@ public final class Settings {
     /**
      * The color of the current path
      */
-    public final Setting<Color> colorCurrentPath = new Setting<>(Color.RED);
+    public final Setting<Color> colorCurrentPath = new Setting<>(Color.BLUE);
 
     /**
      * The color of the next path
@@ -1689,6 +1694,49 @@ public final class Settings {
      * Automatically path to and jump off of ledges to initiate elytra flight when grounded.
      */
     public final Setting<Boolean> elytraAutoJump = new Setting<>(false);
+
+    /**
+     * Vertical rocket takeoff ("sky launch"): when starting an elytra journey on the ground and a column
+     * with free sky access exists (the current position or a nearby walkable spot), the bot positions
+     * itself under the opening, looks straight up, jumps, deploys the elytra, and fires a firework to
+     * rocket vertically through the opening into open air — then normal flight path-following takes over.
+     * In dimensions with a bedrock ceiling (the nether) this is used exclusively when standing ON TOP of
+     * the roof with an unobstructed column to the build limit; below the ceiling the regular takeoff stays.
+     */
+    public final Setting<Boolean> elytraVerticalTakeoff = new Setting<>(true);
+
+    /**
+     * Like allowBreak/allowPlace/allowParkour, but for elytra travel: the bot may choose on its own to
+     * fly to a far goal (equipped elytra + enough rockets for the distance required), taking off via the
+     * vertical sky launch or the cliff auto-jump, landing near the goal and walking the last stretch.
+     * The per-region distance thresholds below decide when flying beats walking.
+     */
+    public final Setting<Boolean> allowElytra = new Setting<>(false);
+
+    /**
+     * Auto-elytra distance threshold on the overworld surface (blocks). Walking is fast there, and a
+     * takeoff/landing costs ~10-15s of overhead — below this distance walking wins. {@code <= 0} disables.
+     */
+    public final Setting<Double> elytraAutoDistanceOverworld = new Setting<>(150.0);
+
+    /**
+     * Auto-elytra distance threshold inside the nether, below the roof (blocks). Ground travel there is
+     * slow and dangerous (lava, cliffs, soul sand), so flying pays off earlier. Requires a feasible
+     * takeoff (elytraAutoJump cliff jump — no sky launch below the bedrock roof). {@code <= 0} disables.
+     */
+    public final Setting<Double> elytraAutoDistanceNether = new Setting<>(120.0);
+
+    /**
+     * Auto-elytra distance threshold on top of the nether roof (blocks). The bumpy bedrock slows walking
+     * and the vertical sky launch makes the takeoff overhead minimal. {@code <= 0} disables.
+     */
+    public final Setting<Double> elytraAutoDistanceNetherRoof = new Setting<>(100.0);
+
+    /**
+     * Auto-elytra distance threshold in the end (blocks). Between islands walking means bridging over
+     * the void — flying beats it almost immediately. {@code <= 0} disables.
+     */
+    public final Setting<Double> elytraAutoDistanceEnd = new Setting<>(75.0);
 
     /**
      * The seed used to generate chunks for long distance elytra path-finding in the nether.

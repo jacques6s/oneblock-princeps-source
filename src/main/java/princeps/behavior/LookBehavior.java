@@ -28,6 +28,7 @@ import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.Rotation;
 import princeps.api.utils.input.Input;
 import princeps.behavior.look.ForkableRandom;
+import princeps.flownav.FlowCam;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.util.Mth;
 
@@ -110,6 +111,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     public void onPlayerUpdate(PlayerUpdateEvent event) {
 
         if (this.target == null) {
+            FlowCam.stop(); // not steering the view: let the camera fall through to vanilla
             return;
         }
 
@@ -186,6 +188,14 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     this.elytraPitchResidual = 0.0f;
                 }
                 this.appliedRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
+                // FlowNav: record this tick's applied view so the camera interpolates it across frames.
+                // Only in CLIENT mode, where the applied rotation persists visually — a SERVER-mode
+                // rotation is restored in POST, and interpolating toward it would drag the free camera.
+                if (this.target.mode == Target.Mode.CLIENT) {
+                    FlowCam.push(ctx.player(), ctx.player().getYRot(), ctx.player().getXRot());
+                } else {
+                    FlowCam.stop();
+                }
                 break;
             }
             case POST: {
@@ -221,8 +231,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                         ctx.player().yBodyRot = yaw;
                         ctx.player().setYHeadRot(yaw);
                     }
-                    //ctx.player().xRotO = prevRotation.getPitch();
-                    //ctx.player().yRotO = prevRotation.getYaw();
+                    // Frame-rate camera smoothness (client-only): set the render-interpolation ORIGIN to the
+                    // previous tick's rotation, so vanilla's getViewYRot(partialTick) lerps prev -> current
+                    // across every frame between the 20 TPS ticks. Without it the local camera steps once per
+                    // tick; with it the eased <=9 deg/tick turn is drawn smoothly at full FPS. Purely visual —
+                    // the sent packet still carries the per-tick rotation, so the server sees no difference.
+                    ctx.player().xRotO = prevRotation.getPitch();
+                    ctx.player().yRotO = prevRotation.getYaw();
                     this.prevRotation = null;
                 }
                 // The target is done being used for this game tick, so it can be invalidated
@@ -442,7 +457,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     // rate limit (a 0->9 velocity kick in one tick — the "flick"), the head eases IN, rides the
                     // mode's peak, and eases OUT into the block. The dig itself still only fires once the live
                     // crosshair raytrace lands on the target (BlockBreakHelper), so hit/miss is untouched.
-                    if (this.precise && Princeps.settings().humanizedLookAimCurve.value) {
+                    // Bell-curve turn for EVERY smooth head movement — cruising and fall/descent too, not just
+                    // the mining break-cap. The head eases IN (peak/3 accel), rides the mode peak (9 deg/tick),
+                    // and eases OUT onto the target, hard-capped at the peak: the user's acceleration profile
+                    // applied to ALL camera motion, so a turn never snaps and never exceeds 9 deg/tick. The
+                    // proportional ease-out lands ON the target without overshoot, so a correction after a drop
+                    // no longer orbits the line.
+                    if (Princeps.settings().humanizedLookAimCurve.value) {
                         return this.aimCurveTurn(prev, desiredYaw, desiredPitch);
                     }
                     // proportional ease-out toward the target, then the tight per-tick smoothness cap

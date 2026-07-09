@@ -37,6 +37,7 @@ import princeps.api.utils.Rotation;
 import princeps.api.utils.RotationUtils;
 import princeps.api.utils.input.Input;
 import princeps.pathing.movement.CalculationContext;
+import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.movements.MovementFall;
 import princeps.process.elytra.ElytraBehavior;
 import princeps.process.elytra.NetherPathfinderContext;
@@ -48,10 +49,12 @@ import net.minecraft.client.multiplayer.ClientLevel;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.NonNullList;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.levelgen.Heightmap;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
@@ -72,6 +75,20 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     private ElytraBehavior behavior;
     private boolean predictingTerrain;
 
+    // Vertical rocket takeoff ("sky launch"): position under a free-sky column, look straight up,
+    // jump, deploy, and rocket vertically through the opening before normal flight takes over.
+    private boolean skyLaunchChecked;
+    private BetterBlockPos skyLaunchSpot;
+    private double skyLaunchTargetY;
+    private int skyLaunchFireworkCooldown;
+    private int skyLaunchGroundTicks;
+    /**
+     * Set by the auto-elytra dispatcher: this flight was chosen BY the bot, so the takeoff must be fully
+     * autonomous — the cliff auto-jump engages regardless of the user's manual {@code elytraAutoJump}
+     * preference (which only governs manually issued {@code #elytra} journeys).
+     */
+    private boolean autoTakeoff;
+
     @Override
     public void onLostControl() {
         this.state = State.START_FLYING; // TODO: null state?
@@ -79,6 +96,11 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         this.landingSpot = null;
         this.reachedGoal = false;
         this.goal = null;
+        this.skyLaunchChecked = false;
+        this.skyLaunchSpot = null;
+        this.skyLaunchFireworkCooldown = 0;
+        this.skyLaunchGroundTicks = 0;
+        this.autoTakeoff = false;
         destroyBehaviorAsync();
     }
 
@@ -195,6 +217,59 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             }
         }
 
+        // Vertical rocket takeoff, phase 2: jump straight up under the opening, deploy at the apex,
+        // and rocket vertically until clear of the surrounding terrain — then normal flight takes over.
+        // Must run BEFORE the generic isFallFlying branch below, which would otherwise steer horizontally.
+        if (this.state == State.SKY_LAUNCH_ASCEND) {
+            if (!isSafeToCancel) {
+                princeps.getPathingBehavior().secretInternalSegmentCancel();
+            }
+            princeps.getInputOverrideHandler().clearAllKeys();
+            // Exact aim straight up (blockInteract=true bypasses the humanizer — a rocket climb must not wander).
+            princeps.getLookBehavior().updateTarget(new Rotation(ctx.playerRotations().getYaw(), -90.0F), true);
+            final double vy = ctx.player().getDeltaMovement().y;
+            if (ctx.player().isFallFlying()) {
+                if (ctx.player().position().y >= this.skyLaunchTargetY) {
+                    this.state = State.FLYING; // clear of the opening: hand over to the flight controller
+                    return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+                }
+                if (this.skyLaunchFireworkCooldown > 0) {
+                    this.skyLaunchFireworkCooldown--;
+                } else if (vy < 1.2) {
+                    if (princeps.getInventoryBehavior().throwaway(true, ElytraBehavior::isFireworks)) {
+                        ctx.playerController().processRightClick(ctx.player(), ctx.world(), InteractionHand.MAIN_HAND);
+                        this.skyLaunchFireworkCooldown = 10; // matches the flight controller's firework cooldown
+                    } else {
+                        this.state = State.FLYING; // out of rockets mid-climb: glide, flight controller handles it
+                    }
+                }
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            if (ctx.player().onGround()) {
+                if (++this.skyLaunchGroundTicks > 60) {
+                    // could not get airborne (blocked jump, missing elytra...): fall back to the cliff takeoff
+                    this.state = State.LOCATE_JUMP;
+                    return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+                }
+                princeps.getInputOverrideHandler().setInputForceState(Input.JUMP, true); // jump straight up
+            } else if (vy < -0.05) {
+                // past the apex: a fresh JUMP press (it was released while rising) deploys the elytra
+                princeps.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
+            }
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+
+        // Vertical rocket takeoff, phase 1: walk to the free-sky column found at takeoff time.
+        if (this.state == State.SKY_LAUNCH_WALK) {
+            final BetterBlockPos feet = ctx.playerFeet();
+            if (feet.x == this.skyLaunchSpot.x && feet.z == this.skyLaunchSpot.z && ctx.player().onGround()) {
+                this.state = State.SKY_LAUNCH_ASCEND;
+                this.skyLaunchGroundTicks = 0;
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            return new PathingCommand(new GoalBlock(this.skyLaunchSpot), PathingCommandType.SET_GOAL_AND_PATH);
+        }
+
         if (ctx.player().isFallFlying()) {
             behavior.landingMode = this.state == State.LANDING;
             this.goal = null;
@@ -214,9 +289,28 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         }
 
         if (this.state == State.FLYING || this.state == State.START_FLYING) {
-            this.state = ctx.player().onGround() && Princeps.settings().elytraAutoJump.value
+            // A bot-chosen flight (auto-elytra dispatch) must take off autonomously: the cliff auto-jump
+            // engages even when the user's manual elytraAutoJump preference is off.
+            this.state = ctx.player().onGround()
+                    && (Princeps.settings().elytraAutoJump.value || this.autoTakeoff)
                     ? State.LOCATE_JUMP
                     : State.START_FLYING;
+            // Vertical rocket takeoff ("sky launch"): preferred start whenever a free-sky column is
+            // available — current column first, else the nearest walkable one. In roofed dimensions
+            // (the nether) ONLY standing on top of the bedrock roof; below it the cliff takeoff stays.
+            // Checked once per activation (the column scan is not per-tick work).
+            if (ctx.player().onGround() && Princeps.settings().elytraVerticalTakeoff.value
+                    && !this.skyLaunchChecked && !shouldLandForSafety()) {
+                this.skyLaunchChecked = true;
+                final BetterBlockPos spot = findSkyLaunchSpot();
+                if (spot != null) {
+                    this.skyLaunchSpot = spot;
+                    this.skyLaunchTargetY = computeSkyLaunchTargetY(spot);
+                    this.skyLaunchGroundTicks = 0;
+                    this.state = State.SKY_LAUNCH_WALK;
+                    logDirect("Sky launch: rocketing up through the opening at " + spot.x + "," + spot.y + "," + spot.z);
+                }
+            }
         }
 
         if (this.state == State.LOCATE_JUMP) {
@@ -289,6 +383,87 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             }
         }
         return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+    }
+
+    /**
+     * Whether a vertical rocket takeoff is possible from the player's current surroundings — used by
+     * the auto-elytra dispatcher to check takeoff feasibility before committing to a flight.
+     */
+    public boolean canSkyLaunchHere() {
+        return Princeps.settings().elytraVerticalTakeoff.value && findSkyLaunchSpot() != null;
+    }
+
+    /** Marks the current journey as bot-chosen: the takeoff runs fully autonomously (see {@link #autoTakeoff}). */
+    public void enableAutoTakeoff() {
+        this.autoTakeoff = true;
+    }
+
+    /**
+     * A standable position whose column is fully open to the sky, for the vertical rocket takeoff:
+     * the player's own column first, else the nearest walkable spot within a small radius. In a
+     * roofed dimension (the nether) only positions ON TOP of the bedrock roof qualify — the launch
+     * is never used below the ceiling, where the regular cliff takeoff remains the right method.
+     */
+    private BetterBlockPos findSkyLaunchSpot() {
+        final BetterBlockPos feet = ctx.playerFeet();
+        final boolean roofed = ctx.world().dimensionType().hasCeiling();
+        if (roofed && feet.y < 120) {
+            return null; // inside the nether: vertical launch is exclusively a roof maneuver
+        }
+        if (columnFreeToSky(feet)) {
+            return feet;
+        }
+        for (int r = 1; r <= 12; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) {
+                        continue; // ring only: nearest spots first
+                    }
+                    for (int dy = -2; dy <= 2; dy++) {
+                        final BetterBlockPos pos = new BetterBlockPos(feet.x + dx, feet.y + dy, feet.z + dz);
+                        if (roofed && pos.y < 120) {
+                            continue;
+                        }
+                        if (MovementHelper.canWalkOn(ctx, pos.below())
+                                && MovementHelper.canWalkThrough(ctx, pos)
+                                && MovementHelper.canWalkThrough(ctx, pos.above())
+                                && columnFreeToSky(pos)) {
+                            return pos;
+                        }
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /** True when every block above the head is passable up to the build limit — a clear vertical shaft. */
+    private boolean columnFreeToSky(BetterBlockPos feet) {
+        final int maxY = ctx.world().getMaxY();
+        // Quick reject on the first blocks so the ring scan doesn't full-scan blocked columns.
+        for (int y = feet.y + 2; y < maxY; y++) {
+            if (!MovementHelper.canWalkThrough(ctx, new BetterBlockPos(feet.x, y, feet.z))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Climb target: safely above both the opening and the surrounding terrain (sampled via the
+     * heightmap in a ring around the spot), so the handover to normal flight happens in open air.
+     */
+    private double computeSkyLaunchTargetY(BetterBlockPos spot) {
+        int best = spot.y + 24;
+        for (int dx = -16; dx <= 16; dx += 8) {
+            for (int dz = -16; dz <= 16; dz += 8) {
+                final int h = ctx.world().getHeight(Heightmap.Types.MOTION_BLOCKING, spot.x + dx, spot.z + dz);
+                if (h + 8 > best) {
+                    best = h + 8;
+                }
+            }
+        }
+        return Math.min(best, ctx.world().getMaxY() - 8);
     }
 
     public void landingSpotIsBad(BetterBlockPos endPos) {
@@ -399,13 +574,16 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
 
     @Override
     public boolean isSafeToCancel() {
-        return !this.isActive() || !(this.state == State.FLYING || this.state == State.START_FLYING);
+        return !this.isActive() || !(this.state == State.FLYING || this.state == State.START_FLYING
+                || this.state == State.SKY_LAUNCH_ASCEND);
     }
 
     public enum State {
         LOCATE_JUMP("Finding spot to jump off"),
         PAUSE("Waiting for elytra path"),
         GET_TO_JUMP("Walking to takeoff"),
+        SKY_LAUNCH_WALK("Walking under a sky opening"),
+        SKY_LAUNCH_ASCEND("Rocketing up through the opening"),
         START_FLYING("Begin flying"),
         FLYING("Flying"),
         LANDING("Landing");

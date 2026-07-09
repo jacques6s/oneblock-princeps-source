@@ -66,4 +66,5 @@ public class MixinEntity {
             this.motionUpdateRotationEvent = null;
         }
     }
+
 }

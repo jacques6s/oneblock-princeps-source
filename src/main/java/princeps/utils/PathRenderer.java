@@ -117,10 +117,10 @@ public final class PathRenderer implements IRenderer {
 
         //drawManySelectionBoxes(player, Collections.singletonList(behavior.pathStart()), partialTicks, Color.WHITE);
 
-        // Render the current path, if there is one
+        // Render the current path, if there is one — as a smooth arc-rounded curve (cached, not rebuilt per frame).
         if (current != null && current.getPath() != null) {
             int renderBegin = Math.max(current.getPosition() - 3, 0);
-            drawPath(event.getModelViewStack(), current.getPath().positions(), renderBegin, settings.colorCurrentPath.value, settings.fadePath.value, 10, 20);
+            drawSmoothCurrentPath(event.getModelViewStack(), current.getPath().positions(), renderBegin, settings.colorCurrentPath.value, 0.5D);
         }
 
         if (next != null && next.getPath() != null) {
@@ -142,6 +142,103 @@ public final class PathRenderer implements IRenderer {
 
     public static void drawPath(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, boolean fadeOut, int fadeStart0, int fadeEnd0) {
         drawPath(stack, positions, startIndex, color, fadeOut, fadeStart0, fadeEnd0, 0.5D);
+    }
+
+    /**
+     * Drops interior points that are collinear with their neighbours (within a hair of angular
+     * tolerance): resampled straight runs collapse to their two endpoints, arc samples all survive.
+     */
+    private static java.util.List<princeps.flownav.math.Vec3> decimateCollinear(java.util.List<princeps.flownav.math.Vec3> line) {
+        if (line.size() <= 2) {
+            return line;
+        }
+        java.util.List<princeps.flownav.math.Vec3> out = new java.util.ArrayList<>(line.size() / 4 + 2);
+        out.add(line.get(0));
+        for (int i = 1; i < line.size() - 1; i++) {
+            princeps.flownav.math.Vec3 a = out.get(out.size() - 1);
+            princeps.flownav.math.Vec3 b = line.get(i);
+            princeps.flownav.math.Vec3 c = line.get(i + 1);
+            double d1x = b.x() - a.x(), d1y = b.y() - a.y(), d1z = b.z() - a.z();
+            double d2x = c.x() - b.x(), d2y = c.y() - b.y(), d2z = c.z() - b.z();
+            // 3D cross product magnitude vs segment lengths ~ sin(angle); keep the point on any bend.
+            double cx = d1y * d2z - d1z * d2y;
+            double cy = d1z * d2x - d1x * d2z;
+            double cz = d1x * d2y - d1y * d2x;
+            double crossSq = cx * cx + cy * cy + cz * cz;
+            double lenSq = (d1x * d1x + d1y * d1y + d1z * d1z) * (d2x * d2x + d2y * d2y + d2z * d2z);
+            if (crossSq > lenSq * 1e-6) { // sin^2(angle) > (0.001)^2 — anything visibly bent survives
+                out.add(b);
+            }
+        }
+        out.add(line.get(line.size() - 1));
+        return out;
+    }
+
+    /** Cached smoothed line of the current path (rebuilt only when the PATH changes, never per frame). */
+    private static long smoothSig = Long.MIN_VALUE;
+    private static java.util.List<princeps.flownav.math.Vec3> smoothLine = java.util.Collections.emptyList();
+
+    /**
+     * Draws the current path as a smooth arc-rounded curve (FlowNav's FlowLine). CRITICAL for FPS: the smooth
+     * line is CACHED per PATH — the signature deliberately excludes the executor's progress index, which
+     * advances every node (~5x/s at sprint) and would trigger a full O(path) re-smooth + allocation burst on
+     * the render thread each time (review-confirmed). The whole path is smoothed once; each frame only trims
+     * the tail behind the camera with a cheap scan over the small decimated point list. Smoothing every frame
+     * tanked the frame rate; only the executed path is smoothed, calc-debug paths stay the raw polyline.
+     */
+    private static void drawSmoothCurrentPath(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, double offset) {
+        final int n = positions.size();
+        if (n - Math.max(0, startIndex) < 3) {
+            drawPath(stack, positions, startIndex, color, settings.fadePath.value, 10, 20, offset);
+            return;
+        }
+        final long sig = ((long) n * 131 + positions.get(0).hashCode()) * 131 + positions.get(n - 1).hashCode();
+        if (sig != smoothSig) {
+            java.util.List<princeps.flownav.math.Vec3> pts = new java.util.ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                BetterBlockPos p = positions.get(i);
+                pts.add(new princeps.flownav.math.Vec3(p.x + 0.5, p.y, p.z + 0.5));
+            }
+            try {
+                // smoothPoints avoids the Trajectory wrapper (its copy + arc-length array would be thrown
+                // away). Decimation collapses collinear resampled points so straights emit ONE segment.
+                smoothLine = decimateCollinear(princeps.flownav.traj.FlowLine.smoothPoints(pts, 1.0));
+            } catch (RuntimeException e) {
+                smoothLine = pts; // degenerate geometry: fall back to the raw polyline
+            }
+            smoothSig = sig;
+        }
+        final java.util.List<princeps.flownav.math.Vec3> line = smoothLine;
+        // Trim the already-walked tail: start at the decimated point nearest the camera, minus a little
+        // slack (mirrors the old position-3 behaviour). The decimated list is small, so this per-frame
+        // scan is a few hundred float ops — nothing — and it never rebuilds the curve.
+        final double camX = posX(), camZ = posZ();
+        int nearest = 0;
+        double best = Double.MAX_VALUE;
+        for (int i = 0; i < line.size(); i++) {
+            princeps.flownav.math.Vec3 p = line.get(i);
+            double dx = p.x() - 0.5 + offset - camX;
+            double dz = p.z() - 0.5 + offset - camZ;
+            double d = dx * dx + dz * dz;
+            if (d < best) {
+                best = d;
+                nearest = i;
+            }
+        }
+        int from = nearest;
+        double slack = 3.0; // keep ~3 blocks of line visible behind the player
+        while (from > 0 && slack > 0) {
+            slack -= line.get(from).horizontalDistanceTo(line.get(from - 1));
+            from--;
+        }
+        BufferBuilder bufferBuilder = IRenderer.startLines(color);
+        for (int i = from; i + 1 < line.size(); i++) {
+            princeps.flownav.math.Vec3 p = line.get(i);
+            princeps.flownav.math.Vec3 q = line.get(i + 1);
+            // FlowLine points are block-centred (x+0.5); emitPathLine re-adds `offset` (0.5), so pass -0.5.
+            emitPathLine(bufferBuilder, stack, p.x() - 0.5, p.y(), p.z() - 0.5, q.x() - 0.5, q.y(), q.z() - 0.5, offset);
+        }
+        IRenderer.endLines(bufferBuilder, settings.renderPathIgnoreDepth.value);
     }
 
     public static void drawPath(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, boolean fadeOut, int fadeStart0, int fadeEnd0, double offset) {

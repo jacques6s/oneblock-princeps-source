@@ -19,12 +19,20 @@ package princeps.process;
 
 import princeps.Princeps;
 import princeps.api.pathing.goals.Goal;
+import princeps.api.pathing.goals.GoalXZ;
 import princeps.api.process.ICustomGoalProcess;
 import princeps.api.process.PathingCommand;
 import princeps.api.process.PathingCommandType;
+import princeps.api.utils.BetterBlockPos;
+import princeps.api.utils.interfaces.IGoalRenderPos;
+import princeps.process.elytra.ElytraBehavior;
 import princeps.utils.PrincepsProcessHelper;
 import net.minecraft.client.multiplayer.ClientLevel;
+import net.minecraft.core.NonNullList;
 import net.minecraft.network.chat.Component;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.item.Items;
 
 /**
  * As set by ExamplePrincepsControl or something idk
@@ -72,6 +80,90 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
     @Override
     public void path() {
         this.state = State.PATH_REQUESTED;
+        maybeDispatchElytra();
+    }
+
+    /**
+     * Auto-elytra dispatcher: like allowBreak/allowPlace/allowParkour, {@code allowElytra} lets the bot
+     * choose elytra travel on its own. When the goal is far enough for the current region (overworld
+     * surface / nether interior / nether roof / end — each with its own distance threshold), the player
+     * has an elytra equipped and enough rockets for the trip, and a takeoff is actually feasible (a
+     * free-sky column for the vertical launch, or the cliff auto-jump), the elytra process is engaged.
+     * The walking goal stays set underneath: the elytra process has higher priority while active, and
+     * when it lands and releases control this process resumes and walks the last stretch to the exact
+     * goal — a seamless fly-then-walk journey. In caves (no sky access, no auto-jump) this never fires.
+     */
+    private void maybeDispatchElytra() {
+        if (!Princeps.settings().allowElytra.value || this.goal == null || ctx.player() == null) {
+            return;
+        }
+        if (princeps.getElytraProcess().isActive() || ctx.player().isFallFlying()) {
+            return;
+        }
+        if (!(princeps.getElytraProcess() instanceof ElytraProcess elytra)) {
+            return; // elytra unsupported on this system (NullElytraProcess)
+        }
+        final BetterBlockPos pos;
+        if (this.goal instanceof IGoalRenderPos renderPos) {
+            pos = new BetterBlockPos(renderPos.getGoalPos());
+        } else if (this.goal instanceof GoalXZ xz) {
+            pos = new BetterBlockPos(xz.getX(), ctx.playerFeet().y, xz.getZ());
+        } else {
+            return; // no spatial target (e.g. a pure y-level goal): walking handles it
+        }
+        final double dist = Math.hypot(
+                pos.x + 0.5 - ctx.player().position().x,
+                pos.z + 0.5 - ctx.player().position().z);
+        final double threshold = elytraAutoThreshold();
+        if (threshold <= 0 || dist < threshold) {
+            return;
+        }
+        final ItemStack chest = ctx.player().getItemBySlot(EquipmentSlot.CHEST);
+        if (chest.getItem() != Items.ELYTRA
+                || chest.getMaxDamage() - chest.getDamageValue() < Princeps.settings().elytraMinimumDurability.value) {
+            return;
+        }
+        // Enough rockets for the whole trip (~1 per 70 blocks) plus a safety margin — never strand mid-flight.
+        final int needed = (int) Math.ceil(dist / 70.0) + 2;
+        if (countFireworks() < needed) {
+            return;
+        }
+        // Takeoff feasibility. Inside the nether (below the roof) the cliff auto-jump is the classic,
+        // always-attemptable method — dispatch unconditionally; if no jump-off spot is found the elytra
+        // process cancels itself and this walking goal simply resumes (automatic fallback). Everywhere
+        // else (overworld surface, nether roof, end) require a free-sky column for the vertical launch —
+        // this is also what keeps caves on foot.
+        final boolean netherInterior = ctx.world().dimensionType().hasCeiling() && ctx.playerFeet().y < 120;
+        if (!netherInterior && !elytra.canSkyLaunchHere()) {
+            return;
+        }
+        logDirect(String.format("Auto-elytra: %.0f blocks to goal (threshold %.0f) — flying", dist, threshold));
+        elytra.pathTo(pos);
+        elytra.enableAutoTakeoff();
+    }
+
+    /** Region-specific auto-elytra distance threshold; {@code <= 0} disables the region. */
+    private double elytraAutoThreshold() {
+        if (ctx.world().dimensionType().hasCeiling()) { // the nether
+            return ctx.playerFeet().y >= 120
+                    ? Princeps.settings().elytraAutoDistanceNetherRoof.value
+                    : Princeps.settings().elytraAutoDistanceNether.value;
+        }
+        if (ctx.world().dimensionType().hasEnderDragonFight()) { // the end
+            return Princeps.settings().elytraAutoDistanceEnd.value;
+        }
+        return Princeps.settings().elytraAutoDistanceOverworld.value;
+    }
+
+    private int countFireworks() {
+        final NonNullList<ItemStack> inv = ctx.player().getInventory().getNonEquipmentItems();
+        int qty = 0;
+        for (int i = 0; i < 36; i++) {
+            if (ElytraBehavior.isFireworks(inv.get(i))) {
+                qty += inv.get(i).getCount();
+            }
+        }
+        return qty;
     }
 
     @Override

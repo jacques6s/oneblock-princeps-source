@@ -1,0 +1,61 @@
+package princeps.flownav;
+
+import net.minecraft.util.Mth;
+
+/**
+ * Frame-rate camera interpolation. Princeps applies the view rotation once per game tick (20 TPS); left
+ * alone the first-person camera then STEPS 20 times a second instead of gliding at the render frame rate.
+ * This holds the previous- and current-tick APPLIED rotation so the camera getters ({@code getViewYRot /
+ * getViewXRot}, mixed in on {@link net.minecraft.world.entity.Entity}) can lerp between them every frame —
+ * exactly how vanilla interpolates entity rotation with {@code partialTick}.
+ *
+ * <p>Purely visual and client-only: the value sent to the server is still the per-tick rotation. Single
+ * local player, so the state is static.
+ */
+public final class FlowCam {
+
+    /** The player whose view is being interpolated, or {@code null} when inactive. Volatile: written on
+     *  the game thread, read on the render thread. A single reference compare is the whole hot-path guard —
+     *  the camera getters run many times per FRAME, so no provider lookup / iteration may happen there. */
+    private static volatile Object owner;
+    private static float prevYaw;
+    private static float curYaw;
+    private static float prevPitch;
+    private static float curPitch;
+
+    private FlowCam() {
+    }
+
+    /** Allocation-free per-frame guard: is this the player whose view we interpolate? */
+    public static boolean ownsView(Object player) {
+        return player == owner;
+    }
+
+    /** Called once per tick with the rotation actually applied this tick; shifts current -> previous. */
+    public static void push(Object player, float yaw, float pitch) {
+        if (owner != player) {
+            // Fresh start: no previous tick yet — seed both so the first rendered frame does not snap.
+            prevYaw = curYaw = yaw;
+            prevPitch = curPitch = pitch;
+            owner = player;
+            return;
+        }
+        prevYaw = curYaw;
+        prevPitch = curPitch;
+        curYaw = yaw;
+        curPitch = pitch;
+    }
+
+    /** Stop interpolating (no path / control released): the camera getters fall through to vanilla. */
+    public static void stop() {
+        owner = null;
+    }
+
+    public static float viewYaw(float partial) {
+        return Mth.rotLerp(partial, prevYaw, curYaw);
+    }
+
+    public static float viewPitch(float partial) {
+        return Mth.lerp(partial, prevPitch, curPitch);
+    }
+}

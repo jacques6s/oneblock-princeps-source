@@ -33,6 +33,7 @@ import org.spongepowered.asm.mixin.injection.Group;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.Redirect;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfoReturnable;
 
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
@@ -156,5 +157,27 @@ public class MixinClientPlayerEntity {
             return false;
         }
         return instance.tryToStartFallFlying();
+    }
+
+    // FlowNav frame-rate camera. ROOT CAUSE of the 20 Hz view stepping: vanilla interpolates every
+    // entity's view rotation across frames EXCEPT the local player's — LocalPlayer overrides
+    // getViewYRot/getViewXRot to return the RAW yRot/xRot (mouse input updates per frame, so vanilla
+    // never needs to lerp it). A bot that turns once per game tick therefore renders as 20 steps/s.
+    // While Princeps steers the view, return the previous->current tick rotation lerped by the frame's
+    // partialTick — exactly the interpolation vanilla applies to every other entity. At partialTicks
+    // == 1 this returns the exact applied rotation, so gameplay raycasts are byte-identical.
+    @Inject(method = "getViewYRot", at = @At("HEAD"), cancellable = true)
+    private void flownavViewYRot(float partialTicks, CallbackInfoReturnable<Float> cir) {
+        // Hot path (many calls per FRAME): the guard is a single reference compare, no provider lookup.
+        if (princeps.flownav.FlowCam.ownsView(this)) {
+            cir.setReturnValue(princeps.flownav.FlowCam.viewYaw(partialTicks));
+        }
+    }
+
+    @Inject(method = "getViewXRot", at = @At("HEAD"), cancellable = true)
+    private void flownavViewXRot(float partialTicks, CallbackInfoReturnable<Float> cir) {
+        if (princeps.flownav.FlowCam.ownsView(this)) {
+            cir.setReturnValue(princeps.flownav.FlowCam.viewPitch(partialTicks));
+        }
     }
 }
