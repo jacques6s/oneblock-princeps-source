@@ -442,7 +442,13 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         final int maxY = ctx.world().getMaxY();
         // Quick reject on the first blocks so the ring scan doesn't full-scan blocked columns.
         for (int y = feet.y + 2; y < maxY; y++) {
-            if (!MovementHelper.canWalkThrough(ctx, new BetterBlockPos(feet.x, y, feet.z))) {
+            final BetterBlockPos p = new BetterBlockPos(feet.x, y, feet.z);
+            if (!MovementHelper.canWalkThrough(ctx, p)) {
+                return false;
+            }
+            // canWalkThrough admits water, but ANY fluid in the shaft kills a rocket climb (touching
+            // water ends fall-flight mid-ascent) — the launch column must be strictly dry air.
+            if (!ctx.world().getBlockState(p).getFluidState().isEmpty()) {
                 return false;
             }
         }
