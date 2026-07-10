@@ -13,6 +13,13 @@
 - **Parkour place** Sprint jumping over a 3 block gap and placing the block to land on while executing the jump. It's really cool.
 - **Pigs** It can sort of control pigs. I wouldn't rely on it though.
 
+# Auto-elytra & smooth camera (this fork)
+- **`allowElytra`** Like allowBreak/allowParkour, the bot may choose elytra travel on its own when the goal is far enough for the region (`elytraAutoDistanceOverworld` 150 / `elytraAutoDistanceNether` 120 / `elytraAutoDistanceNetherRoof` 100 / `elytraAutoDistanceEnd` 75 blocks), an elytra is equipped and there are enough rockets (~1 per 70 blocks + 2 spare). It lands near the goal and walks the last stretch; caves stay on foot (no takeoff).
+- **`elytraVerticalTakeoff`** "Sky launch": under a column with free sky access the bot positions itself, looks straight up, jumps, deploys, and rockets vertically through the opening into open air. On the nether roof exclusively when standing on top of it — below the ceiling the classic cliff takeoff remains.
+- **Maneuver-adaptive flight smoothing** `elytraSmoothness` (1.0) shapes long free stretches — even inside tight nether tunnels; when the solver demands a hard correction the smoothing blends toward `elytraSmoothnessAgile` (0.25) so tight curves are actually flown, then eases back.
+- **Smooth real rotation** The bell-curve turn profile (`humanizedLookAimCurveMode`, peak 9°/tick: ease-in, plateau, proportional ease-out) applies to every head movement — the SENT rotation is smooth for the server and every observer — and the local first-person camera is additionally frame-interpolated while pathing.
+- **Curved path rendering** The current path renders as an arc-rounded curve (cached per path and decimated — no frame cost).
+
 # Pathing method
 Princeps uses A*, with some modifications: 
 
