@@ -69,6 +69,15 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     private float elytraYawResidual;
     private float elytraPitchResidual;
 
+    /** Solver demand (deg between applied and requested rotation) below which flight smoothing stays fully smooth. */
+    private static final double ELYTRA_AGILE_BLEND_START_DEG = 6.0;
+    /** Solver demand at/above which flight smoothing is fully agile (and the agile hold re-arms). */
+    private static final double ELYTRA_AGILE_ENTER_DEG = 20.0;
+    /** Ticks the agile level is held after a hard demand, so S-curve sequences don't flip-flop mid-maneuver. */
+    private static final int ELYTRA_AGILE_HOLD_TICKS = 10;
+    /** Remaining ticks of the agile hold (see above). Decays naturally; stale values are harmless. */
+    private int elytraAgileHold;
+
     private final AimProcessor processor;
 
     private final Deque<Float> smoothYawBuffer;
@@ -157,10 +166,34 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     // the target each tick, and 0 disables it (snap straight to the steering target). While
                     // landing we use the snappier elytraLandingSmoothness so the look tracks the spot precisely
                     // and sets down cleanly instead of overshooting until it gets stuck.
+                    // MANEUVER-ADAPTIVE: the smoothing level follows the DEMAND, not the dimension. On long
+                    // free stretches — even inside tight nether tunnels — the solver asks for tiny corrections
+                    // and the full smoothness shapes the line. When it demands a hard, steep correction (tight
+                    // curve, terrain dodge) the smoothing yields toward elytraSmoothnessAgile so the applied
+                    // look converges fast enough to actually make the curve, then eases back to smooth. A short
+                    // agile hold keeps S-curve sequences from flip-flopping mid-maneuver.
                     final IElytraProcess elytraProc = princeps.getElytraProcess();
-                    final double smoothness = (elytraProc != null && elytraProc.isLanding())
-                            ? Princeps.settings().elytraLandingSmoothness.value
-                            : Princeps.settings().elytraSmoothness.value;
+                    final double smoothness;
+                    if (elytraProc != null && elytraProc.isLanding()) {
+                        smoothness = Princeps.settings().elytraLandingSmoothness.value;
+                    } else {
+                        final float yawErr = Math.abs(Mth.degreesDifference(this.prevRotation.getYaw(), this.target.rotation.getYaw()));
+                        final float pitchErr = Math.abs(this.target.rotation.getPitch() - this.prevRotation.getPitch());
+                        final double err = Math.max(yawErr, pitchErr);
+                        if (err >= ELYTRA_AGILE_ENTER_DEG) {
+                            this.elytraAgileHold = ELYTRA_AGILE_HOLD_TICKS;
+                        } else if (this.elytraAgileHold > 0) {
+                            this.elytraAgileHold--;
+                        }
+                        final double smooth = Princeps.settings().elytraSmoothness.value;
+                        final double agile = Princeps.settings().elytraSmoothnessAgile.value;
+                        final double blend = this.elytraAgileHold > 0
+                                ? 1.0
+                                : Math.max(0.0, Math.min(1.0,
+                                        (err - ELYTRA_AGILE_BLEND_START_DEG)
+                                                / (ELYTRA_AGILE_ENTER_DEG - ELYTRA_AGILE_BLEND_START_DEG)));
+                        smoothness = smooth + (agile - smooth) * blend;
+                    }
                     final float a = (float) Math.max(0.1, Math.min(1.0, 1.0 - smoothness * 0.9));
                     final float curYaw = this.prevRotation.getYaw();
                     final float curPitch = this.prevRotation.getPitch();

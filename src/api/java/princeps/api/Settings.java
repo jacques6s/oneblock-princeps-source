@@ -799,6 +799,15 @@ public final class Settings {
     public final Setting<Double> elytraLandingSmoothness = new Setting<>(0.3D);
 
     /**
+     * Elytra look smoothness while a HARD maneuver is demanded. The flight smoothing is adaptive per
+     * tick: on long free stretches — even inside tight nether tunnels or caves — the solver only asks
+     * for tiny corrections and the full {@link #elytraSmoothness} shapes the line; when it demands a
+     * steep, fast correction (tight curve, terrain dodge) the smoothing blends toward THIS value so the
+     * applied look converges fast enough to actually make the curve, then eases back to smooth.
+     */
+    public final Setting<Double> elytraSmoothnessAgile = new Setting<>(0.25D);
+
+    /**
      * The number of ticks to average across for {@link #smoothLook};
      */
     public final Setting<Integer> smoothLookTicks = new Setting<>(5);
