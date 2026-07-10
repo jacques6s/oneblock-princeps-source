@@ -89,6 +89,11 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
      */
     private boolean autoTakeoff;
 
+    /** Ticks between landing-spot search retries while orbiting the path end without a spot (~5s). */
+    private static final int LANDING_SEARCH_RETRY_TICKS = 100;
+    /** Ticks accumulated since the last failed landing-spot search (see retry above). */
+    private int landingSearchRetryTicks;
+
     @Override
     public void onLostControl() {
         this.state = State.START_FLYING; // TODO: null state?
@@ -169,10 +174,17 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         }
         if (ctx.player().isFallFlying() && this.state != State.LANDING && (this.behavior.pathManager.isComplete() || safetyLanding)) {
             final BetterBlockPos last = this.behavior.pathManager.path.getLast();
-            if (last != null && (ctx.player().position().distanceToSqr(last.getCenter()) < (48 * 48) || safetyLanding) && (!goingToLandingSpot || (safetyLanding && this.landingSpot == null))) {
+            // A failed landing-spot search used to be final: the bot orbited the last node until the
+            // rockets ran dry. Retry periodically instead — the orbit moves the vantage point and the
+            // destination chunks finish loading, so a later search regularly succeeds.
+            final boolean retryLandingSearch = this.goingToLandingSpot && this.landingSpot == null
+                    && ++this.landingSearchRetryTicks >= LANDING_SEARCH_RETRY_TICKS;
+            if (last != null && (ctx.player().position().distanceToSqr(last.getCenter()) < (48 * 48) || safetyLanding)
+                    && (!goingToLandingSpot || retryLandingSearch || (safetyLanding && this.landingSpot == null))) {
+                this.landingSearchRetryTicks = 0;
                 logDirect("Path complete, picking a nearby safe landing spot...");
                 BetterBlockPos landingSpot = findSafeLandingSpot(ctx.playerFeet());
-                // if this fails we will just keep orbiting the last node until we run out of rockets or the user intervenes
+                // on failure we keep orbiting, but the retry above re-searches from the moving orbit
                 if (landingSpot != null) {
                     this.pathTo0(landingSpot, true);
                     this.landingSpot = landingSpot;
