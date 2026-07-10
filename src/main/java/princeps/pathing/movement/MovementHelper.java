@@ -663,11 +663,16 @@ public interface MovementHelper extends ActionCosts, Helper {
         )).setInput(Input.MOVE_FORWARD, true);
     }
 
-    /** single-slot input hysteresis for {@link #moveAlongPath} (one local player per client) */
+    /** single-slot input hysteresis + cached smooth line for {@link #moveAlongPath} (one local player per client) */
     final class Steering {
         private static boolean strafing;
         private static int lastOctant;      // the strafe octant (deg offset from yaw) currently held
         private static boolean hasHeld;     // whether lastOctant is valid this run of strafing
+        // Arc-rounded line of the CURRENT flat run (FlowNav's FlowLine), built once per run: rebuilding
+        // per tick from a shifting window made the carrots jump at every node advance (steering jank).
+        private static long lineSig = Long.MIN_VALUE;
+        private static java.util.List<princeps.flownav.math.Vec3> line = java.util.Collections.emptyList();
+        private static int lastIdx;         // monotonic-ish projection progress along `line`
     }
 
     /**
@@ -683,8 +688,8 @@ public interface MovementHelper extends ActionCosts, Helper {
      * W and the mouse does the steering, exactly like a human. Falls back to classic moveTowards whenever there
      * is no active path, the flat window is degenerate, or the feature is off.
      */
-    static void moveAlongPath(IPrinceps princeps, MovementState state, BlockPos classicAim) {
-        IPlayerContext ctx = princeps.getPlayerContext();
+    static void moveAlongPath(IPrinceps bot, MovementState state, BlockPos classicAim) {
+        IPlayerContext ctx = bot.getPlayerContext();
         if (!Princeps.settings().humanizedLook.value || !Princeps.settings().humanizedSteering.value) {
             moveTowards(ctx, state, classicAim);
             return;
@@ -698,7 +703,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         // below (inside the windowed section) handles the on-path case; this early exit only remains for the
         // no-path/degenerate cases where classicAim is the adjacent lattice node anyway.
         final boolean collided = ctx.player().horizontalCollision;
-        princeps.api.pathing.path.IPathExecutor exec = princeps.getPathingBehavior().getCurrent();
+        princeps.api.pathing.path.IPathExecutor exec = bot.getPathingBehavior().getCurrent();
         if (exec == null || exec.getPath() == null) {
             moveTowards(ctx, state, classicAim);
             return;
@@ -709,12 +714,17 @@ public interface MovementHelper extends ActionCosts, Helper {
             moveTowards(ctx, state, classicAim);
             return;
         }
-        // window of the flat run around the executor position: [pos-1 .. pos+8], truncated at any y-change so
-        // the smoothing never reaches across an ascend/descend/parkour edge (those keep their exact aims)
+        // FULL flat run around the executor position, bounded at any y-change so the smoothing never
+        // reaches across an ascend/descend/parkour edge (those keep their exact aims). The run is the
+        // STABLE span the cached arc line is built over — a shifting window would rebuild a slightly
+        // different curve at every node advance, which is the historical source of steering jank.
         final int y = nodes.get(pos).y;
-        int start = (pos > 0 && nodes.get(pos - 1).y == y) ? pos - 1 : pos;
+        int start = pos;
+        while (start > 0 && nodes.get(start - 1).y == y) {
+            start--;
+        }
         int end = pos;
-        while (end + 1 < nodes.size() && nodes.get(end + 1).y == y && end - pos < 8) {
+        while (end + 1 < nodes.size() && nodes.get(end + 1).y == y) {
             end++;
         }
         if (end - start < 1) {
@@ -722,29 +732,51 @@ public interface MovementHelper extends ActionCosts, Helper {
             return;
         }
         final Vec3 player = ctx.player().position();
-        // project the player onto the windowed polyline of node centers (segment index + fraction)
-        int segI = start;
-        double segT = 0, bestD = Double.MAX_VALUE;
-        for (int i = start; i < end; i++) {
-            double ax = nodes.get(i).x + 0.5, az = nodes.get(i).z + 0.5;
-            double bx = nodes.get(i + 1).x + 0.5, bz = nodes.get(i + 1).z + 0.5;
-            double dx = bx - ax, dz = bz - az;
-            double l2 = dx * dx + dz * dz;
-            double t = l2 == 0 ? 0 : Mth.clamp(((player.x - ax) * dx + (player.z - az) * dz) / l2, 0.0, 1.0);
-            double qx = ax + dx * t, qz = az + dz * t;
-            double d = (player.x - qx) * (player.x - qx) + (player.z - qz) * (player.z - qz);
+        // The arc-rounded line of this flat run (FlowNav's FlowLine — the SAME curve the path renderer
+        // draws), built ONCE per run and cached: the feet drive exactly the curve the blue line shows.
+        // Dense points (<= 0.25 blocks apart) make the nearest-point projection accurate.
+        final long lineSig = ((((long) (end - start) * 131 + nodes.get(start).hashCode()) * 131
+                + nodes.get(end).hashCode()) * 131) + y;
+        if (lineSig != Steering.lineSig) {
+            final java.util.List<princeps.flownav.math.Vec3> centers = new java.util.ArrayList<>(end - start + 1);
+            for (int i = start; i <= end; i++) {
+                centers.add(new princeps.flownav.math.Vec3(nodes.get(i).x + 0.5, y, nodes.get(i).z + 0.5));
+            }
+            try {
+                Steering.line = princeps.flownav.traj.FlowLine.smoothPoints(centers, 1.0);
+            } catch (RuntimeException e) {
+                Steering.line = centers; // degenerate geometry: fall back to the raw centers
+            }
+            Steering.lineSig = lineSig;
+            Steering.lastIdx = 0;
+        }
+        final java.util.List<princeps.flownav.math.Vec3> line = Steering.line;
+        if (line.size() < 2) {
+            moveTowards(ctx, state, classicAim);
+            return;
+        }
+        // Nearest line point, searched in a window around last tick's index: monotonic-ish progress, so
+        // the projection never jumps between limbs of a self-approaching curve.
+        final int fromIdx = Math.max(0, Steering.lastIdx - 8);
+        final int toIdx = Math.min(line.size() - 1, Steering.lastIdx + 40);
+        int idx = fromIdx;
+        double bestD = Double.MAX_VALUE;
+        for (int i = fromIdx; i <= toIdx; i++) {
+            final princeps.flownav.math.Vec3 p = line.get(i);
+            final double dx = p.x() - player.x, dz = p.z() - player.z;
+            final double d = dx * dx + dz * dz;
             if (d < bestD) {
                 bestD = d;
-                segI = i;
-                segT = t;
+                idx = i;
             }
         }
+        Steering.lastIdx = idx;
         // Lookahead distances are settings so the feel can be tuned live (sim-validated window: near <= ~0.7 keeps
         // 100% node coverage; larger near cuts corners harder and starts skipping node columns).
         final double gazeAhead = Math.max(1.0, Princeps.settings().humanizedSteeringGazeBlocks.value);
         final double trackAhead = Mth.clamp(Princeps.settings().humanizedSteeringTrackBlocks.value.doubleValue(), 0.3, 0.7);
-        final double[] far = advanceAlong(nodes, segI, segT, end, gazeAhead);
-        final double[] near = advanceAlong(nodes, segI, segT, end, trackAhead);
+        final double[] far = alongLine(line, idx, gazeAhead);
+        final double[] near = alongLine(line, idx, trackAhead);
         if (collided) {
             // LOCAL collision recovery: exact-aim at the near carrot's cell (<= trackAhead blocks ahead ON the
             // path), which pulls the body straight back into the verified corridor — never at a distant chord dest.
@@ -753,9 +785,11 @@ public interface MovementHelper extends ActionCosts, Helper {
             moveTowards(ctx, state, new BetterBlockPos((int) Math.floor(near[0]), y, (int) Math.floor(near[1])));
             return;
         }
-        // signed cross-track distance to the projected segment (for the A/D drift correction below)
-        final double pax = nodes.get(segI).x + 0.5, paz = nodes.get(segI).z + 0.5;
-        final double pbx = nodes.get(segI + 1).x + 0.5, pbz = nodes.get(segI + 1).z + 0.5;
+        // signed cross-track distance to the local smooth-line segment (for the A/D drift correction below)
+        final int segEnd = Math.min(idx + 1, line.size() - 1);
+        final int segBegin = Math.max(0, segEnd - 1);
+        final double pax = line.get(segBegin).x(), paz = line.get(segBegin).z();
+        final double pbx = line.get(segEnd).x(), pbz = line.get(segEnd).z();
         final double segLen = Math.hypot(pbx - pax, pbz - paz);
         final double crossTrack = segLen < 1e-6 ? 0.0
                 : ((player.x - pax) * (pbz - paz) - (player.z - paz) * (pbx - pax)) / segLen;
@@ -804,9 +838,9 @@ public interface MovementHelper extends ActionCosts, Helper {
         // measured over the next ~2.4 blocks of the path, so we ease off just BEFORE the corner and accelerate out
         // of it. Bench: corner velocity-jerk ~-70% with node coverage unchanged, ~+6% time; straights keep sprinting.
         if (Princeps.settings().humanizedSteeringCurveSlow.value) {
-            final double[] b0 = advanceAlong(nodes, segI, segT, end, 0.2);
-            final double[] b1 = advanceAlong(nodes, segI, segT, end, 1.4);
-            final double[] b2 = advanceAlong(nodes, segI, segT, end, 2.6);
+            final double[] b0 = alongLine(line, idx, 0.2);
+            final double[] b1 = alongLine(line, idx, 1.4);
+            final double[] b2 = alongLine(line, idx, 2.6);
             final float h1 = (float) Math.toDegrees(Math.atan2(-(b1[0] - b0[0]), b1[1] - b0[1]));
             final float h2 = (float) Math.toDegrees(Math.atan2(-(b2[0] - b1[0]), b2[1] - b1[1]));
             if (Math.abs(Mth.degreesDifference(h1, h2))
@@ -856,27 +890,23 @@ public interface MovementHelper extends ActionCosts, Helper {
         }
     }
 
-    /** advance {@code ahead} blocks of arc length along the node-center polyline from (segment i, fraction t),
-     *  clamped at node {@code end}; returns {x, z} */
-    private static double[] advanceAlong(List<BetterBlockPos> nodes, int i, double t, int end, double ahead) {
-        double cx = nodes.get(i).x + 0.5 + (nodes.get(i + 1).x - nodes.get(i).x) * t;
-        double cz = nodes.get(i).z + 0.5 + (nodes.get(i + 1).z - nodes.get(i).z) * t;
-        int j = i;
+    /** advance {@code ahead} blocks of horizontal arc length along the cached smooth line from point
+     *  {@code idx}, clamped at the line end; returns {x, z} */
+    private static double[] alongLine(java.util.List<princeps.flownav.math.Vec3> line, int idx, double ahead) {
+        double cx = line.get(idx).x(), cz = line.get(idx).z();
+        int j = idx;
         double rem = ahead;
-        while (rem > 1e-9) {
-            double bx = nodes.get(j + 1).x + 0.5, bz = nodes.get(j + 1).z + 0.5;
-            double seg = Math.sqrt((bx - cx) * (bx - cx) + (bz - cz) * (bz - cz));
+        while (rem > 1e-9 && j + 1 < line.size()) {
+            final double bx = line.get(j + 1).x(), bz = line.get(j + 1).z();
+            final double seg = Math.hypot(bx - cx, bz - cz);
             if (seg >= rem) {
-                double f = seg == 0 ? 0 : rem / seg;
+                final double f = seg == 0 ? 0 : rem / seg;
                 return new double[]{cx + (bx - cx) * f, cz + (bz - cz) * f};
             }
             rem -= seg;
             cx = bx;
             cz = bz;
             j++;
-            if (j >= end) {
-                return new double[]{cx, cz};
-            }
         }
         return new double[]{cx, cz};
     }

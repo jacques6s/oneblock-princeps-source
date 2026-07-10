@@ -1748,6 +1748,32 @@ public final class Settings {
     public final Setting<Double> elytraAutoDistanceEnd = new Setting<>(75.0);
 
     /**
+     * Auto-elytra distance threshold in overworld CAVES (no sky above the player). Walking/mining
+     * through caves is slow, so flying pays off early — but flight only happens where the pathfinder
+     * actually finds flyable space (large caverns); in cramped tunnels the flight plan fails and
+     * walking resumes automatically. {@code <= 0} disables cave flight (the pre-cave-flight default).
+     */
+    public final Setting<Double> elytraAutoDistanceCaves = new Setting<>(100.0);
+
+    /**
+     * Rocket budgeting for the auto-elytra dispatcher: expected horizontal blocks travelled per
+     * firework. The dispatcher requires {@code ceil(dist / this) + elytraAutoFireworkReserve} rockets
+     * before committing to a flight, so it never strands mid-journey.
+     */
+    public final Setting<Double> elytraAutoBlocksPerFirework = new Setting<>(70.0);
+
+    /** Spare rockets required on top of the distance-based estimate (see elytraAutoBlocksPerFirework). */
+    public final Setting<Integer> elytraAutoFireworkReserve = new Setting<>(2);
+
+    /**
+     * Auto-equip for the auto-elytra dispatcher: when no elytra is worn but a usable one is in the
+     * inventory, swap it into the chest slot before taking off (the replaced chestplate goes to the
+     * elytra's old slot). The bot does not swap back after landing — wearing the elytra is harmless
+     * and the next flight needs it anyway.
+     */
+    public final Setting<Boolean> elytraAutoEquip = new Setting<>(true);
+
+    /**
      * The seed used to generate chunks for long distance elytra path-finding in the nether.
      * Defaults to 2b2t's nether seed.
      */

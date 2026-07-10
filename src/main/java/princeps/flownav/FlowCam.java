@@ -22,6 +22,12 @@ public final class FlowCam {
     private static float curYaw;
     private static float prevPitch;
     private static float curPitch;
+    /** Calls without a look target tolerated before interpolation really stops (the update event fires
+     *  PRE and POST per tick, so this is ~3 game ticks). Movement handoffs (walk -> ascend etc.) can
+     *  leave a target-less tick; a hard stop there reseeds prev=cur and renders one un-interpolated
+     *  frame-run — a micro-stutter at every segment boundary. */
+    private static final int STOP_GRACE_TICKS = 6;
+    private static int graceLeft;
 
     private FlowCam() {
     }
@@ -33,6 +39,7 @@ public final class FlowCam {
 
     /** Called once per tick with the rotation actually applied this tick; shifts current -> previous. */
     public static void push(Object player, float yaw, float pitch) {
+        graceLeft = STOP_GRACE_TICKS;
         if (owner != player) {
             // Fresh start: no previous tick yet — seed both so the first rendered frame does not snap.
             prevYaw = curYaw = yaw;
@@ -46,7 +53,27 @@ public final class FlowCam {
         curPitch = pitch;
     }
 
-    /** Stop interpolating (no path / control released): the camera getters fall through to vanilla. */
+    /**
+     * No look target this tick (movement handoff). Tolerated for a short grace: the pair keeps
+     * shifting with the LIVE rotation, so the camera stays continuous (without the shift the lerp
+     * would replay the previous tick's delta and snap back at the tick boundary). Only a sustained
+     * absence really stops the interpolation and returns the camera to vanilla.
+     */
+    public static void stopSoon(float liveYaw, float livePitch) {
+        if (owner == null) {
+            return;
+        }
+        if (--graceLeft <= 0) {
+            owner = null;
+            return;
+        }
+        prevYaw = curYaw;
+        prevPitch = curPitch;
+        curYaw = liveYaw;
+        curPitch = livePitch;
+    }
+
+    /** Stop interpolating immediately (control released): the camera getters fall through to vanilla. */
     public static void stop() {
         owner = null;
     }

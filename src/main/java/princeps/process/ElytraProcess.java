@@ -332,7 +332,14 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
             if (this.goal == null) {
-                this.goal = new GoalYLevel(31);
+                // Walk-off search target. The nether keeps the classic y=31 (the open lava-tunnel band);
+                // elsewhere (overworld surface, CAVES, the end) descend a little below the current level —
+                // any nearby ledge with a MovementFall works, and marching to y=31 from a surface or a
+                // deepslate cave (which lies BELOW 31) made no sense.
+                final int jumpY = ctx.world().dimensionType().hasCeiling()
+                        ? 31
+                        : Math.max(ctx.world().getMinY() + 8, ctx.playerFeet().y - 12);
+                this.goal = new GoalYLevel(jumpY);
             }
             final IPathExecutor executor = princeps.getPathingBehavior().getCurrent();
             if (executor != null && executor.getPath().getGoal() == this.goal) {

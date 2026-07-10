@@ -120,7 +120,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     public void onPlayerUpdate(PlayerUpdateEvent event) {
 
         if (this.target == null) {
-            FlowCam.stop(); // not steering the view: let the camera fall through to vanilla
+            // Not steering the view this tick: keep the camera continuous over short movement
+            // handoffs (grace), fall back to vanilla only on sustained absence.
+            FlowCam.stopSoon(ctx.player().getYRot(), ctx.player().getXRot());
             return;
         }
 

@@ -159,6 +159,36 @@ public final class InventoryBehavior extends Behavior implements Helper {
         return bestInd;
     }
 
+    /**
+     * Equips a usable elytra from the main inventory into the chest armor slot (three PICKUP clicks:
+     * lift the elytra, drop it into the chest slot, put the replaced chestplate — if any — back into
+     * the elytra's old slot). Used by the auto-elytra dispatcher right before a bot-chosen flight, so
+     * no move-throttling applies (a player swaps armor in one motion too). Returns whether an elytra
+     * with enough durability was found and equipped.
+     */
+    public boolean equipElytraFromInventory() {
+        final NonNullList<ItemStack> invy = ctx.player().getInventory().getNonEquipmentItems();
+        int found = -1;
+        for (int i = 0; i < invy.size(); i++) {
+            final ItemStack stack = invy.get(i);
+            if (stack.getItem() == net.minecraft.world.item.Items.ELYTRA
+                    && stack.getMaxDamage() - stack.getDamageValue() >= Princeps.settings().elytraMinimumDurability.value) {
+                found = i;
+                break;
+            }
+        }
+        if (found < 0) {
+            return false;
+        }
+        final int containerId = ctx.player().inventoryMenu.containerId;
+        final int slotId = found < 9 ? found + 36 : found;
+        final int chestArmorSlot = 6; // player inventory menu: 5=head, 6=chest, 7=legs, 8=feet
+        ctx.playerController().windowClick(containerId, slotId, 0, ContainerInput.PICKUP, ctx.player());
+        ctx.playerController().windowClick(containerId, chestArmorSlot, 0, ContainerInput.PICKUP, ctx.player());
+        ctx.playerController().windowClick(containerId, slotId, 0, ContainerInput.PICKUP, ctx.player());
+        return true;
+    }
+
     public boolean hasGenericThrowaway() {
         for (Item item : Princeps.settings().acceptableThrowawayItems.value) {
             if (throwaway(false, stack -> item.equals(stack.getItem()))) {

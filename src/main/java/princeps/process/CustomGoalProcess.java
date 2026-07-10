@@ -118,23 +118,32 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
         if (threshold <= 0 || dist < threshold) {
             return;
         }
-        final ItemStack chest = ctx.player().getItemBySlot(EquipmentSlot.CHEST);
-        if (chest.getItem() != Items.ELYTRA
-                || chest.getMaxDamage() - chest.getDamageValue() < Princeps.settings().elytraMinimumDurability.value) {
-            return;
+        ItemStack chest = ctx.player().getItemBySlot(EquipmentSlot.CHEST);
+        final boolean chestUsable = chest.getItem() == Items.ELYTRA
+                && chest.getMaxDamage() - chest.getDamageValue() >= Princeps.settings().elytraMinimumDurability.value;
+        if (!chestUsable) {
+            // Auto-equip: swap a usable elytra from the inventory into the chest slot before takeoff.
+            if (!Princeps.settings().elytraAutoEquip.value
+                    || !((Princeps) princeps).getInventoryBehavior().equipElytraFromInventory()) {
+                return;
+            }
         }
-        // Enough rockets for the whole trip (~1 per 70 blocks) plus a safety margin — never strand mid-flight.
-        final int needed = (int) Math.ceil(dist / 70.0) + 2;
+        // Enough rockets for the whole trip plus a reserve — never strand mid-flight.
+        final int needed = (int) Math.ceil(dist / Math.max(1.0, Princeps.settings().elytraAutoBlocksPerFirework.value))
+                + Math.max(0, Princeps.settings().elytraAutoFireworkReserve.value);
         if (countFireworks() < needed) {
             return;
         }
-        // Takeoff feasibility. Inside the nether (below the roof) the cliff auto-jump is the classic,
-        // always-attemptable method — dispatch unconditionally; if no jump-off spot is found the elytra
-        // process cancels itself and this walking goal simply resumes (automatic fallback). Everywhere
-        // else (overworld surface, nether roof, end) require a free-sky column for the vertical launch —
-        // this is also what keeps caves on foot.
-        final boolean netherInterior = ctx.world().dimensionType().hasCeiling() && ctx.playerFeet().y < 120;
-        if (!netherInterior && !elytra.canSkyLaunchHere()) {
+        // Takeoff feasibility. Inside the nether (below the roof) and in overworld caves the cliff
+        // auto-jump is the always-attemptable method — dispatch unconditionally; if no jump-off spot or
+        // no flyable space is found, the elytra process cancels itself and this walking goal simply
+        // resumes (automatic fallback). On open surfaces (overworld, nether roof, end) require a
+        // free-sky column for the vertical launch.
+        final boolean roofed = ctx.world().dimensionType().hasCeiling();
+        final boolean netherInterior = roofed && ctx.playerFeet().y < 120;
+        final boolean overworldCave = !roofed && !ctx.world().dimensionType().hasEnderDragonFight()
+                && !ctx.world().canSeeSky(ctx.playerFeet().above());
+        if (!netherInterior && !overworldCave && !elytra.canSkyLaunchHere()) {
             return;
         }
         logDirect(String.format("Auto-elytra: %.0f blocks to goal (threshold %.0f) — flying", dist, threshold));
@@ -152,7 +161,10 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
         if (ctx.world().dimensionType().hasEnderDragonFight()) { // the end
             return Princeps.settings().elytraAutoDistanceEnd.value;
         }
-        return Princeps.settings().elytraAutoDistanceOverworld.value;
+        // Overworld: open surface vs cave (no sky above the player).
+        return ctx.world().canSeeSky(ctx.playerFeet().above())
+                ? Princeps.settings().elytraAutoDistanceOverworld.value
+                : Princeps.settings().elytraAutoDistanceCaves.value;
     }
 
     private int countFireworks() {
