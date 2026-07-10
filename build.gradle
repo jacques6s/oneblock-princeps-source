@@ -109,6 +109,14 @@ jar {
     }
 }
 
+// API-only jar (princeps.api.*) for consumers that compile against the API and embed the full
+// jar separately (OneBlock vendors both under libs/). Run `gradlew apiJar`.
+tasks.register('apiJar', Jar) {
+    archiveClassifier = 'api'
+    from sourceSets.api.output
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
 // MC 26.1 is unobfuscated, no remapping needed
 
 tasks.withType(JavaCompile).configureEach {
