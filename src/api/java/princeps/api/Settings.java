@@ -1774,6 +1774,22 @@ public final class Settings {
     public final Setting<Boolean> elytraAutoEquip = new Setting<>(true);
 
     /**
+     * Void flight below the world floor (overworld/end — dimensions without a bedrock ceiling): when
+     * the player is fall-flying BELOW the world's minimum Y, the elytra process cruises the safe void
+     * band straight toward the destination — completely obstacle-free space, and vanilla void damage
+     * only starts 64 blocks below the floor. Near the destination it searches for an opening in the
+     * floor and rockets vertically up through it, then the normal flight/landing takes over; without
+     * an opening it circles below the destination and reports, never diving deeper.
+     */
+    public final Setting<Boolean> elytraVoidFlight = new Setting<>(true);
+
+    /** Cruise depth BELOW the world floor for void flight (blocks; clamped into the damage-free band). */
+    public final Setting<Double> elytraVoidFlightDepth = new Setting<>(26.0);
+
+    /** Search radius (blocks) around the destination column for an opening in the world floor to exit through. */
+    public final Setting<Integer> elytraVoidExitSearchRadius = new Setting<>(16);
+
+    /**
      * The seed used to generate chunks for long distance elytra path-finding in the nether.
      * Defaults to 2b2t's nether seed.
      */

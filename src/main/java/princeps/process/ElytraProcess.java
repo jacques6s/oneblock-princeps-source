@@ -94,6 +94,11 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     /** Ticks accumulated since the last failed landing-spot search (see retry above). */
     private int landingSearchRetryTicks;
 
+    // Void flight below the world floor (see Settings.elytraVoidFlight).
+    private BetterBlockPos voidExitSpot;
+    private int voidFireworkCooldown;
+    private boolean voidNoExitLogged;
+
     @Override
     public void onLostControl() {
         this.state = State.START_FLYING; // TODO: null state?
@@ -106,6 +111,9 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         this.skyLaunchFireworkCooldown = 0;
         this.skyLaunchGroundTicks = 0;
         this.autoTakeoff = false;
+        this.voidExitSpot = null;
+        this.voidFireworkCooldown = 0;
+        this.voidNoExitLogged = false;
         destroyBehaviorAsync();
     }
 
@@ -172,7 +180,9 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 logDirect("almost out of elytra durability or fireworks, but I'm going to continue since elytraAllowEmergencyLand is false");
             }
         }
-        if (ctx.player().isFallFlying() && this.state != State.LANDING && (this.behavior.pathManager.isComplete() || safetyLanding)) {
+        if (ctx.player().isFallFlying() && this.state != State.LANDING
+                && this.state != State.VOID_CRUISE && this.state != State.VOID_EXIT // below the floor there is nothing to land on
+                && (this.behavior.pathManager.isComplete() || safetyLanding)) {
             final BetterBlockPos last = this.behavior.pathManager.path.getLast();
             // A failed landing-spot search used to be final: the bot orbited the last node until the
             // rockets ran dry. Retry periodically instead — the orbit moves the vantage point and the
@@ -229,6 +239,99 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             }
         }
 
+        // Void flight: fall-flying BELOW the world floor (no ceiling dimension) is completely
+        // obstacle-free space, and vanilla void damage only starts 64 blocks below minY — a safe
+        // cruise band. The regular flight controller cannot reason below the octree, so a dedicated
+        // cruise owns the flight there. Must run BEFORE the generic isFallFlying branch.
+        if (Princeps.settings().elytraVoidFlight.value
+                && !ctx.world().dimensionType().hasCeiling()
+                && ctx.player().isFallFlying()
+                && ctx.player().position().y < ctx.world().getMinY()
+                && this.state != State.VOID_EXIT && this.state != State.LANDING) {
+            this.state = State.VOID_CRUISE;
+        }
+        if (this.state == State.VOID_CRUISE) {
+            final BlockPos destination = this.currentDestination();
+            if (destination == null || !ctx.player().isFallFlying()) {
+                this.state = State.FLYING; // lost the flight or the destination: normal flow handles it
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            princeps.getInputOverrideHandler().clearAllKeys();
+            final int minY = ctx.world().getMinY();
+            // Clamp the cruise depth well inside the damage-free band (void damage starts at minY - 64).
+            final double depth = Math.max(6.0, Math.min(52.0, Princeps.settings().elytraVoidFlightDepth.value));
+            final double cruiseY = minY - depth;
+            final Vec3 p = ctx.player().position();
+            final double dx = destination.getX() + 0.5 - p.x;
+            final double dz = destination.getZ() + 0.5 - p.z;
+            final double horiz = Math.hypot(dx, dz);
+            if (horiz < 16) {
+                final BetterBlockPos exit = findFloorExit(destination);
+                if (exit != null) {
+                    this.voidExitSpot = exit;
+                    this.state = State.VOID_EXIT;
+                    logDirect("Void cruise: exiting through the floor opening at " + exit.x + "," + exit.z);
+                    return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+                }
+                if (!this.voidNoExitLogged) {
+                    this.voidNoExitLogged = true;
+                    logDirect("Void cruise: no opening in the world floor near the destination — circling below. Take over or cancel.");
+                }
+                // fall through: keep steering at the destination column = a gentle orbit below it
+            }
+            // Yaw at the destination; pitch holds the cruise altitude (positive pitch = nose down).
+            final float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+            final float pitch = (float) Math.max(-20.0, Math.min(25.0, (p.y - cruiseY) * 3.0));
+            princeps.getLookBehavior().updateTarget(new Rotation(yaw, pitch), false);
+            if (this.voidFireworkCooldown > 0) {
+                this.voidFireworkCooldown--;
+            } else {
+                final Vec3 dm = ctx.player().getDeltaMovement();
+                final double hspeed = Math.hypot(dm.x, dm.z);
+                // Boost when slow or sagging toward the damage threshold — never glide deeper.
+                if ((hspeed < 1.0 || p.y < cruiseY - 8) && fireRocket()) {
+                    this.voidFireworkCooldown = 10;
+                }
+            }
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        if (this.state == State.VOID_EXIT) {
+            princeps.getInputOverrideHandler().clearAllKeys();
+            if (!ctx.player().isFallFlying() || this.voidExitSpot == null) {
+                this.state = State.FLYING;
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            final Vec3 p = ctx.player().position();
+            if (p.y > ctx.world().getMinY() + 8) {
+                this.state = State.FLYING; // through the floor: normal flight/landing takes over
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            final double dx = this.voidExitSpot.x + 0.5 - p.x;
+            final double dz = this.voidExitSpot.z + 0.5 - p.z;
+            final double horiz = Math.hypot(dx, dz);
+            if (this.voidFireworkCooldown > 0) {
+                this.voidFireworkCooldown--;
+            }
+            if (horiz > 1.2) {
+                // line up horizontally under the opening first
+                final float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                princeps.getLookBehavior().updateTarget(new Rotation(yaw, 0.0f), false);
+                if (this.voidFireworkCooldown <= 0) {
+                    final Vec3 dm = ctx.player().getDeltaMovement();
+                    if (Math.hypot(dm.x, dm.z) < 0.8 && fireRocket()) {
+                        this.voidFireworkCooldown = 10;
+                    }
+                }
+            } else {
+                // straight up through the opening (exact aim — same maneuver as the sky launch climb)
+                princeps.getLookBehavior().updateTarget(new Rotation(ctx.playerRotations().getYaw(), -90.0F), true);
+                if (this.voidFireworkCooldown <= 0 && ctx.player().getDeltaMovement().y < 1.2 && fireRocket()) {
+                    this.voidFireworkCooldown = 10;
+                }
+            }
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+
         // Vertical rocket takeoff, phase 2: jump straight up under the opening, deploy at the apex,
         // and rocket vertically until clear of the surrounding terrain — then normal flight takes over.
         // Must run BEFORE the generic isFallFlying branch below, which would otherwise steer horizontally.
@@ -248,8 +351,7 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 if (this.skyLaunchFireworkCooldown > 0) {
                     this.skyLaunchFireworkCooldown--;
                 } else if (vy < 1.2) {
-                    if (princeps.getInventoryBehavior().throwaway(true, ElytraBehavior::isFireworks)) {
-                        ctx.playerController().processRightClick(ctx.player(), ctx.world(), InteractionHand.MAIN_HAND);
+                    if (fireRocket()) {
                         this.skyLaunchFireworkCooldown = 10; // matches the flight controller's firework cooldown
                     } else {
                         this.state = State.FLYING; // out of rockets mid-climb: glide, flight controller handles it
@@ -415,6 +517,41 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     /** Marks the current journey as bot-chosen: the takeoff runs fully autonomously (see {@link #autoTakeoff}). */
     public void enableAutoTakeoff() {
         this.autoTakeoff = true;
+    }
+
+    /** Selects a firework into the main hand and uses it. Returns false when none is left. */
+    private boolean fireRocket() {
+        if (!princeps.getInventoryBehavior().throwaway(true, ElytraBehavior::isFireworks)) {
+            return false;
+        }
+        ctx.playerController().processRightClick(ctx.player(), ctx.world(), InteractionHand.MAIN_HAND);
+        return true;
+    }
+
+    /**
+     * An opening in the WORLD FLOOR near {@code around} for the void-flight exit: a column whose
+     * bottom three world layers (minY..minY+2) are passable, searched nearest-first in a ring.
+     */
+    private BetterBlockPos findFloorExit(BlockPos around) {
+        final int minY = ctx.world().getMinY();
+        final int radius = Math.max(1, Princeps.settings().elytraVoidExitSearchRadius.value);
+        for (int r = 0; r <= radius; r++) {
+            for (int dx = -r; dx <= r; dx++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.abs(dz)) != r) {
+                        continue; // ring only: nearest openings first
+                    }
+                    final int x = around.getX() + dx;
+                    final int z = around.getZ() + dz;
+                    if (MovementHelper.canWalkThrough(ctx, new BetterBlockPos(x, minY, z))
+                            && MovementHelper.canWalkThrough(ctx, new BetterBlockPos(x, minY + 1, z))
+                            && MovementHelper.canWalkThrough(ctx, new BetterBlockPos(x, minY + 2, z))) {
+                        return new BetterBlockPos(x, minY, z);
+                    }
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -599,8 +736,10 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
 
     @Override
     public boolean isSafeToCancel() {
+        // Canceling mid-void would strand the player below the world floor — never "safe".
         return !this.isActive() || !(this.state == State.FLYING || this.state == State.START_FLYING
-                || this.state == State.SKY_LAUNCH_ASCEND);
+                || this.state == State.SKY_LAUNCH_ASCEND
+                || this.state == State.VOID_CRUISE || this.state == State.VOID_EXIT);
     }
 
     public enum State {
@@ -609,6 +748,8 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         GET_TO_JUMP("Walking to takeoff"),
         SKY_LAUNCH_WALK("Walking under a sky opening"),
         SKY_LAUNCH_ASCEND("Rocketing up through the opening"),
+        VOID_CRUISE("Void cruising below the world floor"),
+        VOID_EXIT("Rocketing up through the floor opening"),
         START_FLYING("Begin flying"),
         FLYING("Flying"),
         LANDING("Landing");
