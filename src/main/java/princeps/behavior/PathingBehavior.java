@@ -23,6 +23,7 @@ import princeps.api.event.events.*;
 import princeps.api.pathing.calc.IPath;
 import princeps.api.pathing.goals.Goal;
 import princeps.api.pathing.goals.GoalXZ;
+import princeps.api.process.IPrincepsProcess;
 import princeps.api.process.PathingCommand;
 import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.Helper;
@@ -107,6 +108,17 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
         tickPath();
         ticksElapsedSoFar++;
         dispatchEvents();
+        // The base-hunt Y ceiling is a LEASE, not a latch: the hunter re-arms it every tick while
+        // it drives. With no process in control and no path running the clamp is meaningless — and
+        // if a client-side lifecycle forgot (or silently failed) to disarm it, it would strangle
+        // every following normal journey below y=0. So it auto-clears on idle.
+        if (Princeps.settings().baseHuntYCeiling.value
+                && !this.isPathing()
+                && !princeps.getPathingControlManager().mostRecentInControl()
+                        .map(IPrincepsProcess::isActive).orElse(false)) {
+            Princeps.settings().baseHuntYCeiling.value = false;
+            logDebug("baseHuntYCeiling auto-disarmed (no active pathing process)");
+        }
     }
 
     @Override

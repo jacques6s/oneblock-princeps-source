@@ -133,7 +133,13 @@ public class CalculationContext {
         this.allowDiagonalDescend = Princeps.settings().allowDiagonalDescend.value;
         this.allowDiagonalAscend = Princeps.settings().allowDiagonalAscend.value;
         this.allowDownward = Princeps.settings().allowDownward.value;
-        this.baseHuntYCeiling = Princeps.settings().baseHuntYCeiling.value;
+        // Base-hunt Y ceiling is OVERWORLD-ONLY by construction: the standard base hunt is an
+        // overworld mode (other dimensions get their own mechanisms later). Gating here — at the
+        // single point every path calculation reads the clamp — means a stale/stuck setting can
+        // never strangle nether/end pathing no matter what the client-side lifecycle does.
+        this.baseHuntYCeiling = Princeps.settings().baseHuntYCeiling.value
+                && !this.world.dimensionType().hasCeiling()
+                && !this.world.dimensionType().hasEnderDragonFight();
         this.baseHuntMaxY = Princeps.settings().baseHuntMaxY.value;
         this.minFallHeight = 3; // Minimum fall height used by MovementFall
         this.maxFallHeightNoWater = Princeps.settings().maxFallHeightNoWater.value;
