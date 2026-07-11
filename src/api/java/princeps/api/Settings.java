@@ -1037,9 +1037,12 @@ public final class Settings {
     public final Setting<Boolean> prefixControl = new Setting<>(true);
 
     /**
-     * The command prefix for chat control
+     * The command prefix for chat control. {@code "-"} deliberately: one keystroke, never collides
+     * with a "."-prefixed host client's own command system, and chat messages practically never
+     * start with it. Typing just the prefix pops the command suggestions (goto, elytra, ...) via
+     * the vanilla suggestion UI; {@link #secondaryPrefix} ("#") stays available as a rescue hatch.
      */
-    public final Setting<String> prefix = new Setting<>("#");
+    public final Setting<String> prefix = new Setting<>("-");
 
     /**
      * A SECONDARY always-available command prefix (empty string disables). Rescue hatch for host clients whose own
