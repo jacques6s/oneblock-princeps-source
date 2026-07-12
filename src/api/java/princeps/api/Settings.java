@@ -909,6 +909,11 @@ public final class Settings {
      *  mode. Applied in {@code aimCurvePeak()}; 1.0 = the mode's stock peak. */
     public final Setting<Double> humanizedLookAimCurvePeakScale = new Setting<>(1.0);
 
+    /** Degrees per tick the walk pitch re-levels toward the {@link #humanizedWalkPitchMin}/{@link #humanizedWalkPitchMax}
+     *  band when it starts far off (e.g. after a steep drop look or a break aim). Higher = the view returns to the
+     *  walking height faster instead of creeping there ultra-smoothly. 1.0 = the historic slow crawl. */
+    public final Setting<Double> humanizedWalkPitchNudgeStep = new Setting<>(1.0);
+
     /** Human sighting reaction for the dig: when the crosshair NEWLY lands on a target block, wait 1..3 ticks before
      *  the first press instead of clicking the same tick (an instant same-tick press is a machine tell). The wait is
      *  tracked while the post-break cooldown runs, so it overlaps the mining rhythm instead of stacking onto it —

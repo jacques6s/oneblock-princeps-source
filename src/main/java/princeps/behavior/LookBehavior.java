@@ -690,10 +690,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 lo = Princeps.settings().humanizedWalkPitchMin.value.floatValue();
                 hi = Math.max(lo, Princeps.settings().humanizedWalkPitchMax.value.floatValue());
             }
+            final float step = (float) Math.max(0.1, Princeps.settings().humanizedWalkPitchNudgeStep.value);
             if (pitch < lo) {
-                return pitch + 1;
+                return Math.min(lo, pitch + step); // clamp so a big step never overshoots past the band
             } else if (pitch > hi) {
-                return pitch - 1;
+                return Math.max(hi, pitch - step);
             }
             return pitch;
         }
