@@ -768,8 +768,8 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
 
     @Override
     public void onWorldEvent(WorldEvent event) {
-        if (event.getWorld() != null && event.getState() == EventState.POST) {
-            // Exiting the world, just destroy
+        if (event.getState() == EventState.PRE) {
+            // Tear down the solver/native context before every unload, including setLevel(null) on disconnect.
             destroyBehaviorAsync();
         }
     }

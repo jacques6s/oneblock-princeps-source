@@ -88,7 +88,9 @@ public final class FollowProcess extends PrincepsProcessHelper implements IFollo
         if (maxDist != 0 && entity.distanceToSqr(ctx.player()) > maxDist * maxDist) {
             return false;
         }
-        return ctx.entitiesStream().anyMatch(entity::equals);
+        // scanWorld already obtained this entity from ctx.entitiesStream(); searching the same stream
+        // again here made dense worlds O(entityCount^2) without changing the answer.
+        return true;
     }
 
     private void scanWorld() {

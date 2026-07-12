@@ -58,6 +58,9 @@ public final class InventoryBehavior extends Behavior implements Helper {
         if (!Princeps.settings().allowInventory.value) {
             return;
         }
+        if (princeps.getSurvivalBehavior().ownsInventory()) {
+            return;
+        }
         if (event.getType() == TickEvent.Type.OUT) {
             return;
         }
@@ -66,8 +69,17 @@ public final class InventoryBehavior extends Behavior implements Helper {
             return;
         }
         ticksSinceLastInventoryMove++;
-        if (firstValidThrowaway() >= 9) { // aka there are none on the hotbar, but there are some in main inventory
-            requestSwapWithHotBar(firstValidThrowaway(), 8);
+        final boolean slot9TotemProtected = Princeps.settings().autoSurvival.value
+                && Princeps.settings().survivalAutoTotem.value
+                && ctx.player().getInventory().getItem(8).getItem() == net.minecraft.world.item.Items.TOTEM_OF_UNDYING;
+        if (slot9TotemProtected && lastTickRequestedMove != null && lastTickRequestedMove[1] == 8) {
+            lastTickRequestedMove = null;
+        }
+        if (!slot9TotemProtected) {
+            final int firstThrowaway = firstValidThrowaway();
+            if (firstThrowaway >= 9) {
+                requestSwapWithHotBar(firstThrowaway, 8);
+            }
         }
         int pick = bestToolAgainst(Blocks.STONE);
         if (pick >= 9) {

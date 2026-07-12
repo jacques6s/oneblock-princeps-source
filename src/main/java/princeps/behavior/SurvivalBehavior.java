@@ -23,6 +23,7 @@ import net.minecraft.core.component.DataComponents;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.entity.EquipmentSlot;
 import net.minecraft.world.entity.player.Inventory;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.enchantment.Enchantment;
@@ -31,6 +32,8 @@ import net.minecraft.world.item.enchantment.ItemEnchantments;
 import net.minecraft.world.inventory.ContainerInput;
 import princeps.Princeps;
 import princeps.api.event.events.TickEvent;
+import princeps.api.event.events.WorldEvent;
+import princeps.api.event.events.type.EventState;
 
 import java.util.Set;
 import java.util.function.Predicate;
@@ -50,10 +53,14 @@ public final class SurvivalBehavior extends Behavior {
 
     /** Offhand button id for a SWAP container click (vanilla {@code Inventory.SLOT_OFFHAND}). */
     private static final int OFFHAND_SWAP_BUTTON = 40;
+    /** Hotbar slot 9 (index 8) — the totem backup slot, which InventoryBehavior leaves alone. */
     private static final int SLOT9_INDEX = 8;
 
     /** While >= 0, an eat is in progress and this is the hotbar slot to re-select once it completes. */
     private int eatRestoreSlot = -1;
+    private LocalPlayer eatPlayer;
+    private Item eatItem;
+    private InteractionHand eatHand;
     /** Wall-clock of the last golden-apple heal, for the minor-damage throttle. */
     private long lastGappleMs;
 
@@ -61,12 +68,21 @@ public final class SurvivalBehavior extends Behavior {
     // thrown from the main hand in a slow stream. The totem system is suspended for the session's duration.
     private boolean repairing;
     private int repairThrowCd;
-    /** Hotbar slot the tool came from (to move it back and re-select once the session ends). */
-    private int repairToolHotbar = -1;
+    /** Inventory slot the tool came from (to move it back once the session ends). */
+    private int repairToolInventoryIndex = -1;
+    private int repairRestoreSelectedSlot = -1;
+    private LocalPlayer repairPlayer;
+    private boolean repairCancelPending;
+
+    /** A main-inventory consumable temporarily swapped into the hotbar, restored after use. */
+    private int borrowedSourceIndex = -1;
+    private int borrowedHotbarIndex = -1;
+    private LocalPlayer borrowedPlayer;
 
     private final Predicate<ItemStack> isTotem = s -> s.getItem() == Items.TOTEM_OF_UNDYING;
-    private final Predicate<ItemStack> isGapple = s ->
-            s.getItem() == Items.GOLDEN_APPLE || s.getItem() == Items.ENCHANTED_GOLDEN_APPLE;
+    private final Predicate<ItemStack> isNormalGapple = s -> s.getItem() == Items.GOLDEN_APPLE;
+    private final Predicate<ItemStack> isEnchantedGapple = s -> s.getItem() == Items.ENCHANTED_GOLDEN_APPLE;
+    private final Predicate<ItemStack> isGapple = s -> isNormalGapple.test(s) || isEnchantedGapple.test(s);
     private final Predicate<ItemStack> isXpBottle = s -> s.getItem() == Items.EXPERIENCE_BOTTLE;
     private final Predicate<ItemStack> isRegularFood = s ->
             s.has(DataComponents.FOOD) && !isGapple.test(s) && !HARMFUL_FOOD.contains(s.getItem());
@@ -83,36 +99,66 @@ public final class SurvivalBehavior extends Behavior {
         if (repairThrowCd > 0) {
             repairThrowCd--;
         }
+        final LocalPlayer p = ctx.player();
+
+        if (p == null) {
+            holdUseKey(false);
+            return;
+        }
+
+        // An eat in progress is managed FIRST and unconditionally: we run before Minecraft.handleKeybinds
+        // this tick, so we must hold the USE key down every tick of the eat — otherwise handleKeybinds sees
+        // keyUse released and cancels the use before any food is ever consumed. Release it (and restore the
+        // held slot) the moment the eat completes or is interrupted, on every exit path.
+        if (this.eatRestoreSlot >= 0) {
+            final boolean samePlayer = p == this.eatPlayer;
+            final boolean canContinue = samePlayer
+                    && Princeps.settings().autoSurvival.value
+                    && Princeps.settings().survivalAutoEat.value
+                    && p.isAlive() && !p.isFallFlying()
+                    && !princeps.getElytraProcess().isActive()
+                    && p.containerMenu == p.inventoryMenu;
+            if (canContinue && p.isUsingItem() && p.getUseItem().getItem() == this.eatItem
+                    && p.getUsedItemHand() == this.eatHand) {
+                holdUseKey(true);
+                return;
+            }
+            finishEat(p, samePlayer);
+            return;
+        }
+
         if (!Princeps.settings().autoSurvival.value) {
             if (repairing) {
-                cancelRepair(ctx.player()); // setting turned off mid-session — restore hands
+                cancelRepair(p); // setting turned off mid-session — restore hands
             }
             return;
         }
-        final LocalPlayer p = ctx.player();
-        if (p == null || !p.isAlive() || p.isFallFlying()) {
-            return; // never fight the elytra flight or act at the menu
+        if (this.repairing) {
+            if (p != this.repairPlayer) {
+                clearRepairState();
+                return;
+            }
+            if (p.containerMenu != p.inventoryMenu) {
+                this.repairCancelPending = true;
+                return; // wait until the external container closes; its slot ids differ from inventoryMenu
+            }
+            if (this.repairCancelPending || !Princeps.settings().survivalAutoRepair.value
+                    || !p.isAlive() || p.isFallFlying() || princeps.getElytraProcess().isActive()) {
+                cancelRepair(p);
+                return;
+            }
+            tickRepair(p);
+            return;
+        }
+        if (!p.isAlive() || p.isFallFlying() || princeps.getElytraProcess().isActive()) {
+            return;
         }
         // An external container (chest/etc.) is open: leave the player's inventory alone.
         if (p.containerMenu != p.inventoryMenu) {
             return;
         }
 
-        // A currently-running eat must finish untouched (re-selecting or swapping mid-eat aborts it).
-        if (this.eatRestoreSlot >= 0) {
-            if (p.isUsingItem()) {
-                return;
-            }
-            p.getInventory().setSelectedSlot(this.eatRestoreSlot);
-            this.eatRestoreSlot = -1;
-            return;
-        }
-
         // A repair session owns the hands (tool in offhand, XP in main hand) until it finishes.
-        if (this.repairing) {
-            tickRepair(p);
-            return;
-        }
         if (p.isUsingItem()) {
             return; // some other use (e.g. the user) is in progress
         }
@@ -138,8 +184,39 @@ public final class SurvivalBehavior extends Behavior {
         }
     }
 
+    @Override
+    public void onWorldEvent(WorldEvent event) {
+        if (event.getState() != EventState.PRE) {
+            return;
+        }
+        final LocalPlayer p = ctx.player();
+        if (this.eatRestoreSlot >= 0 && p != null) {
+            finishEat(p, p == this.eatPlayer);
+        } else {
+            holdUseKey(false);
+            this.eatRestoreSlot = -1;
+            this.eatPlayer = null;
+            this.eatItem = null;
+            this.eatHand = null;
+        }
+        if (this.repairing && p != null && p == this.repairPlayer && p.containerMenu == p.inventoryMenu) {
+            cancelRepair(p);
+        } else {
+            clearRepairState();
+        }
+        clearBorrowedSlot();
+        this.lastGappleMs = 0L;
+    }
+
+    boolean ownsInventory() {
+        return this.eatRestoreSlot >= 0 || this.repairing || this.borrowedSourceIndex >= 0;
+    }
+
     // ─────────────────────────────────────── TOTEM ───────────────────────────────────────
-    /** Ensures a totem in the offhand (priority) and, if a spare exists, in hotbar slot 9. Returns whether it acted. */
+    /**
+     * Ensures a Totem of Undying in the offhand and a distinct backup in hotbar slot 9 when available.
+     * InventoryBehavior protects that backup instead of treating slot 9 as its throwaway slot.
+     */
     private boolean manageTotems(LocalPlayer p) {
         final boolean offHasTotem = isTotem.test(p.getItemBySlot(EquipmentSlot.OFFHAND));
         if (!offHasTotem) {
@@ -148,9 +225,8 @@ public final class SurvivalBehavior extends Behavior {
                 swap(p, menuSlot(src), OFFHAND_SWAP_BUTTON);
                 return true;
             }
-            return false; // no totem anywhere — nothing to do
+            return false;
         }
-        // Offhand is covered; fill slot 9 only from a DIFFERENT totem (one totem => offhand only).
         final Inventory inv = p.getInventory();
         if (!isTotem.test(inv.getItem(SLOT9_INDEX))) {
             final int src = findInventoryTotem(p, SLOT9_INDEX);
@@ -178,15 +254,22 @@ public final class SurvivalBehavior extends Behavior {
         final float hp = p.getHealth();
         final float maxHp = p.getMaxHealth();
         final int food = p.getFoodData().getFoodLevel();
+        final boolean needsHealing = hp < maxHp;
+        final boolean needsFood = food <= Princeps.settings().survivalEatFoodLevel.value;
+        if (!needsHealing && !needsFood) {
+            return false;
+        }
         final long now = System.currentTimeMillis();
         final boolean haveGapple = hasItem(p, isGapple);
 
         // Golden apple = healing. Emergency (low HP) bypasses the throttle; minor damage is throttled.
-        if (haveGapple && hp < maxHp) {
+        if (haveGapple && needsHealing) {
             final boolean emergency = hp < Princeps.settings().survivalGappleEmergencyHp.value;
             final boolean throttleOk = now - this.lastGappleMs >= Princeps.settings().survivalGappleThrottleMs.value;
             if (emergency || throttleOk) {
-                if (startEat(p, isGapple)) {
+                final boolean started = startEat(p, isNormalGapple)
+                        || emergency && startEat(p, isEnchantedGapple);
+                if (started) {
                     this.lastGappleMs = now;
                     return true;
                 }
@@ -194,11 +277,11 @@ public final class SurvivalBehavior extends Behavior {
         }
 
         // Hunger = regular food (golden apples are reserved for healing; only used if nothing else feeds).
-        if (food <= Princeps.settings().survivalEatFoodLevel.value) {
+        if (needsFood) {
             if (startEat(p, isRegularFood)) {
                 return true;
             }
-            if (haveGapple && startEat(p, isGapple)) {
+            if (haveGapple && startEat(p, isNormalGapple)) {
                 return true;
             }
         }
@@ -214,15 +297,37 @@ public final class SurvivalBehavior extends Behavior {
         ctx.playerController().processRightClick(p, ctx.world(), InteractionHand.MAIN_HAND);
         if (p.isUsingItem()) {
             this.eatRestoreSlot = prevSlot;
+            this.eatPlayer = p;
+            this.eatItem = p.getUseItem().getItem();
+            this.eatHand = p.getUsedItemHand();
+            holdUseKey(true); // hold USE so handleKeybinds (later this tick) doesn't cancel the eat
             return true;
         }
         // Didn't start (shouldn't happen for food) — put the held slot back.
+        restoreBorrowedSlot(p);
         p.getInventory().setSelectedSlot(prevSlot);
         return false;
     }
 
+    /** Force the vanilla USE key state so a bot-started eat survives handleKeybinds' release check. */
+    private void holdUseKey(boolean down) {
+        ctx.minecraft().options.keyUse.setDown(down || ctx.minecraft().mouseHandler.isRightPressed());
+    }
+
+    private void finishEat(LocalPlayer p, boolean restoreSlot) {
+        holdUseKey(false);
+        restoreBorrowedSlot(p);
+        if (restoreSlot && p.containerMenu == p.inventoryMenu) {
+            p.getInventory().setSelectedSlot(this.eatRestoreSlot);
+        }
+        this.eatRestoreSlot = -1;
+        this.eatPlayer = null;
+        this.eatItem = null;
+        this.eatHand = null;
+    }
+
     // ─────────────────────────────────────── REPAIR ───────────────────────────────────────
-    // XP-bottle Mending repair, per spec: park the held Mending tool in the OFFHAND (so Mending targets it),
+    // XP-bottle Mending repair: park the most damaged eligible Mending item in the OFFHAND,
     // hold XP bottles in the MAIN hand, and throw a slow stream at our feet until the tool is healthy again.
     // Only Mending items are ever repaired; worn Mending armor is topped up incidentally by the same orbs.
 
@@ -239,16 +344,35 @@ public final class SurvivalBehavior extends Behavior {
         if (p.getHealth() < p.getMaxHealth() * Princeps.settings().survivalRepairMinHealthFraction.value) {
             return;
         }
-        // The tool to repair must be the held main-hand item (that's what we can park in the offhand).
-        if (!isMendingLow(p.getItemBySlot(EquipmentSlot.MAINHAND))) {
+        final int toolIndex = findLowestMendingTool(p);
+        if (toolIndex < 0) {
             return;
         }
-        // Park the held tool in the offhand (held slot <-> offhand); the offhand's old item (a totem) lands
-        // in the held slot and is displaced to the inventory when we grab a bottle next tick.
-        this.repairToolHotbar = p.getInventory().getSelectedSlot();
-        swap(p, menuSlot(this.repairToolHotbar), OFFHAND_SWAP_BUTTON);
+        this.repairToolInventoryIndex = toolIndex;
+        this.repairRestoreSelectedSlot = p.getInventory().getSelectedSlot();
+        this.repairPlayer = p;
+        this.repairCancelPending = false;
+        swap(p, menuSlot(toolIndex), OFFHAND_SWAP_BUTTON);
         this.repairing = true;
         this.repairThrowCd = 0;
+    }
+
+    /** Finds the most damaged low-durability Mending item in the hotbar or main inventory. */
+    private int findLowestMendingTool(LocalPlayer p) {
+        final Inventory inv = p.getInventory();
+        int found = -1;
+        float lowest = Float.MAX_VALUE;
+        for (int i = 0; i < 36; i++) {
+            final ItemStack stack = inv.getItem(i);
+            if (isMendingLow(stack)) {
+                final float remaining = remainingFraction(stack);
+                if (remaining < lowest) {
+                    found = i;
+                    lowest = remaining;
+                }
+            }
+        }
+        return found;
     }
 
     private void tickRepair(LocalPlayer p) {
@@ -275,25 +399,40 @@ public final class SurvivalBehavior extends Behavior {
         this.repairThrowCd = Math.max(1, Princeps.settings().survivalRepairThrowIntervalTicks.value);
     }
 
-    /** Ends a repair session: move the tool out of the offhand back to its hotbar slot, re-select it. */
+    /** Ends a repair session: move the tool back to its exact inventory slot and restore the selected slot. */
     private void endRepair(LocalPlayer p) {
-        if (this.repairToolHotbar >= 0) {
-            swap(p, menuSlot(this.repairToolHotbar), OFFHAND_SWAP_BUTTON); // offhand tool <-> hotbar slot
-            p.getInventory().setSelectedSlot(this.repairToolHotbar);
+        restoreBorrowedSlot(p);
+        if (this.repairToolInventoryIndex >= 0 && p == this.repairPlayer) {
+            swap(p, menuSlot(this.repairToolInventoryIndex), OFFHAND_SWAP_BUTTON);
+            p.getInventory().setSelectedSlot(this.repairRestoreSelectedSlot);
         }
-        this.repairToolHotbar = -1;
-        this.repairing = false;
+        clearRepairState();
         // The totem system re-runs next tick and restores a totem to the (now free) offhand.
     }
 
     /** Hard cancel (setting turned off / world change): restore the hands without other checks. */
     private void cancelRepair(LocalPlayer p) {
-        if (p != null && this.repairToolHotbar >= 0 && p.containerMenu == p.inventoryMenu) {
-            swap(p, menuSlot(this.repairToolHotbar), OFFHAND_SWAP_BUTTON);
-            p.getInventory().setSelectedSlot(this.repairToolHotbar);
+        if (p != null && p == this.repairPlayer && p.containerMenu != p.inventoryMenu) {
+            this.repairCancelPending = true;
+            return;
         }
-        this.repairToolHotbar = -1;
+        if (p != null && this.repairToolInventoryIndex >= 0
+                && p == this.repairPlayer) {
+            restoreBorrowedSlot(p);
+            swap(p, menuSlot(this.repairToolInventoryIndex), OFFHAND_SWAP_BUTTON);
+            p.getInventory().setSelectedSlot(this.repairRestoreSelectedSlot);
+        }
+        clearRepairState();
+    }
+
+    private void clearRepairState() {
+        this.repairToolInventoryIndex = -1;
+        this.repairRestoreSelectedSlot = -1;
+        this.repairPlayer = null;
+        this.repairCancelPending = false;
+        this.repairThrowCd = 0;
         this.repairing = false;
+        clearBorrowedSlot();
     }
 
     // ─────────────────────────────────────── helpers ───────────────────────────────────────
@@ -303,16 +442,20 @@ public final class SurvivalBehavior extends Behavior {
         if (want.test(inv.getItem(inv.getSelectedSlot()))) {
             return true;
         }
+        restoreBorrowedSlot(p);
         for (int i = 0; i <= 8; i++) { // hotbar first — no swap needed
             if (want.test(inv.getItem(i))) {
                 inv.setSelectedSlot(i);
                 return true;
             }
         }
-        for (int i = 9; i <= 35; i++) { // main inventory — swap onto a spare hotbar slot
+        for (int i = 9; i <= 35; i++) { // borrow a safe hotbar slot and restore it after use
             if (want.test(inv.getItem(i))) {
-                final int hb = spareHotbarSlot(p);
+                final int hb = borrowableHotbarSlot(p);
                 swap(p, menuSlot(i), hb);
+                this.borrowedSourceIndex = i;
+                this.borrowedHotbarIndex = hb;
+                this.borrowedPlayer = p;
                 inv.setSelectedSlot(hb);
                 return true;
             }
@@ -320,15 +463,31 @@ public final class SurvivalBehavior extends Behavior {
         return false;
     }
 
-    /** A hotbar slot safe to borrow for a swap: never 0 (typically the pickaxe) or 8 (the totem slot). */
-    private int spareHotbarSlot(LocalPlayer p) {
+    /** Prefer an empty slot; on a full hotbar borrow 1..7 and restore it after the session. */
+    private int borrowableHotbarSlot(LocalPlayer p) {
         final Inventory inv = p.getInventory();
         for (int i = 1; i <= 7; i++) {
             if (inv.getItem(i).isEmpty()) {
                 return i;
             }
         }
-        return 4; // none free — displace the middle slot (restored via the saved selected slot)
+        return inv.getSelectedSlot() == 7 ? 6 : 7;
+    }
+
+    private void restoreBorrowedSlot(LocalPlayer p) {
+        if (this.borrowedSourceIndex < 0) {
+            return;
+        }
+        if (p == this.borrowedPlayer && p.containerMenu == p.inventoryMenu) {
+            swap(p, menuSlot(this.borrowedSourceIndex), this.borrowedHotbarIndex);
+        }
+        clearBorrowedSlot();
+    }
+
+    private void clearBorrowedSlot() {
+        this.borrowedSourceIndex = -1;
+        this.borrowedHotbarIndex = -1;
+        this.borrowedPlayer = null;
     }
 
     private boolean hasItem(LocalPlayer p, Predicate<ItemStack> want) {

@@ -27,7 +27,6 @@ import princeps.api.utils.*;
 import princeps.api.utils.input.Input;
 import princeps.behavior.PathingBehavior;
 import princeps.pathing.calc.AbstractNodeCostSearch;
-import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.movements.*;
@@ -306,9 +305,29 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     private Tuple<Double, BlockPos> closestPathPos(IPath path) {
+        final List<IMovement> movements = path.movements();
+        final int nearbyFrom = Math.max(0, pathPosition - 3);
+        final int nearbyTo = Math.min(movements.size(), pathPosition + 8);
         double best = -1;
         BlockPos bestPos = null;
-        for (IMovement movement : path.movements()) {
+        for (int i = nearbyFrom; i < nearbyTo; i++) {
+            for (BlockPos pos : ((Movement) movements.get(i)).getValidPositions()) {
+                double dist = VecUtils.entityDistanceToCenter(ctx.player(), pos);
+                if (dist < best || best == -1) {
+                    best = dist;
+                    bestPos = pos;
+                }
+            }
+        }
+        if (best >= 0 && best <= MAX_DIST_FROM_PATH) {
+            return new Tuple<>(best, bestPos);
+        }
+
+        // Teleports and large lag corrections can place the player far along the path. Preserve the
+        // original full-route answer as a fallback, but avoid that O(path) scan during normal movement.
+        best = -1;
+        bestPos = null;
+        for (IMovement movement : movements) {
             for (BlockPos pos : ((Movement) movement).getValidPositions()) {
                 double dist = VecUtils.entityDistanceToCenter(ctx.player(), pos);
                 if (dist < best || best == -1) {
@@ -401,7 +420,7 @@ public class PathExecutor implements IPathExecutor, Helper {
         behavior.princeps.getInputOverrideHandler().setInputForceState(Input.SPRINT, false);
 
         // first and foremost, if allowSprint is off, or if we don't have enough hunger, don't try and sprint
-        if (!new CalculationContext(behavior.princeps, false).canSprint) {
+        if (!Princeps.settings().allowSprint.value || ctx.player().getFoodData().getFoodLevel() <= 6) {
             return false;
         }
         IMovement current = path.movements().get(pathPosition);

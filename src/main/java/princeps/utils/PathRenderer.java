@@ -19,6 +19,7 @@ package princeps.utils;
 
 import princeps.api.PrincepsAPI;
 import princeps.api.event.events.RenderEvent;
+import princeps.api.pathing.calc.IPath;
 import princeps.api.pathing.goals.*;
 import princeps.api.process.IElytraProcess;
 import princeps.api.utils.BetterBlockPos;
@@ -45,6 +46,8 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * @author Brady
@@ -124,7 +127,7 @@ public final class PathRenderer implements IRenderer {
         // Render the current path, if there is one — as a smooth arc-rounded curve (cached, not rebuilt per frame).
         if (current != null && current.getPath() != null) {
             int renderBegin = Math.max(current.getPosition() - 3, 0);
-            drawSmoothCurrentPath(event.getModelViewStack(), current.getPath().positions(), renderBegin, settings.colorCurrentPath.value, 0.5D);
+            drawSmoothCurrentPath(event.getModelViewStack(), current.getPath(), renderBegin, settings.colorCurrentPath.value, 0.5D);
         }
 
         if (next != null && next.getPath() != null) {
@@ -179,25 +182,25 @@ public final class PathRenderer implements IRenderer {
     }
 
     /** Cached smoothed line of the current path (rebuilt only when the PATH changes, never per frame). */
-    private static long smoothSig = Long.MIN_VALUE;
-    private static java.util.List<princeps.flownav.math.Vec3> smoothLine = java.util.Collections.emptyList();
+    private static final Map<IPath, java.util.List<princeps.flownav.math.Vec3>> SMOOTH_LINES = new WeakHashMap<>();
 
     /**
      * Draws the current path as a smooth arc-rounded curve (FlowNav's FlowLine). CRITICAL for FPS: the smooth
-     * line is CACHED per PATH — the signature deliberately excludes the executor's progress index, which
+     * line is CACHED per immutable PATH object — the cache key excludes the executor's progress index, which
      * advances every node (~5x/s at sprint) and would trigger a full O(path) re-smooth + allocation burst on
      * the render thread each time (review-confirmed). The whole path is smoothed once; each frame only trims
      * the tail behind the camera with a cheap scan over the small decimated point list. Smoothing every frame
      * tanked the frame rate; only the executed path is smoothed, calc-debug paths stay the raw polyline.
      */
-    private static void drawSmoothCurrentPath(PoseStack stack, List<BetterBlockPos> positions, int startIndex, Color color, double offset) {
+    private static void drawSmoothCurrentPath(PoseStack stack, IPath path, int startIndex, Color color, double offset) {
+        final List<BetterBlockPos> positions = path.positions();
         final int n = positions.size();
         if (n - Math.max(0, startIndex) < 3) {
             drawPath(stack, positions, startIndex, color, settings.fadePath.value, 10, 20, offset);
             return;
         }
-        final long sig = ((long) n * 131 + positions.get(0).hashCode()) * 131 + positions.get(n - 1).hashCode();
-        if (sig != smoothSig) {
+        java.util.List<princeps.flownav.math.Vec3> line = SMOOTH_LINES.get(path);
+        if (line == null) {
             java.util.List<princeps.flownav.math.Vec3> pts = new java.util.ArrayList<>(n);
             for (int i = 0; i < n; i++) {
                 BetterBlockPos p = positions.get(i);
@@ -206,13 +209,12 @@ public final class PathRenderer implements IRenderer {
             try {
                 // smoothPoints avoids the Trajectory wrapper (its copy + arc-length array would be thrown
                 // away). Decimation collapses collinear resampled points so straights emit ONE segment.
-                smoothLine = decimateCollinear(princeps.flownav.traj.FlowLine.smoothPoints(pts, 1.0));
+                line = decimateCollinear(princeps.flownav.traj.FlowLine.smoothPoints(pts, 1.0));
             } catch (RuntimeException e) {
-                smoothLine = pts; // degenerate geometry: fall back to the raw polyline
+                line = pts; // degenerate geometry: fall back to the raw polyline
             }
-            smoothSig = sig;
+            SMOOTH_LINES.put(path, line);
         }
-        final java.util.List<princeps.flownav.math.Vec3> line = smoothLine;
         // Trim the already-walked tail: start at the decimated point nearest the camera, minus a little
         // slack (mirrors the old position-3 behaviour). The decimated list is small, so this per-frame
         // scan is a few hundred float ops — nothing — and it never rebuilds the curve.
@@ -334,8 +336,8 @@ public final class PathRenderer implements IRenderer {
         // corner brackets
         BufferBuilder brackets = IRenderer.startLines(settings.colorBlocksToBreak.value);
         for (BlockPos pos : positions) {
-            AABB shape = bsi.get0(pos).getShape(player.level(), pos).isEmpty()
-                    ? Shapes.block().bounds() : bsi.get0(pos).getShape(player.level(), pos).bounds();
+            final VoxelShape voxelShape = bsi.get0(pos).getShape(player.level(), pos);
+            AABB shape = voxelShape.isEmpty() ? Shapes.block().bounds() : voxelShape.bounds();
             shape = shape.move(pos).inflate(0.002);
             emitCornerBrackets(brackets, stack,
                     shape.minX - rpx, shape.minY - rpy, shape.minZ - rpz,
@@ -376,19 +378,29 @@ public final class PathRenderer implements IRenderer {
 
     /** A small 3D octahedron ("diamond") outline centred at (cx,cy,cz) — reads as a diamond from any angle. */
     private static void emitDiamond(BufferBuilder bb, PoseStack stack, double cx, double cy, double cz, double r, float lw) {
-        final double[] top = {cx, cy + r, cz}, bot = {cx, cy - r, cz};
-        final double[] px = {cx + r, cy, cz}, nx = {cx - r, cy, cz};
-        final double[] pz = {cx, cy, cz + r}, nz = {cx, cy, cz - r};
-        final double[][] ring = {px, pz, nx, nz};
-        for (int i = 0; i < 4; i++) {
-            final double[] a = ring[i], b = ring[(i + 1) % 4];
-            IRenderer.emitLine(bb, stack, a[0], a[1], a[2], b[0], b[1], b[2], 0, 1, 0, lw);      // equator
-            IRenderer.emitLine(bb, stack, a[0], a[1], a[2], top[0], top[1], top[2], 0, 1, 0, lw); // to top
-            IRenderer.emitLine(bb, stack, a[0], a[1], a[2], bot[0], bot[1], bot[2], 0, 1, 0, lw); // to bottom
-        }
+        final double topY = cy + r;
+        final double bottomY = cy - r;
+        final double px = cx + r, nx = cx - r, pz = cz + r, nz = cz - r;
+
+        IRenderer.emitLine(bb, stack, px, cy, cz, cx, cy, pz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, cx, cy, pz, nx, cy, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, nx, cy, cz, cx, cy, nz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, cx, cy, nz, px, cy, cz, 0, 1, 0, lw);
+
+        IRenderer.emitLine(bb, stack, px, cy, cz, cx, topY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, cx, cy, pz, cx, topY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, nx, cy, cz, cx, topY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, cx, cy, nz, cx, topY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, px, cy, cz, cx, bottomY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, cx, cy, pz, cx, bottomY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, nx, cy, cz, cx, bottomY, cz, 0, 1, 0, lw);
+        IRenderer.emitLine(bb, stack, cx, cy, nz, cx, bottomY, cz, 0, 1, 0, lw);
     }
 
     public static void drawManySelectionBoxes(PoseStack stack, Entity player, Collection<BlockPos> positions, Color color) {
+        if (positions.isEmpty()) {
+            return;
+        }
         BufferBuilder bufferBuilder = IRenderer.startLines(color);
 
         //BlockPos blockpos = movingObjectPositionIn.getBlockPos();

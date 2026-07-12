@@ -113,10 +113,9 @@ public interface IRenderer {
     float[] color = new float[]{1.0F, 1.0F, 1.0F, 255.0F};
 
     static void glColor(Color color, float alpha) {
-        float[] colorComponents = color.getColorComponents(null);
-        IRenderer.color[0] = colorComponents[0];
-        IRenderer.color[1] = colorComponents[1];
-        IRenderer.color[2] = colorComponents[2];
+        IRenderer.color[0] = color.getRed() / 255.0F;
+        IRenderer.color[1] = color.getGreen() / 255.0F;
+        IRenderer.color[2] = color.getBlue() / 255.0F;
         IRenderer.color[3] = alpha;
     }
 

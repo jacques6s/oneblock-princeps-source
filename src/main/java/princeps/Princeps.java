@@ -69,6 +69,7 @@ public class Princeps implements IPrinceps {
     private final PathingBehavior pathingBehavior;
     private final LookBehavior lookBehavior;
     private final InventoryBehavior inventoryBehavior;
+    private final SurvivalBehavior survivalBehavior;
     private final InputOverrideHandler inputOverrideHandler;
 
     private final FollowProcess followProcess;
@@ -110,7 +111,7 @@ public class Princeps implements IPrinceps {
             this.inventoryBehavior    = this.registerBehavior(InventoryBehavior::new);
             this.inputOverrideHandler = this.registerBehavior(InputOverrideHandler::new);
             this.registerBehavior(WaypointBehavior::new);
-            this.registerBehavior(SurvivalBehavior::new);
+            this.survivalBehavior     = this.registerBehavior(SurvivalBehavior::new);
         }
 
         this.pathingControlManager = new PathingControlManager(this);
@@ -185,6 +186,10 @@ public class Princeps implements IPrinceps {
 
     public InventoryBehavior getInventoryBehavior() {
         return this.inventoryBehavior;
+    }
+
+    public SurvivalBehavior getSurvivalBehavior() {
+        return this.survivalBehavior;
     }
 
     @Override

@@ -96,11 +96,11 @@ public final class Settings {
     /** Master switch for the auto-survival behavior (totem / eat / repair). Off by default; the OneBlock
      *  0.3 client turns it on for its navigation. */
     public final Setting<Boolean> autoSurvival = new Setting<>(false);
-    /** Keep a Totem of Undying in the offhand (priority) and hotbar slot 9; refresh when one is consumed. */
+    /** Keep a Totem of Undying in the offhand and a distinct backup in hotbar slot 9 when available. */
     public final Setting<Boolean> survivalAutoTotem = new Setting<>(true);
     /** Auto-eat: golden apples heal (10s throttle, emergency override), regular food fills hunger. */
     public final Setting<Boolean> survivalAutoEat = new Setting<>(true);
-    /** Auto-repair worn/held Mending gear that is near breaking by throwing Bottles o' Enchanting. */
+    /** Auto-repair the most damaged low-durability Mending gear in inventory by throwing XP bottles. */
     public final Setting<Boolean> survivalAutoRepair = new Setting<>(true);
     /** Eat a golden apple immediately (bypassing the throttle) once health drops below this many HALF-hearts
      *  (12 = 6 hearts). */
