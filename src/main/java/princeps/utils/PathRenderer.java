@@ -321,8 +321,8 @@ public final class PathRenderer implements IRenderer {
     }
 
     /**
-     * Fancy break-target render: bright corner brackets around each block to mine + a centre diamond
-     * marker, instead of the classic full outlined box. Two line batches (bracket color + marker color).
+     * Fancy break-target render: bright corner brackets around each block to mine, instead of the classic
+     * full outlined box.
      */
     public static void drawBreakTargets(PoseStack stack, Entity player, Collection<BlockPos> positions) {
         if (positions.isEmpty()) {
@@ -344,14 +344,6 @@ public final class PathRenderer implements IRenderer {
                     shape.maxX - rpx, shape.maxY - rpy, shape.maxZ - rpz, lw);
         }
         IRenderer.endLines(brackets, ignoreDepth);
-
-        // centre diamond marker
-        BufferBuilder marker = IRenderer.startLines(settings.colorBreakTargetMarker.value);
-        for (BlockPos pos : positions) {
-            emitDiamond(marker, stack,
-                    pos.getX() + 0.5 - rpx, pos.getY() + 0.5 - rpy, pos.getZ() + 0.5 - rpz, 0.16, lw);
-        }
-        IRenderer.endLines(marker, ignoreDepth);
     }
 
     /** L-shaped brackets at each of the 8 box corners (3 short segments per corner, toward the interior). */
@@ -374,27 +366,6 @@ public final class PathRenderer implements IRenderer {
                 }
             }
         }
-    }
-
-    /** A small 3D octahedron ("diamond") outline centred at (cx,cy,cz) — reads as a diamond from any angle. */
-    private static void emitDiamond(BufferBuilder bb, PoseStack stack, double cx, double cy, double cz, double r, float lw) {
-        final double topY = cy + r;
-        final double bottomY = cy - r;
-        final double px = cx + r, nx = cx - r, pz = cz + r, nz = cz - r;
-
-        IRenderer.emitLine(bb, stack, px, cy, cz, cx, cy, pz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, cx, cy, pz, nx, cy, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, nx, cy, cz, cx, cy, nz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, cx, cy, nz, px, cy, cz, 0, 1, 0, lw);
-
-        IRenderer.emitLine(bb, stack, px, cy, cz, cx, topY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, cx, cy, pz, cx, topY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, nx, cy, cz, cx, topY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, cx, cy, nz, cx, topY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, px, cy, cz, cx, bottomY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, cx, cy, pz, cx, bottomY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, nx, cy, cz, cx, bottomY, cz, 0, 1, 0, lw);
-        IRenderer.emitLine(bb, stack, cx, cy, nz, cx, bottomY, cz, 0, 1, 0, lw);
     }
 
     public static void drawManySelectionBoxes(PoseStack stack, Entity player, Collection<BlockPos> positions, Color color) {

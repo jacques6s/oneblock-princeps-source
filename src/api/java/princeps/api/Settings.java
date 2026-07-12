@@ -92,6 +92,13 @@ public final class Settings {
      */
     public final Setting<Boolean> allowInventory = new Setting<>(false);
 
+    /**
+     * Keep the character on the bot-owned movement input even when Princeps isn't pathing, so raw WASD
+     * never moves the player. Used by the OneBlock freecam so the detached camera can be flown while the
+     * character keeps navigating (or stands still) — the keyboard drives only the camera, never the body.
+     */
+    public final Setting<Boolean> suppressPlayerKeyboard = new Setting<>(false);
+
     // ── auto-survival (classic survival helpers that run WHILE navigating, never during elytra) ──
     /** Master switch for the auto-survival behavior (totem / eat / repair). Off by default; the OneBlock
      *  0.3 client turns it on for its navigation. */
@@ -1569,7 +1576,7 @@ public final class Settings {
     /**
      * The color of the current path
      */
-    public final Setting<Color> colorCurrentPath = new Setting<>(Color.BLUE);
+    public final Setting<Color> colorCurrentPath = new Setting<>(new Color(0, 220, 255));
 
     /**
      * The color of the next path

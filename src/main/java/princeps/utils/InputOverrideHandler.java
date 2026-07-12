@@ -93,7 +93,11 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
         blockBreakHelper.tick(isInputForcedDown(Input.CLICK_LEFT));
         blockPlaceHelper.tick(isInputForcedDown(Input.CLICK_RIGHT));
 
-        if (inControl()) {
+        // Keep the character on the bot-owned input (which reads only forced inputs, never the keyboard)
+        // when Princeps is controlling OR when suppressPlayerKeyboard is set. The latter is used by the
+        // freecam: while flying the detached camera the character must never respond to WASD — only to the
+        // bot's own forced inputs (basehunt). With an empty forced map it simply stands still.
+        if (inControl() || Princeps.settings().suppressPlayerKeyboard.value) {
             if (ctx.player().input.getClass() != PlayerMovementInput.class) {
                 ctx.player().input = new PlayerMovementInput(this);
             }
