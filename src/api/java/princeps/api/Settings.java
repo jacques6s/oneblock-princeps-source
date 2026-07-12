@@ -92,6 +92,32 @@ public final class Settings {
      */
     public final Setting<Boolean> allowInventory = new Setting<>(false);
 
+    // ── auto-survival (classic survival helpers that run WHILE navigating, never during elytra) ──
+    /** Master switch for the auto-survival behavior (totem / eat / repair). Off by default; the OneBlock
+     *  0.3 client turns it on for its navigation. */
+    public final Setting<Boolean> autoSurvival = new Setting<>(false);
+    /** Keep a Totem of Undying in the offhand (priority) and hotbar slot 9; refresh when one is consumed. */
+    public final Setting<Boolean> survivalAutoTotem = new Setting<>(true);
+    /** Auto-eat: golden apples heal (10s throttle, emergency override), regular food fills hunger. */
+    public final Setting<Boolean> survivalAutoEat = new Setting<>(true);
+    /** Auto-repair worn/held Mending gear that is near breaking by throwing Bottles o' Enchanting. */
+    public final Setting<Boolean> survivalAutoRepair = new Setting<>(true);
+    /** Eat a golden apple immediately (bypassing the throttle) once health drops below this many HALF-hearts
+     *  (12 = 6 hearts). */
+    public final Setting<Integer> survivalGappleEmergencyHp = new Setting<>(12);
+    /** Minimum ms between golden-apple top-up heals for minor damage (the emergency threshold bypasses it). */
+    public final Setting<Integer> survivalGappleThrottleMs = new Setting<>(10000);
+    /** Eat regular food once the food level drops to or below this (14 = 7 shanks). */
+    public final Setting<Integer> survivalEatFoodLevel = new Setting<>(14);
+    /** Throw XP bottles to repair a Mending item once its remaining durability drops below this fraction. */
+    public final Setting<Double> survivalRepairBelowFraction = new Setting<>(0.12);
+    /** Keep throwing during a repair session until the tool's remaining durability climbs back to this fraction. */
+    public final Setting<Double> survivalRepairStopFraction = new Setting<>(0.5);
+    /** Ticks between XP-bottle throws in a repair session (2 ≈ 100ms — a slow stream so XP isn't wasted). */
+    public final Setting<Integer> survivalRepairThrowIntervalTicks = new Setting<>(2);
+    /** Only repair (which briefly moves the totem out of the offhand) when health is at least this fraction of max. */
+    public final Setting<Double> survivalRepairMinHealthFraction = new Setting<>(0.7);
+
     /**
      * Wait this many ticks between InventoryBehavior moving inventory items
      */

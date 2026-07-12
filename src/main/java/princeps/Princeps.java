@@ -110,6 +110,7 @@ public class Princeps implements IPrinceps {
             this.inventoryBehavior    = this.registerBehavior(InventoryBehavior::new);
             this.inputOverrideHandler = this.registerBehavior(InputOverrideHandler::new);
             this.registerBehavior(WaypointBehavior::new);
+            this.registerBehavior(SurvivalBehavior::new);
         }
 
         this.pathingControlManager = new PathingControlManager(this);
