@@ -1551,9 +1551,21 @@ public final class Settings {
     public final Setting<Color> colorNextPath = new Setting<>(Color.MAGENTA);
 
     /**
-     * The color of the blocks to break
+     * The color of the blocks to break (the corner-bracket color in the fancy target style).
      */
-    public final Setting<Color> colorBlocksToBreak = new Setting<>(Color.RED);
+    public final Setting<Color> colorBlocksToBreak = new Setting<>(new Color(0, 220, 255));
+
+    /**
+     * Fancy break-target render: instead of a plain outlined box, draw bright corner brackets around
+     * each block to mine plus a marker in its centre (see the screenshot spec). Turn off to fall back
+     * to the classic outlined selection box.
+     */
+    public final Setting<Boolean> renderBreakTargetsFancy = new Setting<>(true);
+
+    /**
+     * The centre-marker (diamond) color for the fancy break-target style.
+     */
+    public final Setting<Color> colorBreakTargetMarker = new Setting<>(new Color(224, 120, 32));
 
     /**
      * The color of the blocks to place

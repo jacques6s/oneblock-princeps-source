@@ -110,7 +110,11 @@ public final class PathRenderer implements IRenderer {
         PathExecutor current = behavior.getCurrent(); // this should prevent most race conditions?
         PathExecutor next = behavior.getNext(); // like, now it's not possible for current!=null to be true, then suddenly false because of another thread
         if (current != null && settings.renderSelectionBoxes.value) {
-            drawManySelectionBoxes(event.getModelViewStack(), ctx.player(), current.toBreak(), settings.colorBlocksToBreak.value);
+            if (settings.renderBreakTargetsFancy.value) {
+                drawBreakTargets(event.getModelViewStack(), ctx.player(), current.toBreak());
+            } else {
+                drawManySelectionBoxes(event.getModelViewStack(), ctx.player(), current.toBreak(), settings.colorBlocksToBreak.value);
+            }
             drawManySelectionBoxes(event.getModelViewStack(), ctx.player(), current.toPlace(), settings.colorBlocksToPlace.value);
             drawManySelectionBoxes(event.getModelViewStack(), ctx.player(), current.toWalkInto(), settings.colorBlocksToWalkInto.value);
         }
@@ -311,6 +315,76 @@ public final class PathRenderer implements IRenderer {
                     x1 + offset - vpX, y1 + offset - vpY, z1 + offset - vpZ,
                     settings.pathRenderLineWidthPixels.value
             );
+        }
+    }
+
+    /**
+     * Fancy break-target render: bright corner brackets around each block to mine + a centre diamond
+     * marker, instead of the classic full outlined box. Two line batches (bracket color + marker color).
+     */
+    public static void drawBreakTargets(PoseStack stack, Entity player, Collection<BlockPos> positions) {
+        if (positions.isEmpty()) {
+            return;
+        }
+        final double rpx = posX(), rpy = posY(), rpz = posZ();
+        final float lw = settings.pathRenderLineWidthPixels.value;
+        final boolean ignoreDepth = settings.renderSelectionBoxesIgnoreDepth.value;
+        final BlockStateInterface bsi = new BlockStateInterface(PrincepsAPI.getProvider().getPrimaryPrinceps().getPlayerContext());
+
+        // corner brackets
+        BufferBuilder brackets = IRenderer.startLines(settings.colorBlocksToBreak.value);
+        for (BlockPos pos : positions) {
+            AABB shape = bsi.get0(pos).getShape(player.level(), pos).isEmpty()
+                    ? Shapes.block().bounds() : bsi.get0(pos).getShape(player.level(), pos).bounds();
+            shape = shape.move(pos).inflate(0.002);
+            emitCornerBrackets(brackets, stack,
+                    shape.minX - rpx, shape.minY - rpy, shape.minZ - rpz,
+                    shape.maxX - rpx, shape.maxY - rpy, shape.maxZ - rpz, lw);
+        }
+        IRenderer.endLines(brackets, ignoreDepth);
+
+        // centre diamond marker
+        BufferBuilder marker = IRenderer.startLines(settings.colorBreakTargetMarker.value);
+        for (BlockPos pos : positions) {
+            emitDiamond(marker, stack,
+                    pos.getX() + 0.5 - rpx, pos.getY() + 0.5 - rpy, pos.getZ() + 0.5 - rpz, 0.16, lw);
+        }
+        IRenderer.endLines(marker, ignoreDepth);
+    }
+
+    /** L-shaped brackets at each of the 8 box corners (3 short segments per corner, toward the interior). */
+    private static void emitCornerBrackets(BufferBuilder bb, PoseStack stack,
+                                           double minX, double minY, double minZ,
+                                           double maxX, double maxY, double maxZ, float lw) {
+        final double len = Math.min(0.28, (maxX - minX) * 0.4);
+        for (int cx = 0; cx <= 1; cx++) {
+            for (int cy = 0; cy <= 1; cy++) {
+                for (int cz = 0; cz <= 1; cz++) {
+                    final double x = cx == 0 ? minX : maxX;
+                    final double y = cy == 0 ? minY : maxY;
+                    final double z = cz == 0 ? minZ : maxZ;
+                    final double dx = cx == 0 ? len : -len;
+                    final double dy = cy == 0 ? len : -len;
+                    final double dz = cz == 0 ? len : -len;
+                    IRenderer.emitLine(bb, stack, x, y, z, x + dx, y, z, 1, 0, 0, lw);
+                    IRenderer.emitLine(bb, stack, x, y, z, x, y + dy, z, 0, 1, 0, lw);
+                    IRenderer.emitLine(bb, stack, x, y, z, x, y, z + dz, 0, 0, 1, lw);
+                }
+            }
+        }
+    }
+
+    /** A small 3D octahedron ("diamond") outline centred at (cx,cy,cz) — reads as a diamond from any angle. */
+    private static void emitDiamond(BufferBuilder bb, PoseStack stack, double cx, double cy, double cz, double r, float lw) {
+        final double[] top = {cx, cy + r, cz}, bot = {cx, cy - r, cz};
+        final double[] px = {cx + r, cy, cz}, nx = {cx - r, cy, cz};
+        final double[] pz = {cx, cy, cz + r}, nz = {cx, cy, cz - r};
+        final double[][] ring = {px, pz, nx, nz};
+        for (int i = 0; i < 4; i++) {
+            final double[] a = ring[i], b = ring[(i + 1) % 4];
+            IRenderer.emitLine(bb, stack, a[0], a[1], a[2], b[0], b[1], b[2], 0, 1, 0, lw);      // equator
+            IRenderer.emitLine(bb, stack, a[0], a[1], a[2], top[0], top[1], top[2], 0, 1, 0, lw); // to top
+            IRenderer.emitLine(bb, stack, a[0], a[1], a[2], bot[0], bot[1], bot[2], 0, 1, 0, lw); // to bottom
         }
     }
 
