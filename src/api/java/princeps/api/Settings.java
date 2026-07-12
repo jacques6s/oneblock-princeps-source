@@ -904,6 +904,11 @@ public final class Settings {
      *  2 = fast (20). The standard peak matches the 9-deg cruising cap the whole look system is tuned around. */
     public final Setting<Integer> humanizedLookAimCurveMode = new Setting<>(1);
 
+    /** Fine multiplier on the mode's peak mining-aim speed (see {@link #humanizedLookAimCurveMode}). Lets a profile
+     *  dial the block-to-block aim speed continuously (e.g. 1.3 = 30% snappier) without jumping to the next discrete
+     *  mode. Applied in {@code aimCurvePeak()}; 1.0 = the mode's stock peak. */
+    public final Setting<Double> humanizedLookAimCurvePeakScale = new Setting<>(1.0);
+
     /** Human sighting reaction for the dig: when the crosshair NEWLY lands on a target block, wait 1..3 ticks before
      *  the first press instead of clicking the same tick (an instant same-tick press is a machine tell). The wait is
      *  tracked while the post-break cooldown runs, so it overlaps the mining rhythm instead of stacking onto it —

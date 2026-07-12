@@ -816,13 +816,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     /** The bell-curve mode's peak head-turn speed (deg/tick): 0 = superSmooth (5), 1 = standard (9), 2 = fast (20). */
     static double aimCurvePeak() {
         final int mode = Princeps.settings().humanizedLookAimCurveMode.value;
-        if (mode <= 0) {
-            return 5.0;
-        }
-        if (mode >= 2) {
-            return 20.0;
-        }
-        return 9.0;
+        final double base = mode <= 0 ? 5.0 : mode >= 2 ? 20.0 : 9.0;
+        // Fine per-profile multiplier so the mining-aim speed can be dialed between the discrete modes.
+        return base * Math.max(0.1, Princeps.settings().humanizedLookAimCurvePeakScale.value);
     }
 
     /**
