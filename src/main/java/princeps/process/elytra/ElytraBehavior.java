@@ -76,6 +76,7 @@ public final class ElytraBehavior implements Helper {
     private List<Vec3> simulationLine;
     private BlockPos aimPos;
     private List<BetterBlockPos> visiblePath;
+    private static final double VOID_RENDER_LOOKAHEAD = 100.0D;
 
     // :sunglasses:
     public final NetherPathfinderContext context;
@@ -93,16 +94,6 @@ public final class ElytraBehavior implements Helper {
     private int remainingSetBackTicks;
 
     public boolean landingMode;
-
-    /**
-     * Void-flight render state, pushed each tick by {@link princeps.process.ElytraProcess}. While cruising
-     * below the world floor the bot steers manually (it does NOT follow the nether-pathfinder path, which is
-     * planned in the normal Y band ABOVE the bedrock and would draw the route hanging over the floor). When
-     * active the render draws a clean straight line at the real cruise altitude toward the destination instead.
-     */
-    public boolean voidRenderActive;
-    public double voidRenderY;
-    public BlockPos voidRenderDest;
 
     /**
      * The most recent minimum number of firework boost ticks, equivalent to {@code 10 * (1 + Flight)}
@@ -424,34 +415,50 @@ public final class ElytraBehavior implements Helper {
         }
     }
 
+    /**
+     * Feeds below-floor cruise data into the same fields used by normal Overworld, Nether and End flight.
+     * Rendering itself remains entirely dimension-agnostic in {@link #onRenderPass(RenderEvent)}.
+     */
+    public void updateVoidCruiseRender(double cruiseY, BlockPos destination, float pitch) {
+        final int y = Mth.floor(cruiseY);
+        this.visiblePath = VoidFlightRenderGeometry.directCorridor(
+                ctx.playerFeet(), destination, y, VOID_RENDER_LOOKAHEAD);
+
+        final Vec3 target = new Vec3(destination.getX() + 0.5D, cruiseY, destination.getZ() + 0.5D);
+        this.simulationLine = Princeps.settings().elytraRenderSimulation.value
+                ? this.simulateVoidPreview(target, pitch)
+                : null;
+    }
+
+    /** Uses the standard route/simulation fields for the short alignment and climb through a floor opening. */
+    public void updateVoidManeuverRender(Vec3 target, float pitch) {
+        final Vec3 here = ctx.player().position();
+        this.visiblePath = List.of(
+                new BetterBlockPos(Mth.floor(here.x), Mth.floor(here.y), Mth.floor(here.z)),
+                new BetterBlockPos(Mth.floor(target.x), Mth.floor(target.y), Mth.floor(target.z)));
+        this.simulationLine = Princeps.settings().elytraRenderSimulation.value
+                ? this.simulateVoidPreview(target, pitch)
+                : null;
+    }
+
+    private List<Vec3> simulateVoidPreview(Vec3 target, float pitch) {
+        final SolverContext solverContext = this.new SolverContext(false);
+        final int ticks = solverContext.boost.isBoosted()
+                ? Math.max(5, solverContext.boost.getGuaranteedBoostTicks())
+                : Princeps.settings().elytraSimulationTicks.value;
+        return this.simulate(
+                solverContext,
+                target.subtract(solverContext.start),
+                pitch,
+                ticks,
+                solverContext.boost.isBoosted() ? ticks : 0,
+                0,
+                true);
+    }
+
     public void onRenderPass(RenderEvent event) {
 
         final Settings settings = Princeps.settings();
-        if (this.voidRenderActive && this.voidRenderDest != null && ctx.player() != null) {
-            // Void flight below the world floor: the pathfinder path hangs above the bedrock and doesn't match
-            // where the bot actually flies. Render the flight at the REAL cruise altitude, but with the exact
-            // same look as the overworld/nether flight path — the red planned line through PathRenderer.drawPath
-            // (corner brackets, line width, depth handling) plus the cyan trajectory line that converges onto it.
-            final Vec3 here = ctx.player().position();
-            final int cruiseY = (int) Math.round(this.voidRenderY);
-            final List<BetterBlockPos> voidPath = List.of(
-                    new BetterBlockPos(Mth.floor(here.x), cruiseY, Mth.floor(here.z)),
-                    new BetterBlockPos(this.voidRenderDest.getX(), cruiseY, this.voidRenderDest.getZ()));
-            PathRenderer.drawPath(event.getModelViewStack(), voidPath, 0, Color.RED, false, 0, 0, 0.5D);
-            // Cyan trajectory/adjustment line (same colour as the normal elytra simulation line): from the
-            // player's real position, drop onto the cruise corridor and run along it to the destination —
-            // visualising the correction onto the planned line, exactly like the overworld/nether flight render.
-            if (settings.elytraRenderSimulation.value) {
-                final double cy = cruiseY + 0.5D;
-                final Vec3 onCorridor = new Vec3(Mth.floor(here.x) + 0.5D, cy, Mth.floor(here.z) + 0.5D);
-                final Vec3 dest = new Vec3(this.voidRenderDest.getX() + 0.5D, cy, this.voidRenderDest.getZ() + 0.5D);
-                BufferBuilder adjust = IRenderer.startLines(new Color(0x36CCDC));
-                IRenderer.emitLine(adjust, event.getModelViewStack(), here, onCorridor, settings.pathRenderLineWidthPixels.value);
-                IRenderer.emitLine(adjust, event.getModelViewStack(), onCorridor, dest, settings.pathRenderLineWidthPixels.value);
-                IRenderer.endLines(adjust, settings.renderPathIgnoreDepth.value);
-            }
-            return; // self-contained: never leak the wrong-altitude pathfinder render (aim box / raytraces) underneath
-        }
         if (this.visiblePath != null) {
             PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, Color.RED, false, 0, 0, 0.0D);
         }
@@ -1202,6 +1209,12 @@ public final class ElytraBehavior implements Helper {
 
     private List<Vec3> simulate(final SolverContext context, final Vec3 goalDelta, final float pitch, final int ticks,
                                 final int ticksBoosted, final int ticksBoostDelay) {
+        return this.simulate(context, goalDelta, pitch, ticks, ticksBoosted, ticksBoostDelay, false);
+    }
+
+    private List<Vec3> simulate(final SolverContext context, final Vec3 goalDelta, final float pitch, final int ticks,
+                                final int ticksBoosted, final int ticksBoostDelay,
+                                final boolean skipCollisionChecksBelowWorldFloor) {
         final ITickableAimProcessor aimProcessor = context.aimProcessor.fork();
         Vec3 delta = goalDelta;
         Vec3 motion = context.motion;
@@ -1209,6 +1222,7 @@ public final class ElytraBehavior implements Helper {
         List<Vec3> displacement = new ArrayList<>(ticks + 1);
         displacement.add(Vec3.ZERO);
         int remainingTicksBoosted = ticksBoosted;
+        final int worldFloor = skipCollisionChecksBelowWorldFloor ? ctx.world().getMinY() : Integer.MIN_VALUE;
 
         for (int i = 0; i < ticks; i++) {
             final double cx = hitbox.minX + (hitbox.maxX - hitbox.minX) * 0.5D;
@@ -1227,17 +1241,24 @@ public final class ElytraBehavior implements Helper {
             // Collision box while the player is in motion, with additional padding for safety
             final AABB inMotion = hitbox.inflate(motion.x, motion.y, motion.z).inflate(0.01);
 
-            int xmin = fastFloor(inMotion.minX);
-            int xmax = fastCeil(inMotion.maxX);
-            int ymin = fastFloor(inMotion.minY);
-            int ymax = fastCeil(inMotion.maxY);
-            int zmin = fastFloor(inMotion.minZ);
-            int zmax = fastCeil(inMotion.maxZ);
-            for (int x = xmin; x < xmax; x++) {
-                for (int y = ymin; y < ymax; y++) {
-                    for (int z = zmin; z < zmax; z++) {
-                        if (!this.passable(x, y, z, context.ignoreLava)) {
-                            return null;
+            if (!skipCollisionChecksBelowWorldFloor || inMotion.maxY >= worldFloor) {
+                int xmin = fastFloor(inMotion.minX);
+                int xmax = fastCeil(inMotion.maxX);
+                int ymin = fastFloor(inMotion.minY);
+                int ymax = fastCeil(inMotion.maxY);
+                int zmin = fastFloor(inMotion.minZ);
+                int zmax = fastCeil(inMotion.maxZ);
+                if (skipCollisionChecksBelowWorldFloor) {
+                    // The octree has no cells below minY. The region is guaranteed empty, so begin checking only
+                    // where the preview reaches real world blocks again (for example during VOID_EXIT).
+                    ymin = Math.max(ymin, worldFloor);
+                }
+                for (int x = xmin; x < xmax; x++) {
+                    for (int y = ymin; y < ymax; y++) {
+                        for (int z = zmin; z < zmax; z++) {
+                            if (!this.passable(x, y, z, context.ignoreLava)) {
+                                return null;
+                            }
                         }
                     }
                 }

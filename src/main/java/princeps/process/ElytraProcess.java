@@ -170,9 +170,6 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         }
 
         this.behavior.onTick();
-        // Default the void-render signal off each tick; the VOID_CRUISE branch below re-arms it while active,
-        // so leaving void flight automatically restores the normal path render.
-        this.behavior.voidRenderActive = false;
 
         if (calcFailed) {
             onLostControl();
@@ -270,11 +267,6 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             // Clamp the cruise depth well inside the damage-free band (void damage starts at minY - 64).
             final double depth = Math.max(6.0, Math.min(52.0, Princeps.settings().elytraVoidFlightDepth.value));
             final double cruiseY = minY - depth;
-            // Tell the render to draw the route at the REAL cruise altitude (below the floor) straight to the
-            // destination — not the pathfinder path that hangs above the bedrock.
-            behavior.voidRenderActive = true;
-            behavior.voidRenderY = cruiseY;
-            behavior.voidRenderDest = destination;
             final Vec3 p = ctx.player().position();
             final double dx = destination.getX() + 0.5 - p.x;
             final double dz = destination.getZ() + 0.5 - p.z;
@@ -284,6 +276,10 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 if (exit != null) {
                     this.voidExitSpot = exit;
                     this.state = State.VOID_EXIT;
+                    // Replace the projected cruise path immediately; otherwise the state transition can flash
+                    // the stale above-floor path for one render frame before VOID_EXIT runs on the next tick.
+                    behavior.updateVoidManeuverRender(
+                            new Vec3(exit.x + 0.5D, p.y, exit.z + 0.5D), 0.0F);
                     logDirect("Void cruise: exiting through the floor opening at " + exit.x + "," + exit.z);
                     return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
@@ -296,6 +292,9 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             // Yaw at the destination; pitch holds the cruise altitude (positive pitch = nose down).
             final float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
             final float pitch = (float) Math.max(-20.0, Math.min(25.0, (p.y - cruiseY) * 3.0));
+            // Populate the normal visiblePath/simulationLine fields at the real cruise altitude. Rendering then
+            // follows the exact same dimension-independent pipeline as Overworld, Nether and End flight.
+            behavior.updateVoidCruiseRender(cruiseY, destination, pitch);
             princeps.getLookBehavior().updateTarget(new Rotation(yaw, pitch), false);
             if (this.voidFireworkCooldown > 0) {
                 this.voidFireworkCooldown--;
@@ -329,6 +328,8 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             if (horiz > 1.2) {
                 // line up horizontally under the opening first
                 final float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+                behavior.updateVoidManeuverRender(
+                        new Vec3(this.voidExitSpot.x + 0.5D, p.y, this.voidExitSpot.z + 0.5D), 0.0F);
                 princeps.getLookBehavior().updateTarget(new Rotation(yaw, 0.0f), false);
                 if (this.voidFireworkCooldown <= 0) {
                     final Vec3 dm = ctx.player().getDeltaMovement();
@@ -338,6 +339,8 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                 }
             } else {
                 // straight up through the opening (exact aim — same maneuver as the sky launch climb)
+                behavior.updateVoidManeuverRender(
+                        new Vec3(p.x, this.voidExitSpot.y + 1.0D, p.z), -90.0F);
                 princeps.getLookBehavior().updateTarget(new Rotation(ctx.playerRotations().getYaw(), -90.0F), true);
                 if (this.voidFireworkCooldown <= 0 && ctx.player().getDeltaMovement().y < 1.2 && fireRocket()) {
                     this.voidFireworkCooldown = 10;
