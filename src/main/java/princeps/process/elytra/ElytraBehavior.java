@@ -429,15 +429,30 @@ public final class ElytraBehavior implements Helper {
         final Settings settings = Princeps.settings();
         if (this.voidRenderActive && this.voidRenderDest != null && ctx.player() != null) {
             // Void flight below the world floor: the pathfinder path hangs above the bedrock and doesn't match
-            // where the bot actually flies. Draw a clean straight line at the real cruise altitude to the
-            // destination instead (same look as the overworld/nether flight path, on the correct height).
+            // where the bot actually flies. Render the flight at the REAL cruise altitude, but with the exact
+            // same look as the overworld/nether flight path — the red planned line through PathRenderer.drawPath
+            // (corner brackets, line width, depth handling) plus the cyan trajectory line that converges onto it.
             final Vec3 here = ctx.player().position();
-            final Vec3 a = new Vec3(here.x, this.voidRenderY, here.z);
-            final Vec3 b = new Vec3(this.voidRenderDest.getX() + 0.5, this.voidRenderY, this.voidRenderDest.getZ() + 0.5);
-            BufferBuilder voidBuf = IRenderer.startLines(Color.RED);
-            IRenderer.emitLine(voidBuf, event.getModelViewStack(), a, b, settings.pathRenderLineWidthPixels.value);
-            IRenderer.endLines(voidBuf, settings.renderPathIgnoreDepth.value);
-        } else if (this.visiblePath != null) {
+            final int cruiseY = (int) Math.round(this.voidRenderY);
+            final List<BetterBlockPos> voidPath = List.of(
+                    new BetterBlockPos(Mth.floor(here.x), cruiseY, Mth.floor(here.z)),
+                    new BetterBlockPos(this.voidRenderDest.getX(), cruiseY, this.voidRenderDest.getZ()));
+            PathRenderer.drawPath(event.getModelViewStack(), voidPath, 0, Color.RED, false, 0, 0, 0.5D);
+            // Cyan trajectory/adjustment line (same colour as the normal elytra simulation line): from the
+            // player's real position, drop onto the cruise corridor and run along it to the destination —
+            // visualising the correction onto the planned line, exactly like the overworld/nether flight render.
+            if (settings.elytraRenderSimulation.value) {
+                final double cy = cruiseY + 0.5D;
+                final Vec3 onCorridor = new Vec3(Mth.floor(here.x) + 0.5D, cy, Mth.floor(here.z) + 0.5D);
+                final Vec3 dest = new Vec3(this.voidRenderDest.getX() + 0.5D, cy, this.voidRenderDest.getZ() + 0.5D);
+                BufferBuilder adjust = IRenderer.startLines(new Color(0x36CCDC));
+                IRenderer.emitLine(adjust, event.getModelViewStack(), here, onCorridor, settings.pathRenderLineWidthPixels.value);
+                IRenderer.emitLine(adjust, event.getModelViewStack(), onCorridor, dest, settings.pathRenderLineWidthPixels.value);
+                IRenderer.endLines(adjust, settings.renderPathIgnoreDepth.value);
+            }
+            return; // self-contained: never leak the wrong-altitude pathfinder render (aim box / raytraces) underneath
+        }
+        if (this.visiblePath != null) {
             PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, Color.RED, false, 0, 0, 0.0D);
         }
         if (this.aimPos != null) {

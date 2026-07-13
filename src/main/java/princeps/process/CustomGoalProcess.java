@@ -114,8 +114,14 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
         final double dist = Math.hypot(
                 pos.x + 0.5 - ctx.player().position().x,
                 pos.z + 0.5 - ctx.player().position().z);
+        // Below the world floor (in the void under the overworld bedrock) walking is impossible, and any goal
+        // below the floor can only be reached by elytra void flight. Force the dispatch there regardless of the
+        // region distance threshold — under the bedrock a second manual "elytra" command should never be needed.
+        final int floorY = ctx.world().getMinY();
+        final boolean playerInVoid = ctx.playerFeet().y < floorY;
+        final boolean voidTravel = playerInVoid || pos.y < floorY;
         final double threshold = elytraAutoThreshold();
-        if (threshold <= 0 || dist < threshold) {
+        if (!voidTravel && (threshold <= 0 || dist < threshold)) {
             return;
         }
         ItemStack chest = ctx.player().getItemBySlot(EquipmentSlot.CHEST);
@@ -143,7 +149,8 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
         final boolean netherInterior = roofed && ctx.playerFeet().y < 120;
         final boolean overworldCave = !roofed && !ctx.world().dimensionType().hasEnderDragonFight()
                 && !ctx.world().canSeeSky(ctx.playerFeet().above());
-        if (!netherInterior && !overworldCave && !elytra.canSkyLaunchHere()) {
+        // When already below the floor there is no launch to perform — just start flying; skip the free-sky check.
+        if (!netherInterior && !overworldCave && !playerInVoid && !elytra.canSkyLaunchHere()) {
             return;
         }
         logDirect(String.format("Auto-elytra: %.0f blocks to goal (threshold %.0f) — flying", dist, threshold));
