@@ -91,6 +91,12 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
         if (isInputForcedDown(Input.CLICK_LEFT)) {
             setInputForceState(Input.CLICK_RIGHT, false);
         }
+        // A blacklisted glitch block (kept re-appearing after breaking): stop forcing the attack so we never
+        // hammer it, AND so the bot's stuck detection (forcing forward but NOT attacking) can fire and route /
+        // RTP away instead of pinning against an unbreakable block forever.
+        if (isInputForcedDown(Input.CLICK_LEFT) && blockBreakHelper.isAimingAtBlacklisted()) {
+            setInputForceState(Input.CLICK_LEFT, false);
+        }
         // Pause block-breaking while auto-survival is consuming (eating / mending-repair): switching the main
         // hand to food or XP while the forced attack keeps hitting a block is the "mine and eat at once" glitch.
         // The two are made mutually exclusive here so it can never happen, regardless of tick ordering.

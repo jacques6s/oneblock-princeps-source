@@ -49,8 +49,54 @@ public final class BlockBreakHelper {
     // confirmed in review). The full reaction only applies when the crosshair lands after a genuine idle/re-aim.
     private int rhythmTimer;
 
+    // ── glitch-block blacklist ──────────────────────────────────────────────────────────────────────────
+    // A block that keeps re-appearing after we break it (the server re-sets it / it isn't really breakable and
+    // just "glitches") is abandoned after a few rapid re-breaks so the bot never hammers it forever. Once
+    // blacklisted it is never mined again; the caller's stuck detection then re-routes / RTPs away.
+    private static final int REGROW_LIMIT = 2;          // MORE than this many rapid re-breaks of the SAME block → blacklist
+    private static final long REGROW_WINDOW_MS = 4000L; // re-breaks farther apart than this are treated as unrelated
+    private final java.util.Set<Long> blacklist = new java.util.HashSet<>();
+    private long lastBrokenPosPacked = Long.MIN_VALUE;
+    private int regrowCount;
+    private long lastBrokenAtMs;
+
     BlockBreakHelper(IPlayerContext ctx) {
         this.ctx = ctx;
+    }
+
+    /** True if this block was abandoned as an un-breakable glitch block (re-set itself too many times). */
+    public boolean isBlacklisted(BlockPos pos) {
+        return pos != null && blacklist.contains(pos.asLong());
+    }
+
+    /** True when the crosshair currently rests on a blacklisted glitch block — the caller should not force a break. */
+    public boolean isAimingAtBlacklisted() {
+        final HitResult trace = ctx.objectMouseOver();
+        return trace != null && trace.getType() == HitResult.Type.BLOCK
+                && blacklist.contains(((BlockHitResult) trace).getBlockPos().asLong());
+    }
+
+    /** Forget all blacklisted blocks (e.g. on a world/dimension change). */
+    public void clearBlacklist() {
+        blacklist.clear();
+        lastBrokenPosPacked = Long.MIN_VALUE;
+        regrowCount = 0;
+    }
+
+    /** Records a completed break of {@code pos} and blacklists it once it has regrown+been re-broken too often. */
+    private void noteBreak(BlockPos pos) {
+        final long packed = pos.asLong();
+        final long now = System.currentTimeMillis();
+        if (packed == this.lastBrokenPosPacked && (now - this.lastBrokenAtMs) < REGROW_WINDOW_MS) {
+            this.regrowCount++;
+        } else {
+            this.regrowCount = 1;
+        }
+        this.lastBrokenPosPacked = packed;
+        this.lastBrokenAtMs = now;
+        if (this.regrowCount > REGROW_LIMIT) {
+            this.blacklist.add(packed);
+        }
     }
 
     public void stopBreakingBlock() {
@@ -97,6 +143,14 @@ public final class BlockBreakHelper {
         }
 
         if (isLeftClick && isBlockTrace) {
+            final BlockPos target = ((BlockHitResult) trace).getBlockPos();
+            if (blacklist.contains(target.asLong())) {
+                // Abandoned glitch block: never mine it again. Stop any in-progress break and report not-hitting
+                // so the caller's stuck detection takes over (re-route / RTP) instead of hammering it forever.
+                stopBreakingBlock();
+                wasHitting = false;
+                return;
+            }
             // still reacting to a freshly sighted block — but never delay an in-progress multi-tick break, and never
             // interrupt a live mining rhythm (held button, block broke moments ago: a human doesn't re-react per block)
             if (!wasHitting && sightDelayTimer > 0 && rhythmTimer == 0) {
@@ -106,13 +160,14 @@ public final class BlockBreakHelper {
             if (ctx.playerController().hasBrokenBlock()) {
                 rhythmTimer = 3; // a break just completed; the follow-up press below continues the rhythm
                 ctx.playerController().syncHeldItem();
-                ctx.playerController().clickBlock(((BlockHitResult) trace).getBlockPos(), ((BlockHitResult) trace).getDirection());
+                ctx.playerController().clickBlock(target, ((BlockHitResult) trace).getDirection());
                 ctx.player().swing(InteractionHand.MAIN_HAND);
             } else {
-                if (ctx.playerController().onPlayerDamageBlock(((BlockHitResult) trace).getBlockPos(), ((BlockHitResult) trace).getDirection())) {
+                if (ctx.playerController().onPlayerDamageBlock(target, ((BlockHitResult) trace).getDirection())) {
                     ctx.player().swing(InteractionHand.MAIN_HAND);
                 }
                 if (ctx.playerController().hasBrokenBlock()) { // block broken this tick
+                    noteBreak(target); // count regrows of the SAME block → blacklist a glitching one
                     rhythmTimer = 3; // keep the held-button rhythm alive across the cooldown boundary
                     // break delay timer only applies for multi-tick block breaks like vanilla
                     final int base = PrincepsAPI.getSettings().blockBreakSpeed.value - BASE_BREAK_DELAY;
