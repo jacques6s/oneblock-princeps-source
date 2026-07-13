@@ -95,6 +95,16 @@ public final class ElytraBehavior implements Helper {
     public boolean landingMode;
 
     /**
+     * Void-flight render state, pushed each tick by {@link princeps.process.ElytraProcess}. While cruising
+     * below the world floor the bot steers manually (it does NOT follow the nether-pathfinder path, which is
+     * planned in the normal Y band ABOVE the bedrock and would draw the route hanging over the floor). When
+     * active the render draws a clean straight line at the real cruise altitude toward the destination instead.
+     */
+    public boolean voidRenderActive;
+    public double voidRenderY;
+    public BlockPos voidRenderDest;
+
+    /**
      * The most recent minimum number of firework boost ticks, equivalent to {@code 10 * (1 + Flight)}
      * <p>
      * Updated every time a firework is automatically used
@@ -417,7 +427,17 @@ public final class ElytraBehavior implements Helper {
     public void onRenderPass(RenderEvent event) {
 
         final Settings settings = Princeps.settings();
-        if (this.visiblePath != null) {
+        if (this.voidRenderActive && this.voidRenderDest != null && ctx.player() != null) {
+            // Void flight below the world floor: the pathfinder path hangs above the bedrock and doesn't match
+            // where the bot actually flies. Draw a clean straight line at the real cruise altitude to the
+            // destination instead (same look as the overworld/nether flight path, on the correct height).
+            final Vec3 here = ctx.player().position();
+            final Vec3 a = new Vec3(here.x, this.voidRenderY, here.z);
+            final Vec3 b = new Vec3(this.voidRenderDest.getX() + 0.5, this.voidRenderY, this.voidRenderDest.getZ() + 0.5);
+            BufferBuilder voidBuf = IRenderer.startLines(Color.RED);
+            IRenderer.emitLine(voidBuf, event.getModelViewStack(), a, b, settings.pathRenderLineWidthPixels.value);
+            IRenderer.endLines(voidBuf, settings.renderPathIgnoreDepth.value);
+        } else if (this.visiblePath != null) {
             PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, Color.RED, false, 0, 0, 0.0D);
         }
         if (this.aimPos != null) {

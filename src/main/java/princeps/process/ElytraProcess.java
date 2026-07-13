@@ -170,6 +170,9 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         }
 
         this.behavior.onTick();
+        // Default the void-render signal off each tick; the VOID_CRUISE branch below re-arms it while active,
+        // so leaving void flight automatically restores the normal path render.
+        this.behavior.voidRenderActive = false;
 
         if (calcFailed) {
             onLostControl();
@@ -267,6 +270,11 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             // Clamp the cruise depth well inside the damage-free band (void damage starts at minY - 64).
             final double depth = Math.max(6.0, Math.min(52.0, Princeps.settings().elytraVoidFlightDepth.value));
             final double cruiseY = minY - depth;
+            // Tell the render to draw the route at the REAL cruise altitude (below the floor) straight to the
+            // destination — not the pathfinder path that hangs above the bedrock.
+            behavior.voidRenderActive = true;
+            behavior.voidRenderY = cruiseY;
+            behavior.voidRenderDest = destination;
             final Vec3 p = ctx.player().position();
             final double dx = destination.getX() + 0.5 - p.x;
             final double dz = destination.getZ() + 0.5 - p.z;
