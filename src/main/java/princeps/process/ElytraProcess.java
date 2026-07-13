@@ -82,6 +82,10 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     private double skyLaunchTargetY;
     private int skyLaunchFireworkCooldown;
     private int skyLaunchGroundTicks;
+    /** In-flight guard for the flight-route computation (see {@link #requestFlightRoute}). */
+    private boolean flightRoutePending;
+    /** Attempts consumed by {@link #requestFlightRoute}; capped so a failing solver aborts instead of gliding forever. */
+    private int flightRouteAttempts;
     /**
      * Set by the auto-elytra dispatcher: this flight was chosen BY the bot, so the takeoff must be fully
      * autonomous — the cliff auto-jump engages regardless of the user's manual {@code elytraAutoJump}
@@ -110,6 +114,8 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         this.skyLaunchSpot = null;
         this.skyLaunchFireworkCooldown = 0;
         this.skyLaunchGroundTicks = 0;
+        this.flightRoutePending = false;
+        this.flightRouteAttempts = 0;
         this.autoTakeoff = false;
         this.voidExitSpot = null;
         this.voidFireworkCooldown = 0;
@@ -388,6 +394,18 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
             behavior.landingMode = this.state == State.LANDING;
             this.goal = null;
             princeps.getInputOverrideHandler().clearAllKeys();
+            if (this.state != State.LANDING && behavior.pathManager.getPath().isEmpty()) {
+                // Airborne with NO flight route: the sky-launch handoff lands here while the solver is
+                // still computing — or if the route was never requested (the cliff takeoff requests it in
+                // LOCATE_JUMP; the sky launch used to skip that entirely). behavior.tick() is a no-op on
+                // an empty path, so nobody would steer: the look stayed on the climb's straight-up aim,
+                // the elytra stalled and the bot fell to its death. Hold a level glide and (re)request
+                // the route from the current position until it arrives.
+                princeps.getLookBehavior().updateTarget(
+                        new Rotation(ctx.playerRotations().getYaw(), 0.0f), false);
+                requestFlightRoute(ctx.playerFeet());
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
             behavior.tick();
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         } else if (this.state == State.LANDING) {
@@ -422,6 +440,10 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                     this.skyLaunchTargetY = computeSkyLaunchTargetY(spot);
                     this.skyLaunchGroundTicks = 0;
                     this.state = State.SKY_LAUNCH_WALK;
+                    // Compute the flight route NOW, from where the climb tops out, so the flight
+                    // controller has a path the moment the ascent hands over to FLYING (the cliff
+                    // takeoff does the same in LOCATE_JUMP — skipping this stalled the handover).
+                    requestFlightRoute(new BetterBlockPos(spot.x, (int) this.skyLaunchTargetY, spot.z));
                     logDirect("Sky launch: rocketing up through the opening at " + spot.x + "," + spot.y + "," + spot.z);
                 }
             }
@@ -517,6 +539,27 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     /** Marks the current journey as bot-chosen: the takeoff runs fully autonomously (see {@link #autoTakeoff}). */
     public void enableAutoTakeoff() {
         this.autoTakeoff = true;
+    }
+
+    /**
+     * Starts the async flight-route computation from {@code from} (once at a time, max 3 attempts).
+     * The cliff takeoff computes its route in LOCATE_JUMP before ever leaving the ground; the sky
+     * launch and the airborne no-route recovery go through here instead. When the solver keeps
+     * failing, the flight is aborted cleanly rather than gliding forever on a level hold.
+     */
+    private void requestFlightRoute(BetterBlockPos from) {
+        if (this.flightRoutePending) {
+            return;
+        }
+        if (this.flightRouteAttempts >= 3) {
+            logDirect("Could not compute a flight route after takeoff, aborting the flight.");
+            onLostControl();
+            return;
+        }
+        this.flightRouteAttempts++;
+        this.flightRoutePending = true;
+        behavior.pathManager.pathToDestination(from).whenComplete((result, ex) ->
+                this.flightRoutePending = false);
     }
 
     /** Selects a firework into the main hand and uses it. Returns false when none is left. */
