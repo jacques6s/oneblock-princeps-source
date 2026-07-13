@@ -23,6 +23,7 @@ import princeps.api.event.events.TickEvent;
 import princeps.api.utils.IInputOverrideHandler;
 import princeps.api.utils.input.Input;
 import princeps.behavior.Behavior;
+import princeps.behavior.SurvivalBehavior;
 import net.minecraft.client.player.KeyboardInput;
 
 import java.util.HashMap;
@@ -90,8 +91,13 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
         if (isInputForcedDown(Input.CLICK_LEFT)) {
             setInputForceState(Input.CLICK_RIGHT, false);
         }
-        blockBreakHelper.tick(isInputForcedDown(Input.CLICK_LEFT));
-        blockPlaceHelper.tick(isInputForcedDown(Input.CLICK_RIGHT));
+        // Pause block-breaking while auto-survival is consuming (eating / mending-repair): switching the main
+        // hand to food or XP while the forced attack keeps hitting a block is the "mine and eat at once" glitch.
+        // The two are made mutually exclusive here so it can never happen, regardless of tick ordering.
+        final SurvivalBehavior survival = princeps.getSurvivalBehavior();
+        final boolean consuming = survival != null && survival.isConsuming();
+        blockBreakHelper.tick(isInputForcedDown(Input.CLICK_LEFT) && !consuming);
+        blockPlaceHelper.tick(isInputForcedDown(Input.CLICK_RIGHT) && !consuming);
 
         // Keep the character on the bot-owned input (which reads only forced inputs, never the keyboard)
         // when Princeps is controlling OR when suppressPlayerKeyboard is set. The latter is used by the

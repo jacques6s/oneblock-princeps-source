@@ -34,6 +34,7 @@ import princeps.Princeps;
 import princeps.api.event.events.TickEvent;
 import princeps.api.event.events.WorldEvent;
 import princeps.api.event.events.type.EventState;
+import princeps.api.utils.input.Input;
 
 import java.util.Set;
 import java.util.function.Predicate;
@@ -176,6 +177,16 @@ public final class SurvivalBehavior extends Behavior {
             return;
         }
 
+        // Never START an eat or repair while the bot is actively breaking a block: switching the main hand to
+        // food/XP mid-break loses the block's progress and fights the forced attack every tick — the reported
+        // "wants to mine and eat" glitch. Defer to a walking gap between blocks. (And once a consume DOES begin,
+        // InputOverrideHandler pauses mining for its whole duration, so the two never overlap.) The totem above
+        // still runs, so survival isn't compromised while a dig is briefly in progress.
+        if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
+                || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT)) {
+            return;
+        }
+
         if (Princeps.settings().survivalAutoEat.value && tryEat(p)) {
             return;
         }
@@ -210,6 +221,14 @@ public final class SurvivalBehavior extends Behavior {
 
     boolean ownsInventory() {
         return this.eatRestoreSlot >= 0 || this.repairing || this.borrowedSourceIndex >= 0;
+    }
+
+    /**
+     * True while an eat or repair session owns the hands. {@link InputOverrideHandler} reads this to pause
+     * block-breaking for the duration, so the pickaxe (forced attack) and the food/XP in hand never fight.
+     */
+    public boolean isConsuming() {
+        return this.eatRestoreSlot >= 0 || this.repairing;
     }
 
     // ─────────────────────────────────────── TOTEM ───────────────────────────────────────
