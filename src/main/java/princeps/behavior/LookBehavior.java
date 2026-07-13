@@ -24,17 +24,25 @@ import princeps.api.behavior.look.IAimProcessor;
 import princeps.api.behavior.look.ITickableAimProcessor;
 import princeps.api.process.IElytraProcess;
 import princeps.api.event.events.*;
+import princeps.api.pathing.calc.IPath;
+import princeps.api.pathing.movement.IMovement;
 import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.Rotation;
 import princeps.api.utils.input.Input;
 import princeps.behavior.look.ForkableRandom;
 import princeps.flownav.FlowCam;
+import princeps.pathing.movement.movements.MovementDiagonal;
+import princeps.pathing.movement.movements.MovementTraverse;
+import princeps.pathing.movement.movements.SmoothTraverse;
+import princeps.pathing.path.PathExecutor;
 import net.minecraft.network.protocol.game.ServerboundMovePlayerPacket;
 import net.minecraft.util.Mth;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
+import java.util.List;
 import java.util.Optional;
+import java.util.Random;
 
 public final class LookBehavior extends Behavior implements ILookBehavior {
 
@@ -77,6 +85,33 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     private static final int ELYTRA_AGILE_HOLD_TICKS = 10;
     /** Remaining ticks of the agile hold (see above). Decays naturally; stale values are harmless. */
     private int elytraAgileHold;
+
+    // ── cruise micro-jitter (see updateMicroJitter) ──────────────────────────────────────────────────────
+    /** Commanded yaw turn (deg/tick) below which a tick counts as walking a straight line (curves are above). */
+    private static final float JITTER_STRAIGHT_MAX_TURN = 2.5f;
+    /** Consecutive straight ticks required before the jitter may fire (rules out curve exits/entries). */
+    private static final int JITTER_MIN_STRAIGHT_TICKS = 6;
+    /** Ticks between excursions: min + rand(0..span-1) → roughly one per second. */
+    private static final int JITTER_COOLDOWN_MIN = 14;
+    private static final int JITTER_COOLDOWN_SPAN = 13;
+    /**
+     * Apply-path-only RNG (like curveRng): the jitter never touches predictions or the forked solver replay
+     * of {@link AimProcessor}'s ForkableRandom, so untracked randomness is safe here.
+     */
+    private final Random jitterRng = new Random();
+    /** Last commanded (pre-jitter) yaw, for the straightness turn-rate estimate. NaN = no previous sample. */
+    private float jitterLastYaw = Float.NaN;
+    private int jitterStraightTicks;
+    private int jitterCooldown = JITTER_COOLDOWN_MIN;
+    /** Remaining ticks of the active excursion (0 = idle). */
+    private int jitterTicksLeft;
+    /** Ticks per envelope side (1..3): ramp out over this many ticks, then back over the same. */
+    private int jitterRampTicks = 1;
+    private float jitterYawAmp;
+    private float jitterPitchAmp;
+    /** The offset applied to the SENT rotation this tick (mouse-count-grid aligned; 0 while idle). */
+    private float jitterYawOffset;
+    private float jitterPitchOffset;
 
     private final AimProcessor processor;
 
@@ -123,6 +158,13 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             // Not steering the view this tick: keep the camera continuous over short movement
             // handoffs (grace), fall back to vanilla only on sustained absence.
             FlowCam.stopSoon(ctx.player().getYRot(), ctx.player().getXRot());
+            // Micro-jitter is a while-steering feature: drop any active excursion and restart the
+            // straightness observation from scratch when steering resumes.
+            this.jitterTicksLeft = 0;
+            this.jitterYawOffset = 0.0f;
+            this.jitterPitchOffset = 0.0f;
+            this.jitterStraightTicks = 0;
+            this.jitterLastYaw = Float.NaN;
             return;
         }
 
@@ -216,18 +258,26 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     ctx.player().setYRot(curYaw + qYawDelta);
                     ctx.player().setXRot(curPitch + qPitchDelta);
                 } else {
-                    ctx.player().setYRot(actual.getYaw());
-                    ctx.player().setXRot(actual.getPitch());
+                    // Cruise micro-jitter: nudge only the SENT rotation (player fields feed sendPosition's
+                    // movement packet right after PRE). appliedRotation and FlowCam below deliberately keep the
+                    // CLEAN commanded rotation, so physics, steering, predictions and the visible camera never
+                    // see the jitter — the server alone does.
+                    updateMicroJitter(actual);
+                    ctx.player().setYRot(actual.getYaw() + this.jitterYawOffset);
+                    ctx.player().setXRot(Mth.clamp(actual.getPitch() + this.jitterPitchOffset, -90.0f, 90.0f));
                     // not flying: drop any carried elytra residual so the next flight starts fresh
                     this.elytraYawResidual = 0.0f;
                     this.elytraPitchResidual = 0.0f;
                 }
-                this.appliedRotation = new Rotation(ctx.player().getYRot(), ctx.player().getXRot());
+                this.appliedRotation = ctx.player().isFallFlying()
+                        ? new Rotation(ctx.player().getYRot(), ctx.player().getXRot())
+                        : new Rotation(actual.getYaw(), actual.getPitch());
                 // FlowNav: record this tick's applied view so the camera interpolates it across frames.
                 // Only in CLIENT mode, where the applied rotation persists visually — a SERVER-mode
                 // rotation is restored in POST, and interpolating toward it would drag the free camera.
+                // Uses appliedRotation (jitter-free on the ground) so the rendered camera stays untouched.
                 if (this.target.mode == Target.Mode.CLIENT) {
-                    FlowCam.push(ctx.player(), ctx.player().getYRot(), ctx.player().getXRot());
+                    FlowCam.push(ctx.player(), this.appliedRotation.getYaw(), this.appliedRotation.getPitch());
                 } else {
                     FlowCam.stop();
                 }
@@ -283,6 +333,113 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             default:
                 break;
         }
+    }
+
+    /**
+     * Cruise micro-jitter (humanization): a real hand never holds a heading perfectly still while walking, so
+     * roughly once a second on a calm STRAIGHT stretch the SENT view makes a tiny excursion — yaw and pitch each
+     * pick an independent amplitude in ±[microJitterMin..Max] degrees, ramp out over 1–3 ticks and back over the
+     * same, ending at exactly 0 (net-zero by construction: the offset is an envelope around the commanded
+     * rotation, never accumulated state, so it cannot drift the heading or steer the feet). Diagonals count as
+     * straight; curves, jump launches, break/place aims, water, elytra and precise targets are all excluded via
+     * {@link #jitterEligible()}, and any gate failing mid-excursion zeroes it immediately. Offsets snap to the
+     * integer mouse-count grid ({@link AbstractAimProcessor#minAngleChange()}) — a physical mouse can only emit
+     * whole counts, so the packet stream stays mouse-achievable instead of showing impossible fractional turns.
+     */
+    private void updateMicroJitter(Rotation commanded) {
+        // Straightness estimate from the commanded (pre-jitter) turn rate — the far-carrot direction change.
+        final float yaw = commanded.getYaw();
+        final float turn = Float.isNaN(this.jitterLastYaw)
+                ? Float.MAX_VALUE
+                : Math.abs(Mth.degreesDifference(this.jitterLastYaw, yaw));
+        this.jitterLastYaw = yaw;
+        if (turn < JITTER_STRAIGHT_MAX_TURN) {
+            this.jitterStraightTicks++;
+        } else {
+            this.jitterStraightTicks = 0;
+        }
+
+        if (!jitterEligible()) {
+            this.jitterTicksLeft = 0;
+            this.jitterYawOffset = 0.0f;
+            this.jitterPitchOffset = 0.0f;
+            return;
+        }
+
+        if (this.jitterTicksLeft <= 0) {
+            this.jitterYawOffset = 0.0f;
+            this.jitterPitchOffset = 0.0f;
+            if (--this.jitterCooldown > 0) {
+                return;
+            }
+            // Schedule the next excursion: independent signed amplitudes per axis, 1–3 ticks per envelope side.
+            final double min = Math.max(0.0, Princeps.settings().microJitterMinDegrees.value);
+            final double max = Math.max(min, Princeps.settings().microJitterMaxDegrees.value);
+            this.jitterRampTicks = 1 + this.jitterRng.nextInt(3);
+            this.jitterTicksLeft = this.jitterRampTicks * 2;
+            this.jitterYawAmp = (float) ((min + this.jitterRng.nextDouble() * (max - min))
+                    * (this.jitterRng.nextBoolean() ? 1.0 : -1.0));
+            this.jitterPitchAmp = (float) ((min + this.jitterRng.nextDouble() * (max - min))
+                    * (this.jitterRng.nextBoolean() ? 1.0 : -1.0));
+            this.jitterCooldown = JITTER_COOLDOWN_MIN + this.jitterRng.nextInt(JITTER_COOLDOWN_SPAN);
+        }
+
+        // Advance the envelope: t rises 1..2r; out-leg reaches the full amplitude at t == r, the back-leg
+        // returns to exactly 0 at t == 2r (the last tick of every excursion sends the clean rotation again).
+        this.jitterTicksLeft--;
+        final int t = this.jitterRampTicks * 2 - this.jitterTicksLeft;
+        final float env = t <= this.jitterRampTicks
+                ? (float) t / this.jitterRampTicks
+                : (float) (this.jitterRampTicks * 2 - t) / this.jitterRampTicks;
+        final float grid = this.processor.minAngleChange();
+        this.jitterYawOffset = Math.round(this.jitterYawAmp * env / grid) * grid;
+        this.jitterPitchOffset = Math.round(this.jitterPitchAmp * env / grid) * grid;
+    }
+
+    /** All conditions under which the micro-jitter may run: calm straight flat-walking cruise, nothing else. */
+    private boolean jitterEligible() {
+        if (!Princeps.settings().microJitter.value || !Princeps.settings().humanizedLook.value) {
+            return false;
+        }
+        // Only plain CLIENT-mode cruise targets; precise/break aims keep their exact facing.
+        if (this.target == null || this.target.mode != Target.Mode.CLIENT
+                || this.target.precise || this.target.breakIntent) {
+            return false;
+        }
+        if (this.jitterStraightTicks < JITTER_MIN_STRAIGHT_TICKS) {
+            return false;
+        }
+        // Grounded walking only — never airborne, swimming or gliding (elytra has its own smoothing, and a
+        // rotation the physics don't see is exactly the desync flight anticheats look for).
+        if (!ctx.player().onGround() || ctx.player().isFallFlying() || ctx.player().isInWater()) {
+            return false;
+        }
+        final IElytraProcess elytra = princeps.getElytraProcess();
+        if (elytra != null && elytra.isActive()) {
+            return false;
+        }
+        // No jump/break/place commanded this tick (also catches bridging and pillar launches).
+        if (princeps.getInputOverrideHandler().isInputForcedDown(Input.JUMP)
+                || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
+                || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT)) {
+            return false;
+        }
+        // The current path movement must be a flat walk (straight or diagonal) — every maneuver type
+        // (ascend, descend, fall, parkour, pillar, ...) is excluded, including the ticks leading into it.
+        final PathExecutor exec = princeps.getPathingBehavior().getCurrent();
+        if (exec == null || exec.getPath() == null) {
+            return false;
+        }
+        final IPath path = exec.getPath();
+        final int pos = exec.getPosition();
+        final List<IMovement> movements = path.movements();
+        if (pos < 0 || pos >= movements.size()) {
+            return false;
+        }
+        final IMovement movement = movements.get(pos);
+        return movement instanceof MovementTraverse
+                || movement instanceof MovementDiagonal
+                || movement instanceof SmoothTraverse;
     }
 
     @Override

@@ -883,6 +883,22 @@ public final class Settings {
     public final Setting<Double> humanizedLookTremorDegrees = new Setting<>(0.0);
 
     /**
+     * Cruise micro-jitter (humanization): roughly once a second while calmly walking a STRAIGHT stretch
+     * (diagonals count as straight; never in curves, never before/during jumps, breaks, places, water or elytra)
+     * the SENT view gets a tiny ±yaw/±pitch excursion between {@link #microJitterMinDegrees} and
+     * {@link #microJitterMaxDegrees}, ramped out and back over 1–3 ticks each way. Net-zero by construction and
+     * invisible on screen (physics, steering and the rendered camera consume the clean rotation) — only the
+     * outgoing rotation packets carry it, because a real hand never holds a heading perfectly still.
+     */
+    public final Setting<Boolean> microJitter = new Setting<>(true);
+
+    /** Smallest micro-jitter excursion amplitude in degrees (see {@link #microJitter}). */
+    public final Setting<Double> microJitterMinDegrees = new Setting<>(0.10);
+
+    /** Largest micro-jitter excursion amplitude in degrees (see {@link #microJitter}). */
+    public final Setting<Double> microJitterMaxDegrees = new Setting<>(0.80);
+
+    /**
      * @deprecated no longer read — the turn is proportional now (see {@link #humanizedLookTurnMaxSpeed},
      * {@link #humanizedLookTurnMinSpeed}, {@link #humanizedLookTurnGain}). A CONSTANT deg/tick cap gave the walk a
      * fixed minimum turning radius and made the bot orbit overshot path nodes. Kept only so persisted configs parse.
