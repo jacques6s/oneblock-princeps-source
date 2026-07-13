@@ -33,6 +33,9 @@ public final class PrincepsAPI {
     static {
         settings = new Settings();
         SettingsUtil.readAndApply(settings, SettingsUtil.SETTINGS_DEFAULT_NAME);
+        // Ground navigation is tuned around the standard 9 deg/tick aim curve. Elytra steering bypasses this
+        // curve entirely and uses its dedicated flight/landing/agile smoothing settings instead.
+        settings.humanizedLookAimCurveMode.value = 1;
 
         try {
             provider = (IPrincepsProvider) Class.forName("princeps.PrincepsProvider").newInstance();

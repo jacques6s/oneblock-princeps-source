@@ -81,6 +81,11 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     private static final double ELYTRA_AGILE_BLEND_START_DEG = 6.0;
     /** Solver demand at/above which flight smoothing is fully agile (and the agile hold re-arms). */
     private static final double ELYTRA_AGILE_ENTER_DEG = 20.0;
+    /** Nether-interior flight yields earlier: tunnel obstacles need steering rather than open-sky glide lag. */
+    private static final double ELYTRA_NETHER_INTERIOR_BLEND_START_DEG = 3.0;
+    private static final double ELYTRA_NETHER_INTERIOR_AGILE_ENTER_DEG = 10.0;
+    /** Maximum smoothing during a hard sub-roof maneuver (0.10 means 91% response per tick). */
+    private static final double ELYTRA_NETHER_INTERIOR_AGILE_SMOOTHNESS_MAX = 0.10;
     /** Ticks the agile level is held after a hard demand, so S-curve sequences don't flip-flop mid-maneuver. */
     private static final int ELYTRA_AGILE_HOLD_TICKS = 10;
     /** Remaining ticks of the agile hold (see above). Decays naturally; stale values are harmless. */
@@ -210,12 +215,10 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     // the target each tick, and 0 disables it (snap straight to the steering target). While
                     // landing we use the snappier elytraLandingSmoothness so the look tracks the spot precisely
                     // and sets down cleanly instead of overshooting until it gets stuck.
-                    // MANEUVER-ADAPTIVE: the smoothing level follows the DEMAND, not the dimension. On long
-                    // free stretches — even inside tight nether tunnels — the solver asks for tiny corrections
-                    // and the full smoothness shapes the line. When it demands a hard, steep correction (tight
-                    // curve, terrain dodge) the smoothing yields toward elytraSmoothnessAgile so the applied
-                    // look converges fast enough to actually make the curve, then eases back to smooth. A short
-                    // agile hold keeps S-curve sequences from flip-flopping mid-maneuver.
+                    // MANEUVER-ADAPTIVE: open-space flight (including the Nether roof) keeps the long, smooth line.
+                    // Below the Nether roof obstacle turns yield earlier and become nearly direct. Tiny corrections
+                    // remain fully smooth so straight tunnel flight never starts twitching. A short agile hold keeps
+                    // S-curve sequences from flip-flopping mid-maneuver.
                     final IElytraProcess elytraProc = princeps.getElytraProcess();
                     final double smoothness;
                     if (elytraProc != null && elytraProc.isLanding()) {
@@ -224,18 +227,26 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                         final float yawErr = Math.abs(Mth.degreesDifference(this.prevRotation.getYaw(), this.target.rotation.getYaw()));
                         final float pitchErr = Math.abs(this.target.rotation.getPitch() - this.prevRotation.getPitch());
                         final double err = Math.max(yawErr, pitchErr);
-                        if (err >= ELYTRA_AGILE_ENTER_DEG) {
+                        final boolean netherInterior = this.ctx.world().dimensionType().hasCeiling()
+                                && this.ctx.player().getY() < 120.0;
+                        final double blendStart = netherInterior
+                                ? ELYTRA_NETHER_INTERIOR_BLEND_START_DEG : ELYTRA_AGILE_BLEND_START_DEG;
+                        final double agileEnter = netherInterior
+                                ? ELYTRA_NETHER_INTERIOR_AGILE_ENTER_DEG : ELYTRA_AGILE_ENTER_DEG;
+                        if (err >= agileEnter) {
                             this.elytraAgileHold = ELYTRA_AGILE_HOLD_TICKS;
                         } else if (this.elytraAgileHold > 0) {
                             this.elytraAgileHold--;
                         }
                         final double smooth = Princeps.settings().elytraSmoothness.value;
-                        final double agile = Princeps.settings().elytraSmoothnessAgile.value;
+                        final double configuredAgile = Princeps.settings().elytraSmoothnessAgile.value;
+                        final double agile = netherInterior
+                                ? Math.min(configuredAgile, ELYTRA_NETHER_INTERIOR_AGILE_SMOOTHNESS_MAX)
+                                : configuredAgile;
                         final double blend = this.elytraAgileHold > 0
                                 ? 1.0
                                 : Math.max(0.0, Math.min(1.0,
-                                        (err - ELYTRA_AGILE_BLEND_START_DEG)
-                                                / (ELYTRA_AGILE_ENTER_DEG - ELYTRA_AGILE_BLEND_START_DEG)));
+                                        (err - blendStart) / (agileEnter - blendStart)));
                         smoothness = smooth + (agile - smooth) * blend;
                     }
                     final float a = (float) Math.max(0.1, Math.min(1.0, 1.0 - smoothness * 0.9));
