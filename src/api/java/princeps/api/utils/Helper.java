@@ -20,6 +20,7 @@ package princeps.api.utils;
 import princeps.api.PrincepsAPI;
 import princeps.api.Settings;
 import net.minecraft.ChatFormatting;
+import net.minecraft.network.chat.TextColor;
 import net.minecraft.client.multiplayer.chat.GuiMessageTag;
 import net.minecraft.client.Minecraft;
 import net.minecraft.network.chat.Component;
@@ -60,11 +61,14 @@ public interface Helper {
         final Calendar now = Calendar.getInstance();
         final boolean xd = now.get(Calendar.MONTH) == Calendar.APRIL && now.get(Calendar.DAY_OF_MONTH) <= 3;
         MutableComponent princeps = Component.literal(xd ? "Baritoe" : PrincepsAPI.getSettings().shortPrincepsPrefix.value ? "B" : "Princeps");
-        princeps.setStyle(princeps.getStyle().withColor(ChatFormatting.LIGHT_PURPLE));
+        // The exact cyan (0,220,255) of the path corners under BaseHunter navigation — TextColor.fromRgb, not a
+        // ChatFormatting enum (the vanilla palette has no matching shade), so the [Princeps] chat prefix reads
+        // in the SAME colour as the running route lines. Brackets use a dimmer cyan for a subtle hierarchy.
+        princeps.setStyle(princeps.getStyle().withColor(TextColor.fromRgb(0x00DCFF)));
 
         // Outer brackets
         MutableComponent prefix = Component.literal("");
-        prefix.setStyle(princeps.getStyle().withColor(ChatFormatting.DARK_PURPLE));
+        prefix.setStyle(princeps.getStyle().withColor(TextColor.fromRgb(0x0091B8)));
         prefix.append("[");
         prefix.append(princeps);
         prefix.append("]");

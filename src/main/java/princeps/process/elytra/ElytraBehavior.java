@@ -484,7 +484,10 @@ public final class ElytraBehavior implements Helper {
 
         final Settings settings = Princeps.settings();
         if (this.visiblePath != null) {
-            PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, Color.RED, false, 0, 0, 0.0D);
+            // The elytra route line uses the SAME cyan as the ground-path corners (colorCurrentPath, 0/220/255)
+            // in every dimension/variant — overworld, nether roof, end, and the under-bedrock void cruise all
+            // render through this one call, so they all match the running BaseHunter navigation colour.
+            PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, settings.colorCurrentPath.value, false, 0, 0, 0.0D);
         }
         if (this.aimPos != null) {
             PathRenderer.drawGoal(event.getModelViewStack(), ctx, new GoalBlock(this.aimPos), event.getPartialTicks(), Color.GREEN);
