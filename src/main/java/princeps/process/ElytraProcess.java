@@ -488,13 +488,18 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
                             (fall.getSrc().y + fall.getDest().y) / 2,
                             (fall.getSrc().z + fall.getDest().z) / 2
                     );
-                    behavior.pathManager.pathToDestination(from).whenComplete((result, ex) -> {
-                        if (ex == null) {
-                            this.state = State.GET_TO_JUMP;
-                            return;
-                        }
-                        onLostControl();
-                    });
+                    final ElytraBehavior owner = this.behavior;
+                    owner.pathManager.pathToDestination(from).whenComplete((result, ex) ->
+                            ctx.minecraft().execute(() -> {
+                                if (this.behavior != owner) {
+                                    return; // stale result from a cancelled or replaced journey
+                                }
+                                if (ex == null) {
+                                    this.state = State.GET_TO_JUMP;
+                                } else {
+                                    onLostControl();
+                                }
+                            }));
                     this.state = State.PAUSE;
                 } else {
                     onLostControl();
@@ -569,8 +574,13 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
         }
         this.flightRouteAttempts++;
         this.flightRoutePending = true;
-        behavior.pathManager.pathToDestination(from).whenComplete((result, ex) ->
-                this.flightRoutePending = false);
+        final ElytraBehavior owner = this.behavior;
+        owner.pathManager.pathToDestination(from).whenComplete((result, ex) ->
+                ctx.minecraft().execute(() -> {
+                    if (this.behavior == owner) {
+                        this.flightRoutePending = false;
+                    }
+                }));
     }
 
     /** Selects a firework into the main hand and uses it. Returns false when none is left. */
@@ -727,16 +737,30 @@ public class ElytraProcess extends PrincepsProcessHelper implements IPrincepsPro
     private void pathTo0(BlockPos destination, boolean appendDestination) {
         // elytra navigation now works in any dimension (Nether/End/Overworld); the per-dimension flyable
         // space + Y-offset is handled by NetherPathfinderContext.forLevel.
-        if (ctx.player() == null) {
+        if (ctx.player() == null || ctx.world() == null) {
             return;
         }
         this.onLostControl();
         this.predictingTerrain = Princeps.settings().elytraPredictTerrain.value;
         this.behavior = new ElytraBehavior(this.princeps, this, destination, appendDestination);
-        if (ctx.world() != null) {
-            this.behavior.repackChunks();
+        this.behavior.repackChunks();
+        if (shouldComputeInitialFlightRoute(
+                Princeps.settings().elytraVoidFlight.value,
+                ctx.world().dimensionType().hasCeiling(),
+                ctx.player().position().y,
+                ctx.world().getMinY())) {
+            this.behavior.pathTo();
         }
-        this.behavior.pathTo();
+    }
+
+    /**
+     * The native 3D solver only models blocks inside the dimension height. Starting it below the
+     * Overworld floor can never produce a route; VOID_CRUISE directly steers there and requests a
+     * regular route after returning to modeled terrain.
+     */
+    static boolean shouldComputeInitialFlightRoute(
+            boolean voidFlightEnabled, boolean hasCeiling, double playerY, int minY) {
+        return !voidFlightEnabled || hasCeiling || playerY >= minY;
     }
 
     @Override

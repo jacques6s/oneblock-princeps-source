@@ -94,32 +94,54 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
      * goal — a seamless fly-then-walk journey. In caves (no sky access, no auto-jump) this never fires.
      */
     private void maybeDispatchElytra() {
-        if (!Princeps.settings().allowElytra.value || this.goal == null || ctx.player() == null) {
+        if (this.goal == null || ctx.player() == null || ctx.world() == null) {
             return;
         }
-        if (princeps.getElytraProcess().isActive() || ctx.player().isFallFlying()) {
+        if (princeps.getElytraProcess().isActive()) {
             return;
         }
         if (!(princeps.getElytraProcess() instanceof ElytraProcess elytra)) {
             return; // elytra unsupported on this system (NullElytraProcess)
         }
-        final BetterBlockPos pos;
+        final int floorY = ctx.world().getMinY();
+        final boolean playerInVoid = ctx.playerFeet().y < floorY;
+        final BetterBlockPos requestedPos;
         if (this.goal instanceof IGoalRenderPos renderPos) {
-            pos = new BetterBlockPos(renderPos.getGoalPos());
+            requestedPos = new BetterBlockPos(renderPos.getGoalPos());
         } else if (this.goal instanceof GoalXZ xz) {
-            pos = new BetterBlockPos(xz.getX(), ctx.playerFeet().y, xz.getZ());
+            requestedPos = new BetterBlockPos(
+                    xz.getX(),
+                    goalXZFlightY(ctx.playerFeet().y, floorY, ctx.world().getMaxY(), playerInVoid),
+                    xz.getZ());
         } else {
             return; // no spatial target (e.g. a pure y-level goal): walking handles it
+        }
+        final boolean requestedYInWorld = requestedPos.y >= floorY && requestedPos.y < ctx.world().getMaxY();
+        if (!playerInVoid && !requestedYInWorld) {
+            return; // do not feed an out-of-world destination to the native 3D flight solver
+        }
+        final BetterBlockPos pos = playerInVoid && !requestedYInWorld
+                ? new BetterBlockPos(
+                        requestedPos.x,
+                        goalXZFlightY(ctx.playerFeet().y, floorY, ctx.world().getMaxY(), true),
+                        requestedPos.z)
+                : requestedPos;
+        final boolean voidTravel = playerInVoid;
+        if (voidTravel && !Princeps.settings().elytraVoidFlight.value) {
+            return; // explicit user opt-out: do not start the dedicated below-floor navigator
+        }
+        if (!autoElytraDispatchAllowed(
+                Princeps.settings().allowElytra.value,
+                ctx.player().isFallFlying(),
+                voidTravel)) {
+            return;
         }
         final double dist = Math.hypot(
                 pos.x + 0.5 - ctx.player().position().x,
                 pos.z + 0.5 - ctx.player().position().z);
-        // Below the world floor (in the void under the overworld bedrock) walking is impossible, and any goal
-        // below the floor can only be reached by elytra void flight. Force the dispatch there regardless of the
-        // region distance threshold — under the bedrock a second manual "elytra" command should never be needed.
-        final int floorY = ctx.world().getMinY();
-        final boolean playerInVoid = ctx.playerFeet().y < floorY;
-        final boolean voidTravel = playerInVoid || pos.y < floorY;
+        // Below the world floor (in the void under the overworld bedrock) walking is impossible. Force the
+        // dispatch there regardless of the region distance threshold — under the bedrock a second manual
+        // "elytra" command should never be needed.
         final double threshold = elytraAutoThreshold();
         if (!voidTravel && (threshold <= 0 || dist < threshold)) {
             return;
@@ -156,6 +178,23 @@ public final class CustomGoalProcess extends PrincepsProcessHelper implements IC
         logDirect(String.format("Auto-elytra: %.0f blocks to goal (threshold %.0f) — flying", dist, threshold));
         elytra.pathTo(pos);
         elytra.enableAutoTakeoff();
+    }
+
+    /**
+     * Below the world floor walking is impossible, so the dedicated void navigator must be allowed to
+     * take over even when general auto-elytra is disabled or the player is already gliding. Everywhere
+     * else the user's normal auto-elytra and manual-flight choices retain their previous meaning.
+     */
+    static boolean autoElytraDispatchAllowed(boolean allowElytra, boolean fallFlying, boolean voidTravel) {
+        return voidTravel || (allowElytra && !fallFlying);
+    }
+
+    /** GoalXZ has no Y. A below-floor start therefore needs a valid in-world destination height. */
+    static int goalXZFlightY(int playerFeetY, int minY, int maxY, boolean playerInVoid) {
+        if (!playerInVoid) {
+            return playerFeetY;
+        }
+        return Math.max(minY, Math.min(64, maxY - 1));
     }
 
     /** Region-specific auto-elytra distance threshold; {@code <= 0} disables the region. */
