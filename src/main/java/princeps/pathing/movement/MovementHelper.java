@@ -650,6 +650,15 @@ public interface MovementHelper extends ActionCosts, Helper {
      */
     static void switchToBestToolFor(IPlayerContext ctx, BlockState b, ToolSet ts, boolean preferSilkTouch) {
         if (Princeps.settings().autoTool.value && !Princeps.settings().assumeExternalAutoTool.value) {
+            // An auto-survival eat/repair owns the hands: a hotbar slot switch cancels the consume outright
+            // (the "mines and eats at once — the gapple never finishes" glitch: movements re-select the pick
+            // for the NEXT block every tick, yanking the food out of the hand mid-bite). Breaking is already
+            // paused for the consume's duration, so deferring the tool switch costs nothing.
+            if (PrincepsAPI.getProvider().getPrimaryPrinceps() instanceof Princeps princeps
+                    && princeps.getSurvivalBehavior() != null
+                    && princeps.getSurvivalBehavior().ownsInventory()) {
+                return;
+            }
             ctx.player().getInventory().setSelectedSlot(ts.getBestSlot(b.getBlock(), preferSilkTouch));
         }
     }

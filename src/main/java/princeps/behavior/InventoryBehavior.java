@@ -232,6 +232,12 @@ public final class InventoryBehavior extends Behavior implements Helper {
 
     public boolean throwaway(boolean select, Predicate<? super ItemStack> desired, boolean allowInventory) {
         LocalPlayer p = ctx.player();
+        // An auto-survival eat/repair owns the hands: selecting a throwaway slot (or swapping one in) would
+        // cancel the consume outright — same class of bug as the mid-eat auto-tool switch. Report the item as
+        // available WITHOUT touching the hotbar; placing is paused for the consume's duration anyway, and the
+        // real slot select happens on the first tick after the consume ends.
+        final SurvivalBehavior survival = princeps.getSurvivalBehavior();
+        final boolean handsOwned = survival != null && survival.ownsInventory();
         NonNullList<ItemStack> inv = p.getInventory().getNonEquipmentItems();
         for (int i = 0; i < 9; i++) {
             ItemStack item = inv.get(i);
@@ -241,7 +247,7 @@ public final class InventoryBehavior extends Behavior implements Helper {
             // since this function is never called during cost calculation, we don't need to migrate
             // acceptableThrowawayItems to the CalculationContext
             if (desired.test(item)) {
-                if (select) {
+                if (select && !handsOwned) {
                     p.getInventory().setSelectedSlot(i);
                 }
                 return true;
@@ -256,7 +262,7 @@ public final class InventoryBehavior extends Behavior implements Helper {
             for (int i = 0; i < 9; i++) {
                 ItemStack item = inv.get(i);
                 if (item.isEmpty() || item.getItem().components().has(DataComponents.TOOL)) {
-                    if (select) {
+                    if (select && !handsOwned) {
                         p.getInventory().setSelectedSlot(i);
                     }
                     return true;
@@ -267,7 +273,7 @@ public final class InventoryBehavior extends Behavior implements Helper {
         if (allowInventory) {
             for (int i = 9; i < 36; i++) {
                 if (desired.test(inv.get(i))) {
-                    if (select) {
+                    if (select && !handsOwned) {
                         requestSwapWithHotBar(i, 7);
                         p.getInventory().setSelectedSlot(7);
                     }

@@ -219,7 +219,14 @@ public final class SurvivalBehavior extends Behavior {
         this.lastGappleMs = 0L;
     }
 
-    boolean ownsInventory() {
+    /**
+     * True while an eat/repair/borrow session owns the hotbar. Pathing-side slot switches
+     * ({@code MovementHelper.switchToBestToolFor}, {@code InventoryBehavior.throwaway}) MUST hold off while
+     * this is set: a mid-consume {@code setSelectedSlot} cancels the item use outright — the reported
+     * "mines and eats at once, the gapple never finishes" glitch. Breaking/placing is paused for the same
+     * duration by {@link InputOverrideHandler}, so deferring the slot work costs nothing.
+     */
+    public boolean ownsInventory() {
         return this.eatRestoreSlot >= 0 || this.repairing || this.borrowedSourceIndex >= 0;
     }
 
