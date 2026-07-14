@@ -958,6 +958,15 @@ public final class Settings {
      *  mode. Applied in {@code aimCurvePeak()}; 1.0 = the mode's stock peak. */
     public final Setting<Double> humanizedLookAimCurvePeakScale = new Setting<>(1.0);
 
+    /** Per-axis ceiling on the HORIZONTAL (yaw) share of each bell-curve aim step, as a multiplier on the curve's
+     *  peak: the yaw component of a step never exceeds {@code peak * this}. 1.0 = no extra shaping; lower = calmer
+     *  sideways head movement during digs (the vertical share is unaffected). Live-tunable from the client GUI. */
+    public final Setting<Double> humanizedLookAimCurveYawScale = new Setting<>(1.0);
+
+    /** Per-axis ceiling on the VERTICAL (pitch) share of each bell-curve aim step — the pitch twin of
+     *  {@link #humanizedLookAimCurveYawScale}. */
+    public final Setting<Double> humanizedLookAimCurvePitchScale = new Setting<>(1.0);
+
     /** Degrees per tick the walk pitch re-levels toward the {@link #humanizedWalkPitchMin}/{@link #humanizedWalkPitchMax}
      *  band when it starts far off (e.g. after a steep drop look or a break aim). Higher = the view returns to the
      *  walking height faster instead of creeping there ultra-smoothly. 1.0 = the historic slow crawl. */

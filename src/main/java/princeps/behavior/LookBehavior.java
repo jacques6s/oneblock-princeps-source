@@ -551,11 +551,18 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private double curveVel;       // current head-turn speed of the running arc (deg/tick)
         private long tickCount;        // advanced once per tick() — forks replay it deterministically via advance()
         private long curveTickStamp = Long.MIN_VALUE; // last tickCount the curve advanced (gap > 1 tick = fresh arc)
+        // The desired rotation the curve last steered toward: a significant CHANGE while precise (a new aim point
+        // on the block, or a new block) restarts the ease-in, so a re-aim is never ridden at full plateau speed.
+        private float lastCurveDesiredYaw = Float.NaN;
+        private float lastCurveDesiredPitch;
         // Execution-only variance RNG: NEVER drawn from this.rand — the forked solver replays this.rand via tick()
         // and consuming it here would desync its place-predictions from reality. The curve only shapes the APPLY
         // path (predictions use peekRotationExact), so untracked randomness is safe here, like BlockBreakHelper's.
         private final java.util.Random curveRng = new java.util.Random();
         private static final double SACCADE_EASE = 0.28; // fraction toward the fixation per tick (~4-tick flick)
+        // A precise-aim TARGET change beyond this (deg, yaw/pitch hypot) restarts the curve's ease-in. Above the
+        // per-tick drift of wander/tremor, below any real point-to-point re-aim on a block face.
+        private static final double REAIM_FRESH_DEGREES = 2.5;
         private static final double TREMOR_THETA = 0.35; // fast reversion → high-freq hand micro-jitter
         private static final double TREMOR_PITCH_RATIO = 0.70; // pitch tremor as a fraction of yaw tremor
 
@@ -582,6 +589,8 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.curveVel = source.curveVel;
             this.tickCount = source.tickCount;
             this.curveTickStamp = source.curveTickStamp;
+            this.lastCurveDesiredYaw = source.lastCurveDesiredYaw;
+            this.lastCurveDesiredPitch = source.lastCurveDesiredPitch;
         }
 
         final void setPrecise(final boolean precise) {
@@ -722,7 +731,20 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 this.curveTickStamp = this.tickCount;
                 if (fresh) {
                     this.curveVel = 0.0;
+                } else if (this.precise && !Float.isNaN(this.lastCurveDesiredYaw)) {
+                    // Mid-arc RE-AIM (a new point on the block, or the next block) while the arc velocity rides the
+                    // plateau: without a reset the whole jump lands in ONE tick (step = min(err, vel) with vel at
+                    // peak — the "hard flick" seen while digging down). Treat a significant target change as a fresh
+                    // arc: ease in again (~peak/3 accel), so every re-aim spreads over >= 3 ticks like a human's.
+                    final double switchMag = Math.hypot(
+                            Mth.degreesDifference(this.lastCurveDesiredYaw, desiredYaw),
+                            desiredPitch - this.lastCurveDesiredPitch);
+                    if (switchMag > REAIM_FRESH_DEGREES) {
+                        this.curveVel = 0.0;
+                    }
                 }
+                this.lastCurveDesiredYaw = desiredYaw;
+                this.lastCurveDesiredPitch = desiredPitch;
                 final double peak = aimCurvePeak();
                 double v = aimCurveNextVel(this.curveVel, errMag, peak);
                 // Per-tick ABSOLUTE jitter, magnitude 0.01..0.1 deg (user spec): the plateau BREATHES around the
@@ -736,9 +758,18 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             }
             final double step = Math.min(errMag, this.curveVel);
             final double s = errMag > 1e-9 ? step / errMag : 0.0;
+            // Per-axis ceilings (live-tunable): the yaw/pitch SHARE of this tick's step never exceeds
+            // peak * axisScale. At 1.0/1.0 this changes nothing (a step's component can't exceed the total,
+            // which is already capped at the peak); lower values calm one axis — e.g. the wide sideways
+            // sweeps while digging straight down — while the other axis keeps its pace.
+            final double peakNow = aimCurvePeak();
+            final double yawCap = peakNow * Math.max(0.05, Princeps.settings().humanizedLookAimCurveYawScale.value);
+            final double pitchCap = peakNow * Math.max(0.05, Princeps.settings().humanizedLookAimCurvePitchScale.value);
+            final double stepYaw = Mth.clamp(yawErr * s, -yawCap, yawCap);
+            final double stepPitch = Mth.clamp(pitchErr * s, -pitchCap, pitchCap);
             return new Rotation(
-                    this.calculateMouseMove(prev.getYaw(), prev.getYaw() + (float) (yawErr * s)),
-                    this.calculateMouseMove(prev.getPitch(), prev.getPitch() + (float) (pitchErr * s))
+                    this.calculateMouseMove(prev.getYaw(), prev.getYaw() + (float) stepYaw),
+                    this.calculateMouseMove(prev.getPitch(), prev.getPitch() + (float) stepPitch)
             ).clamp();
         }
 
