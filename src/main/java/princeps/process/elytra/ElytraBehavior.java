@@ -76,6 +76,9 @@ public final class ElytraBehavior implements Helper {
     private List<Vec3> simulationLine;
     private BlockPos aimPos;
     private List<BetterBlockPos> visiblePath;
+    /** Deep dark navy for the angular planned elytra route line — kept distinct from the cyan trajectory curve. */
+    private static final Color ELYTRA_PLAN_NAVY = new Color(24, 34, 120);
+
     // The standard visiblePath window is subList(near - 30, near + 100) — the void plan mirrors it exactly.
     private static final int VOID_RENDER_BACK = 30;
     private static final int VOID_RENDER_AHEAD = 100;
@@ -484,10 +487,10 @@ public final class ElytraBehavior implements Helper {
 
         final Settings settings = Princeps.settings();
         if (this.visiblePath != null) {
-            // The elytra route line uses the SAME cyan as the ground-path corners (colorCurrentPath, 0/220/255)
-            // in every dimension/variant — overworld, nether roof, end, and the under-bedrock void cruise all
-            // render through this one call, so they all match the running BaseHunter navigation colour.
-            PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, settings.colorCurrentPath.value, false, 0, 0, 0.0D);
+            // Deep navy for the angular PLANNED route line (in every dimension) — deliberately NOT the cyan of the
+            // curved trajectory/adjustment line, so the two are clearly distinguishable. The cyan stays on the
+            // [Princeps] chat prefix and the ground path; only this elytra plan line is navy.
+            PathRenderer.drawPath(event.getModelViewStack(), this.visiblePath, 0, ELYTRA_PLAN_NAVY, false, 0, 0, 0.0D);
         }
         if (this.aimPos != null) {
             PathRenderer.drawGoal(event.getModelViewStack(), ctx, new GoalBlock(this.aimPos), event.getPartialTicks(), Color.GREEN);
