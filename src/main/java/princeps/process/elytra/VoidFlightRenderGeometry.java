@@ -20,36 +20,56 @@ final class VoidFlightRenderGeometry {
 
     private VoidFlightRenderGeometry() {}
 
-    static List<BetterBlockPos> directCorridor(BlockPos player,
-                                                BlockPos destination,
-                                                int cruiseY,
-                                                double lookahead) {
-        ArrayList<BetterBlockPos> corridor = new ArrayList<>(2);
-        addDistinct(corridor, player.getX(), cruiseY, player.getZ());
-
-        final double dx = destination.getX() - player.getX();
-        final double dz = destination.getZ() - player.getZ();
-        final double distance = Math.hypot(dx, dz);
-        if (distance == 0.0D || lookahead <= 0.0D) {
-            return List.copyOf(corridor);
+    /**
+     * A window of the FIXED planned cruise line from {@code anchor} to {@code destination} at {@code y}.
+     * Every node is a pure function of (anchor, destination, index) — one per block of travel, like the
+     * pathfinder's path nodes — so the geometry NEVER shifts with the player. Only the returned window
+     * slides along the line ({@code back} nodes behind the player's projection onto it, {@code ahead}
+     * in front), mirroring the standard visiblePath window {@code subList(near - 30, near + 100)}.
+     * The red line therefore stands still in space exactly like the planned route in every other
+     * dimension; drifting sideways or forward can never rotate or drag it.
+     */
+    static List<BetterBlockPos> plannedWindow(BlockPos anchor, BlockPos destination, int y,
+                                              BlockPos player, int back, int ahead) {
+        final double dx = destination.getX() - anchor.getX();
+        final double dz = destination.getZ() - anchor.getZ();
+        final double length = Math.hypot(dx, dz);
+        final ArrayList<BetterBlockPos> window = new ArrayList<>();
+        if (length == 0.0D) {
+            window.add(new BetterBlockPos(destination.getX(), y, destination.getZ()));
+            return List.copyOf(window);
         }
-
-        // VOID_CRUISE really steers straight toward the destination column. Show that real plan, but only over
-        // the same local horizon as the normal Elytra path. Extending to a far destination creates the rejected
-        // screen-sized diagonal/V and is not how the standard visiblePath window behaves.
-        final double scale = Math.min(1.0D, lookahead / distance);
-        int endX = player.getX() + (int) (dx * scale);
-        int endZ = player.getZ() + (int) (dz * scale);
-        if (endX == player.getX() && endZ == player.getZ()) {
-            // Keep a very small positive lookahead renderable without ever jumping to the far destination.
-            if (Math.abs(dx) >= Math.abs(dz)) {
-                endX += Integer.signum((int) dx);
-            } else {
-                endZ += Integer.signum((int) dz);
-            }
+        final double ux = dx / length;
+        final double uz = dz / length;
+        final double along = (player.getX() - anchor.getX()) * ux + (player.getZ() - anchor.getZ()) * uz;
+        final int near = (int) Math.max(0.0D, Math.min(along, length));
+        final int last = (int) length;
+        final int from = Math.max(0, near - back);
+        final int to = Math.min(last, near + ahead);
+        for (int i = from; i <= to; i++) {
+            addDistinct(window,
+                    anchor.getX() + (int) Math.round(ux * i),
+                    y,
+                    anchor.getZ() + (int) Math.round(uz * i));
         }
-        addDistinct(corridor, endX, cruiseY, endZ);
-        return List.copyOf(corridor);
+        if (to == last) {
+            // The window reaches the plan's end: terminate exactly on the destination column.
+            addDistinct(window, destination.getX(), y, destination.getZ());
+        }
+        return List.copyOf(window);
+    }
+
+    /** Horizontal distance of {@code player} from the anchor→destination line (blocks, always >= 0). */
+    static double lateralOffset(BlockPos anchor, BlockPos destination, BlockPos player) {
+        final double dx = destination.getX() - anchor.getX();
+        final double dz = destination.getZ() - anchor.getZ();
+        final double length = Math.hypot(dx, dz);
+        final double px = player.getX() - anchor.getX();
+        final double pz = player.getZ() - anchor.getZ();
+        if (length == 0.0D) {
+            return Math.hypot(px, pz);
+        }
+        return Math.abs(px * (dz / length) - pz * (dx / length));
     }
 
     private static void addDistinct(List<BetterBlockPos> points, int x, int y, int z) {

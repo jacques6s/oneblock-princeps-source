@@ -76,7 +76,18 @@ public final class ElytraBehavior implements Helper {
     private List<Vec3> simulationLine;
     private BlockPos aimPos;
     private List<BetterBlockPos> visiblePath;
-    private static final double VOID_RENDER_LOOKAHEAD = 100.0D;
+    // The standard visiblePath window is subList(near - 30, near + 100) — the void plan mirrors it exactly.
+    private static final int VOID_RENDER_BACK = 30;
+    private static final int VOID_RENDER_AHEAD = 100;
+    /** Beyond this off-line offset the old plan is genuinely stale (teleport/RTP/exit detour) → re-anchor. */
+    private static final double VOID_REPLAN_LATERAL = 16.0D;
+
+    // The FIXED plan line of the current void cruise: anchored ONCE when the plan is commissioned, so the
+    // red line stands still in space like the planned route in every other dimension (it used to be
+    // re-anchored at the live player every tick, which made it slide and rotate with the flight).
+    private BetterBlockPos voidPlanAnchor;
+    private BlockPos voidPlanDestination;
+    private int voidPlanY = Integer.MIN_VALUE;
 
     // :sunglasses:
     public final NetherPathfinderContext context;
@@ -421,8 +432,21 @@ public final class ElytraBehavior implements Helper {
      */
     public void updateVoidCruiseRender(double cruiseY, BlockPos destination, float pitch) {
         final int y = Mth.floor(cruiseY);
-        this.visiblePath = VoidFlightRenderGeometry.directCorridor(
-                ctx.playerFeet(), destination, y, VOID_RENDER_LOOKAHEAD);
+        final BetterBlockPos feet = ctx.playerFeet();
+        // The red line is the PLANNED ROUTE: anchored once when the cruise plan is commissioned and then
+        // stationary in space, exactly like the pathfinder's path everywhere else. It re-anchors ONLY on a
+        // genuine replan — a new destination or cruise altitude, or the player having left the old line far
+        // behind (teleport / RTP / void-exit detour). Never per tick, never at the live player.
+        if (this.voidPlanAnchor == null
+                || this.voidPlanY != y
+                || !destination.equals(this.voidPlanDestination)
+                || VoidFlightRenderGeometry.lateralOffset(this.voidPlanAnchor, destination, feet) > VOID_REPLAN_LATERAL) {
+            this.voidPlanAnchor = feet;
+            this.voidPlanDestination = destination.immutable();
+            this.voidPlanY = y;
+        }
+        this.visiblePath = VoidFlightRenderGeometry.plannedWindow(
+                this.voidPlanAnchor, this.voidPlanDestination, y, feet, VOID_RENDER_BACK, VOID_RENDER_AHEAD);
 
         final Vec3 target = new Vec3(destination.getX() + 0.5D, cruiseY, destination.getZ() + 0.5D);
         this.simulationLine = Princeps.settings().elytraRenderSimulation.value
