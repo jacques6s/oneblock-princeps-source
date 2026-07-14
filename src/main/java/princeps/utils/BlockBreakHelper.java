@@ -50,10 +50,11 @@ public final class BlockBreakHelper {
     private int rhythmTimer;
 
     // ── glitch-block blacklist ──────────────────────────────────────────────────────────────────────────
-    // A block that keeps re-appearing after we break it (the server re-sets it / it isn't really breakable and
-    // just "glitches") is abandoned after a few rapid re-breaks so the bot never hammers it forever. Once
-    // blacklisted it is never mined again; the caller's stuck detection then re-routes / RTPs away.
-    private static final int REGROW_LIMIT = 2;          // MORE than this many rapid re-breaks of the SAME block → blacklist
+    // A block that re-appears after we break it (the server re-sets it / it isn't really breakable and just
+    // "glitches") is abandoned IMMEDIATELY: break it once, if it regrows and we break the SAME spot a second
+    // time within the window, blacklist it. Cheap to be wrong — we simply take another route; the caller's
+    // stuck detection then re-routes / RTPs away. Once blacklisted the spot is never mined again.
+    private static final int REGROW_LIMIT = 1;          // MORE than this many rapid re-breaks of the SAME block → blacklist (so the 2nd break blacklists)
     private static final long REGROW_WINDOW_MS = 4000L; // re-breaks farther apart than this are treated as unrelated
     private final java.util.Set<Long> blacklist = new java.util.HashSet<>();
     private long lastBrokenPosPacked = Long.MIN_VALUE;
