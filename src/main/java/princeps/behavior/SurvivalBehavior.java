@@ -62,7 +62,7 @@ public final class SurvivalBehavior extends Behavior {
     private LocalPlayer eatPlayer;
     private Item eatItem;
     private InteractionHand eatHand;
-    /** Wall-clock of the last golden-apple heal, for the minor-damage throttle. */
+    /** Wall-clock of the last golden-apple start/end, for the minor-damage throttle. */
     private long lastGappleMs;
 
     // Repair session: the Mending tool is parked in the offhand (so Mending targets it) while XP bottles are
@@ -288,30 +288,49 @@ public final class SurvivalBehavior extends Behavior {
         final long now = System.currentTimeMillis();
         final boolean haveGapple = hasItem(p, isGapple);
 
-        // Golden apple = healing. Emergency (low HP) bypasses the throttle; minor damage is throttled.
+        // Golden apple = healing. Emergency (<= configured HP) bypasses the throttle; minor damage is throttled.
         if (haveGapple && needsHealing) {
-            final boolean emergency = hp < Princeps.settings().survivalGappleEmergencyHp.value;
-            final boolean throttleOk = now - this.lastGappleMs >= Princeps.settings().survivalGappleThrottleMs.value;
-            if (emergency || throttleOk) {
-                final boolean started = startEat(p, isNormalGapple)
-                        || emergency && startEat(p, isEnchantedGapple);
-                if (started) {
-                    this.lastGappleMs = now;
-                    return true;
-                }
+            final boolean emergency = GapplePolicy.isEmergency(
+                    hp,
+                    Princeps.settings().survivalGappleEmergencyHp.value
+            );
+            if (tryStartGapple(p, emergency, now)) {
+                return true;
             }
         }
 
-        // Hunger = regular food (golden apples are reserved for healing; only used if nothing else feeds).
+        // Hunger = regular food. A normal golden apple remains the last-resort food, but it MUST use the same
+        // cooldown as healing. The old fallback called startEat directly, so low hunger silently bypassed the
+        // 10-second guard and could chain gapples every time the previous one finished.
         if (needsFood) {
             if (startEat(p, isRegularFood)) {
                 return true;
             }
-            if (haveGapple && startEat(p, isNormalGapple)) {
+            if (haveGapple && tryStartGapple(p, false, now)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Starts a normal gapple when the cooldown permits, or immediately in an emergency. Enchanted gapples stay
+     * emergency-only. Every successful gapple start records the same timestamp, including the hunger fallback.
+     */
+    private boolean tryStartGapple(LocalPlayer p, boolean emergency, long now) {
+        if (!emergency && !GapplePolicy.isCooldownReady(
+                now,
+                this.lastGappleMs,
+                Princeps.settings().survivalGappleThrottleMs.value
+        )) {
+            return false;
+        }
+        final boolean started = startEat(p, isNormalGapple)
+                || emergency && startEat(p, isEnchantedGapple);
+        if (started) {
+            this.lastGappleMs = now;
+        }
+        return started;
     }
 
     /** Selects a matching consumable into the main hand and starts eating it; returns whether it began. */
@@ -345,6 +364,12 @@ public final class SurvivalBehavior extends Behavior {
         restoreBorrowedSlot(p);
         if (restoreSlot && p.containerMenu == p.inventoryMenu) {
             p.getInventory().setSelectedSlot(this.eatRestoreSlot);
+        }
+        // Start-time gating prevents retry spam if use gets interrupted; refreshing at session end makes the user-
+        // visible timeout a full configured interval AFTER the apple has finished instead of including its ~1.6s
+        // eating animation. The <=5-heart emergency path still bypasses this timestamp immediately.
+        if (this.eatItem == Items.GOLDEN_APPLE || this.eatItem == Items.ENCHANTED_GOLDEN_APPLE) {
+            this.lastGappleMs = System.currentTimeMillis();
         }
         this.eatRestoreSlot = -1;
         this.eatPlayer = null;

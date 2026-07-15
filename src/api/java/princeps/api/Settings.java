@@ -109,9 +109,9 @@ public final class Settings {
     public final Setting<Boolean> survivalAutoEat = new Setting<>(true);
     /** Auto-repair the most damaged low-durability Mending gear in inventory by throwing XP bottles. */
     public final Setting<Boolean> survivalAutoRepair = new Setting<>(true);
-    /** Eat a golden apple immediately (bypassing the throttle) once health drops below this many HALF-hearts
-     *  (12 = 6 hearts). */
-    public final Setting<Integer> survivalGappleEmergencyHp = new Setting<>(12);
+    /** Eat a golden apple immediately (bypassing the throttle) once health is at or below this many HALF-hearts
+     *  (10 = 5 hearts). */
+    public final Setting<Integer> survivalGappleEmergencyHp = new Setting<>(10);
     /** Minimum ms between golden-apple top-up heals for minor damage (the emergency threshold bypasses it). */
     public final Setting<Integer> survivalGappleThrottleMs = new Setting<>(10000);
     /** Eat regular food once the food level drops to or below this (14 = 7 shanks). */
