@@ -107,6 +107,14 @@ public final class SurvivalBehavior extends Behavior {
             return;
         }
 
+        final boolean navigationActive = princeps.getPathingBehavior().isPathing()
+                || princeps.getPathingControlManager().mostRecentInControl()
+                        .map(process -> process.isActive()).orElse(false);
+        final boolean automationActive = SurvivalActivityPolicy.isActive(
+                Princeps.settings().autoSurvival.value,
+                navigationActive
+        );
+
         // An eat in progress is managed FIRST and unconditionally: we run before Minecraft.handleKeybinds
         // this tick, so we must hold the USE key down every tick of the eat — otherwise handleKeybinds sees
         // keyUse released and cancels the use before any food is ever consumed. Release it (and restore the
@@ -114,7 +122,7 @@ public final class SurvivalBehavior extends Behavior {
         if (this.eatRestoreSlot >= 0) {
             final boolean samePlayer = p == this.eatPlayer;
             final boolean canContinue = samePlayer
-                    && Princeps.settings().autoSurvival.value
+                    && automationActive
                     && Princeps.settings().survivalAutoEat.value
                     && p.isAlive() && !p.isFallFlying()
                     && !princeps.getElytraProcess().isActive()
@@ -128,9 +136,9 @@ public final class SurvivalBehavior extends Behavior {
             return;
         }
 
-        if (!Princeps.settings().autoSurvival.value) {
+        if (!automationActive) {
             if (repairing) {
-                cancelRepair(p); // setting turned off mid-session — restore hands
+                cancelRepair(p); // setting disabled or navigation ended mid-session — restore hands
             }
             return;
         }
@@ -164,16 +172,8 @@ public final class SurvivalBehavior extends Behavior {
             return; // some other use (e.g. the user) is in progress
         }
 
-        // 1) Totem — the single most important item; managed always while enabled.
+        // 1) Totem — the single most important item; managed only while Princeps navigation owns the player.
         if (Princeps.settings().survivalAutoTotem.value && manageTotems(p)) {
-            return;
-        }
-
-        // Eat + repair are tied to the navigation actually running (don't devour the user's gapples while idle).
-        final boolean navActive = princeps.getPathingBehavior().isPathing()
-                || princeps.getPathingControlManager().mostRecentInControl()
-                        .map(pr -> pr.isActive()).orElse(false);
-        if (!navActive) {
             return;
         }
 
