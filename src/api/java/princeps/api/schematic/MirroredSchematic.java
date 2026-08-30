@@ -17,6 +17,7 @@
 
 package princeps.api.schematic;
 
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Mirror;
 
@@ -52,6 +53,15 @@ public class MirroredSchematic implements ISchematic {
                 mirror(current, mirror),
                 mirror(approxPlaceable, mirror)
         ), mirror);
+    }
+
+    /**
+     * The mirrored cell's NBT. Coordinates are translated exactly as {@link #desiredState} translates them; the
+     * compound itself is passed through untouched, because a sign's text does not mirror.
+     */
+    @Override
+    public CompoundTag blockEntity(int x, int y, int z) {
+        return schematic.blockEntity(mirrorX(x, widthX(), mirror), y, mirrorZ(z, lengthZ(), mirror));
     }
 
     @Override

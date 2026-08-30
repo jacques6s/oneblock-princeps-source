@@ -20,6 +20,7 @@ package princeps.behavior;
 import princeps.Princeps;
 import princeps.api.Settings;
 import princeps.api.behavior.ILookBehavior;
+import princeps.api.behavior.look.AimIntent;
 import princeps.api.behavior.look.IAimProcessor;
 import princeps.api.behavior.look.ITickableAimProcessor;
 import princeps.api.process.IElytraProcess;
@@ -132,16 +133,41 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
     @Override
     public void updateTarget(Rotation rotation, boolean blockInteract) {
-        this.updateTarget(rotation, blockInteract, false);
+        this.updateTarget(rotation, blockInteract, AimIntent.NONE);
     }
 
     @Override
     public void updateTarget(Rotation rotation, boolean blockInteract, boolean breakIntent) {
+        this.updateTarget(rotation, blockInteract, AimIntent.fromLegacy(breakIntent, false));
+    }
+
+    @Override
+    public void updateTarget(Rotation rotation, boolean blockInteract, boolean breakIntent, boolean placeIntent) {
+        this.updateTarget(rotation, blockInteract, AimIntent.fromLegacy(breakIntent, placeIntent), false);
+    }
+
+    @Override
+    public void updateTarget(Rotation rotation, boolean blockInteract, boolean breakIntent, boolean placeIntent,
+                             boolean deterministicIntent) {
+        this.updateTarget(rotation, blockInteract, AimIntent.fromLegacy(breakIntent, placeIntent),
+                deterministicIntent);
+    }
+
+    @Override
+    public void updateTarget(Rotation rotation, boolean blockInteract, AimIntent intent) {
+        this.updateTarget(rotation, blockInteract, intent, false);
+    }
+
+    @Override
+    public void updateTarget(Rotation rotation, boolean blockInteract, AimIntent intent,
+                             boolean deterministicIntent) {
+        AimIntent safeIntent = intent == null ? AimIntent.NONE : intent;
         // blockInteract == "this movement needs an EXACT facing" (break/place/bridge) → carry it as the precise
-        // flag so the humanized-look filter hard-bypasses its wander for this target. breakIntent additionally
-        // marks BREAK aims (never place/use) so the bell-curve mining arc can engage from the FIRST aim tick —
-        // the CLICK_LEFT input can't signal that, because break sites press only after the crosshair arrived.
-        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract), blockInteract, breakIntent);
+        // flag so the humanized-look filter hard-bypasses its wander for this target. The explicit intent engages
+        // the appropriate interaction curve from the FIRST aim tick — the mouse button cannot signal that because
+        // correct break/place sites press only after the crosshair has arrived.
+        this.target = new Target(rotation, Target.Mode.resolve(ctx, blockInteract), blockInteract, safeIntent,
+                deterministicIntent);
     }
 
     @Override
@@ -190,14 +216,22 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // must fly its exact heading). The breakIntent flag is essential: every break site correctly gates
                 // its CLICK_LEFT press on the crosshair having ARRIVED, so on the acquisition tick the input alone
                 // is always false — deriving the arc from the input is circular (curve waits for click, click waits
-                // for arrival) and the first-aim snap ("flick") would survive. Place/use aims never set breakIntent
-                // and never force CLICK_LEFT, so they keep the exact 1-tick aim (bridging timing untouched).
+                // for arrival) and the first-aim snap ("flick") would survive. Placement is handled independently
+                // below; ordinary right-click interactions remain exact because they declare no interaction intent.
                 final boolean breaking = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
-                        || this.target.breakIntent;
+                        || this.target.intent == AimIntent.BREAK;
+                // A declared placement asks for the same arc under its own setting. It is deliberately NOT derived
+                // from the CLICK_RIGHT input the way `breaking` is derived from CLICK_LEFT: the builder's gate
+                // forces the right-click only on the tick the aim has already arrived, so an input-derived term
+                // would be circular exactly as it is on the break side — and, worse, CLICK_RIGHT is forced by the
+                // pathfinder's bridging too. The placement pipeline declares intent before the click and keeps body
+                // motion gated until the aim is safe, so both builder and bridge targets can use this path.
+                final boolean placing = this.target.intent == AimIntent.PLACE;
+                this.processor.setDeterministicPrecise(this.target.deterministicIntent);
                 this.processor.setCapPreciseTurn(
-                        Princeps.settings().humanizedLook.value
-                                && Princeps.settings().humanizedLookCapBreakTurn.value
-                                && breaking && !jumpLaunch);
+                        Princeps.settings().humanizedLook.value && !jumpLaunch
+                                && ((breaking && Princeps.settings().humanizedLookCapBreakTurn.value)
+                                        || (placing && Princeps.settings().humanizedLookCapPlaceTurn.value)));
                 // A plain FALL/descent (airborne, sinking, not a jump launch, not gliding, not a precise action):
                 // route the look through the smooth rate-limited turn so it eases toward the (now stabilized) travel
                 // heading + a downward pitch instead of snapping/spinning. Jump ascents (rising) and precise airborne
@@ -336,7 +370,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                     ctx.player().yRotO = prevRotation.getYaw();
                     this.prevRotation = null;
                 }
-                // The target is done being used for this game tick, so it can be invalidated
+                // The target is done being used for this game tick, so it can be invalidated -- and the head-speed
+                // override rides on exactly this lifetime, so whoever wants it has to ask again next tick.
+                turnTicksOverride = 0.0;
                 this.target = null;
                 this.appliedRotation = null;
                 break;
@@ -414,7 +450,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         }
         // Only plain CLIENT-mode cruise targets; precise/break aims keep their exact facing.
         if (this.target == null || this.target.mode != Target.Mode.CLIENT
-                || this.target.precise || this.target.breakIntent) {
+                || this.target.precise || this.target.intent == AimIntent.BREAK) {
             return false;
         }
         if (this.jitterStraightTicks < JITTER_MIN_STRAIGHT_TICKS) {
@@ -461,6 +497,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         final ServerboundMovePlayerPacket packet = (ServerboundMovePlayerPacket) event.getPacket();
         if (packet instanceof ServerboundMovePlayerPacket.Rot || packet instanceof ServerboundMovePlayerPacket.PosRot) {
+            this.rotationBeforeThat = this.rotationBeforeLast;
+            this.rotationBeforeLast = this.previousServerRotation;
+            this.previousServerRotation = this.serverRotation;
             this.serverRotation = new Rotation(packet.getYRot(0.0f), packet.getXRot(0.0f));
         }
     }
@@ -468,6 +507,9 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
     @Override
     public void onWorldEvent(WorldEvent event) {
         this.serverRotation = null;
+        this.previousServerRotation = null;
+        this.rotationBeforeLast = null;
+        this.rotationBeforeThat = null;
         this.target = null;
         this.appliedRotation = null;
         this.elytraYawResidual = 0.0f;
@@ -484,6 +526,121 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             ctx.player().setYRot(actual.getYaw());
         }
     }
+
+    @Override
+    public Optional<Rotation> getRotationTheServerHas() {
+        return Optional.ofNullable(this.serverRotation);
+    }
+
+    @Override
+    public Optional<Rotation> getRotationTheServerWillUse() {
+        final Rotation now = this.serverRotation;
+        final Rotation before = this.previousServerRotation;
+        if (now == null || before == null) {
+            return Optional.empty();
+        }
+        // Kopf-Yaw (eine Sendung alt) plus aktueller Pitch -- genau die Mischung, die getViewVector auf dem
+        // Server liefert. Siehe ILookBehavior fuer die Messzeile, aus der das abgelesen ist.
+        return Optional.of(new Rotation(before.getYaw(), now.getPitch()));
+    }
+
+    @Override
+    public java.util.List<Rotation> getRotationsTheServerMightUse() {
+        final Rotation now = this.serverRotation;
+        if (now == null) {
+            return java.util.Collections.emptyList();
+        }
+        // ALLE JUENGSTEN KOPF-KANDIDATEN, nicht nur einer -- weil der Verzug nicht fest bei eins liegt.
+        //
+        // GEMESSEN, basalt 20260807-2308, Zelle 114,-59,74: der Client hatte denselben Yaw zweimal gesendet, die
+        // Ein-Schritt-Mischung war also gleich der aktuellen Rotation und die Pruefung fand keinen Widerspruch.
+        // Mit dieser Rotation (129,268 / 41,694) waere das Ergebnis auch richtig gewesen -- |y| = 0,665 gegen
+        // |x| = 0,578, also down, also Kolben nach up. Der Server hat trotzdem east gesetzt, also einen Yaw
+        // benutzt, der noch weiter zurueckliegt.
+        //
+        // Statt die Verzugstiefe zu erraten oder auf Ruhe zu warten (das kostete 84 -> 31 Bloecke pro Minute),
+        // werden einfach alle jungen Kandidaten geprueft: der Klick geht nur raus, wenn die Platzierung unter
+        // JEDEM von ihnen den gewollten Block ergibt. Bei ruhigem Zielen sind sie ohnehin fast gleich und die
+        // Pruefung kostet nichts; nur wenn die jüngste Blickgeschichte eine Richtungsgrenze ueberquert, wartet
+        // der Klick einen Tick -- und genau dann ist er auch nicht vorhersagbar.
+        final java.util.List<Rotation> out = new java.util.ArrayList<>(HEAD_LAG_CANDIDATES);
+        for (Rotation yawSource : new Rotation[]{now, this.previousServerRotation, this.rotationBeforeLast,
+                this.rotationBeforeThat}) {
+            if (yawSource != null) {
+                out.add(new Rotation(yawSource.getYaw(), now.getPitch()));
+            }
+        }
+        return out;
+    }
+
+    /** Wie weit zurueck ein Kopf-Yaw stammen kann. Vier Sendungen, also drei Ticks Verzug -- gemessen wurde
+     *  einer, beobachtet wurde mehr als einer, und jeder weitere Kandidat kostet nur eine Simulation. */
+    private static final int HEAD_LAG_CANDIDATES = 4;
+
+    @Override
+    public boolean rotationHasSettled() {
+        final Rotation now = this.serverRotation;
+        final Rotation before = this.previousServerRotation;
+        final Rotation earlier = this.rotationBeforeLast;
+        if (now == null || before == null || earlier == null) {
+            return false;   // noch keine drei gesendeten Rotationen: nichts, worueber man Ruhe behaupten koennte
+        }
+        // DREI, NICHT ZWEI -- und der dritte kostet einen Tick und rettet die Orientierung.
+        //
+        // Zwei genuegen fuer den KOERPER: dann ist yRot bei der Ausfuehrung dieselbe wie beim Eintreffen des
+        // Klicks. Die Platzierungsrichtung liest vanilla aber nicht aus yRot, sondern ueber
+        // LivingEntity.getViewYRot aus yHeadRot -- und der Kopf hinkt dem Koerper einen Tick hinterher, weil er
+        // im Entity-Tick nachgezogen wird und nicht beim Verarbeiten des Bewegungspakets.
+        //
+        // GEMESSEN, basalt 20260807-214131, Zelle 111,-59,121, gewollt sticky_piston[facing=up]. Die
+        // Server-Thread-Zeile im Moment der Ausfuehrung:
+        //     yaw=127,616  pitch=43,717   headYaw=85,819  viewYRot=85,819  viewXRot=43,717
+        // Der Koerper stand also schon auf 127,6 -- genau dem Wert, den der Client geprueft hatte --, der Kopf
+        // aber noch auf 85,8. Aus der Mischung (Kopf-Yaw, neuer Pitch) folgt |x|=0,7208 gegen |y|=0,6912, also
+        // west, also Kolben nach east. Mit dem Koerper-Yaw waere es |y|=0,6912 gegen |x|=0,5724 gewesen: down,
+        // also up, also richtig. Ein einziger Tick Kopfverzug, und der Block steht quer.
+        //
+        // Drei gleiche gesendete Rotationen heissen: der Kopf hatte einen ganzen Tick Zeit, den Koerper
+        // einzuholen. Danach sind yRot, yHeadRot und die gepruefte Rotation dasselbe.
+        return sameAngles(now, before) && sameAngles(before, earlier);
+    }
+
+    /**
+     * Aendert sich der Blick noch SO STARK, dass es die dominante Achse kippen koennte?
+     *
+     * <p>DIE ERSTE FASSUNG VERLANGTE BIT-GLEICHHEIT, und das war ein Denkfehler mit Messbeleg. Der Blick kommt
+     * nie exakt zur Ruhe: der Look-Prozessor faehrt die letzte Annaeherung aus, gemessen im basalt-Lauf
+     * 20260807-2154 als {@code look=319.96,17.95} gefolgt von {@code 17.98} -- drei Hundertstel Grad Restdrift
+     * pro Tick. Die Bedingung traf damit NIE zu, der Bauer meldete den Klick gar nicht erst an, und der Bau stand
+     * ab Zelle 184 endlos still. Nicht einmal der Rueckhalte-Zaehler sah es, weil zum Zurueckhalten nie ein Klick
+     * angemeldet wurde: Stillstand ohne Spur, die schlechteste Sorte.
+     *
+     * <p>Die richtige Frage ist nicht "unveraendert", sondern "veraendert sich um weniger, als kippen kann". Der
+     * Schaden, gegen den diese Bedingung existiert, war ein Kopfverzug von 85,8 auf 127,6 Grad -- zweiundvierzig
+     * Grad. Drei Hundertstel sind es nicht. Ein halbes Grad Toleranz verschiebt die waagerechten Komponenten des
+     * Blickvektors um rund ein Prozent und liegt damit weit unter der Dominanz-Marge von fuenfzehn Prozent, die
+     * ein angenommener Zielpunkt ohnehin einhalten muss.
+     *
+     * <p>Yaw wird ueber die kuerzeste Distanz verglichen, nicht roh: der Client wickelt ihn nie zurueck und
+     * sammelt ueber einen Lauf bis -630 Grad, ein roher Vergleich meldete also Bewegung, wo keine ist.
+     */
+    private static boolean sameAngles(Rotation a, Rotation b) {
+        return Math.abs(Rotation.normalizeYaw(a.getYaw() - b.getYaw())) <= SETTLE_TOLERANCE_DEGREES
+                && Math.abs(a.getPitch() - b.getPitch()) <= SETTLE_TOLERANCE_DEGREES;
+    }
+
+    /**
+     * Wie viel Restbewegung eine "ruhige" Rotation haben darf, in Grad.
+     *
+     * <p>Ein halbes Grad. Die Restdrift des Look-Prozessors betraegt gemessen drei Hundertstel je Tick, der
+     * Schadensfall betrug zweiundvierzig Grad -- dazwischen ist viel Platz, und diese Zahl liegt naeher an der
+     * Drift als am Schaden.
+     */
+    private static final float SETTLE_TOLERANCE_DEGREES = 0.5F;
+
+    private Rotation previousServerRotation;
+    private Rotation rotationBeforeLast;
+    private Rotation rotationBeforeThat;
 
     public Optional<Rotation> getEffectiveRotation() {
         if (Princeps.settings().freeLook.value) {
@@ -545,6 +702,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         private double tremorPitch;
         private boolean precise;
         private boolean capPreciseTurn; // when set, speed-limit the turn even during a precise BREAK (mining arc)
+        private boolean deterministicPrecise; // explicit V3 target: no sampled tremor or curve variance reaches it
         private boolean smoothAirborne; // a plain fall/descent — use the smooth rate-limited turn, not the exact aim
         // Bell-curve mining aim state (humanizedLookAimCurve): current angular speed of the arc + the tick stamps
         // that detect "a fresh arc started" (reset speed to 0 = ease-in) and guard the once-per-tick advance.
@@ -585,6 +743,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             this.tremorPitch = source.tremorPitch;
             this.precise = source.precise;
             this.capPreciseTurn = source.capPreciseTurn;
+            this.deterministicPrecise = source.deterministicPrecise;
             this.smoothAirborne = source.smoothAirborne;
             this.curveVel = source.curveVel;
             this.tickCount = source.tickCount;
@@ -599,6 +758,10 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
         final void setCapPreciseTurn(final boolean capPreciseTurn) {
             this.capPreciseTurn = capPreciseTurn;
+        }
+
+        final void setDeterministicPrecise(final boolean deterministicPrecise) {
+            this.deterministicPrecise = deterministicPrecise;
         }
 
         final void setSmoothAirborne(final boolean smoothAirborne) {
@@ -624,9 +787,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
             float desiredYaw = rotation.getYaw();
             float desiredPitch = rotation.getPitch();
 
-            // In other words, the target doesn't care about the pitch, so it used playerRotations().getPitch()
-            // and it's safe to adjust it to a normal level
-            if (desiredPitch == prev.getPitch()) {
+            // "The caller doesn't care about the pitch, it just passed playerRotations().getPitch() through" is a
+            // GUESS, and equal pitches are the only evidence for it. That evidence is worthless for an aim that means
+            // its pitch, because an arrived aim ALWAYS has desiredPitch == prev: the guess is therefore wrong exactly
+            // when the aim is right. It cost a whole excavation. The entry aim looks straight down; the moment the
+            // head reached 90 degrees this rewrote the PREDICTED pitch into the walking band (and the profile's
+            // 180-degree nudge step makes that one hop, not a drift), so every predicted reach ray flew out over the
+            // roof and missed. The break site only publishes its target once that prediction hits, so the target was
+            // never published, the head never turned, and the bot stood on a block it was correctly aiming at for the
+            // rest of the run. See mayNudgePitchToLevel: the nudge belongs to pitch-agnostic CRUISING only.
+            if (mayNudgePitchToLevel(forceExact, this.precise, desiredPitch, prev.getPitch())) {
                 desiredPitch = nudgeToLevel(desiredPitch);
             }
 
@@ -644,12 +814,14 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 // nonzero so the mid-interaction noise floor never collapses to exactly 0.
                 final double tremorScale = this.precise
                         ? Math.max(0.0, Princeps.settings().humanizedBreakTremorScale.value) : 1.0;
-                desiredYaw += (float) (this.tremorYaw * tremorScale);
-                desiredPitch += (float) (this.tremorPitch * tremorScale);
+                if (!this.deterministicPrecise) {
+                    desiredYaw += (float) (this.tremorYaw * tremorScale);
+                    desiredPitch += (float) (this.tremorPitch * tremorScale);
+                }
 
                 final boolean cruising = !this.precise && !airborne;
-                // A SMOOTH, tightly rate-limited turn is used for cruising, for the base-hunt break-corner arc
-                // (capPreciseTurn), and for a plain fall/descent (smoothAirborne). In all three the SENT head
+                // A SMOOTH, tightly rate-limited turn is used for cruising, declared break/place interaction arcs
+                // (capPreciseTurn), and a plain fall/descent (smoothAirborne). In all three the SENT head
                 // movement is hard-capped at humanizedLookMaxCruiseYaw deg horizontally / MaxCruisePitch deg
                 // vertically per tick, so following the (blocky) path and easing DOWN into a drop look super smooth
                 // instead of snapping. The pursuit octant feet-steer keeps 100% node coverage under the slow head
@@ -664,7 +836,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                         desiredYaw += (float) (this.ouYaw * wanderScale);
                         desiredPitch += (float) (this.ouPitch * wanderScale);
                     }
-                    // BELL-CURVE mining aim: this.precise inside this branch implies the capPreciseTurn break path
+                    // BELL-CURVE interaction aim: this.precise inside this branch implies a declared break/place path
                     // (cruising and smoothAirborne both require !precise). Instead of jumping straight to the flat
                     // rate limit (a 0->9 velocity kick in one tick — the "flick"), the head eases IN, rides the
                     // mode's peak, and eases OUT into the block. The dig itself still only fires once the live
@@ -691,7 +863,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                             this.calculateMouseMove(prev.getPitch(), prev.getPitch() + stepP)
                     ).clamp();
                 }
-                // Exact instant aim (un-capped precise break, jump launch, elytra): the crosshair/heading must be
+                // Exact instant aim (an interaction whose curve is disabled, jump launch, elytra): the heading must be
                 // exact THIS tick. Only a lone superhuman snap is clamped by the 70°/tick hard cap — a re-aim 90°+
                 // to the side or a mid-air retarget flip — so it spreads over a few ticks (the dig fires once
                 // isLookingAt catches up), while normal exact aims (<= the ballistic max) pass through unchanged.
@@ -703,8 +875,10 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
 
             // forceExact prediction, or humanized-look off: face the EXACT target with NO tremor so reach/place
             // predictions are byte-identical to what the precise apply lands on. (legacy offsets are 0 while humanized.)
-            desiredYaw += this.randomYawOffset;
-            desiredPitch += this.randomPitchOffset;
+            if (!this.deterministicPrecise) {
+                desiredYaw += this.randomYawOffset;
+                desiredPitch += this.randomPitchOffset;
+            }
 
             return new Rotation(
                     this.calculateMouseMove(prev.getYaw(), desiredYaw),
@@ -746,14 +920,16 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
                 this.lastCurveDesiredYaw = desiredYaw;
                 this.lastCurveDesiredPitch = desiredPitch;
                 final double peak = aimCurvePeak();
-                double v = aimCurveNextVel(this.curveVel, errMag, peak);
+                double v = aimCurveNextVel(this.curveVel, errMag, peak, aimCurveAccel());
                 // Per-tick ABSOLUTE jitter, magnitude 0.01..0.1 deg (user spec): the plateau BREATHES around the
                 // mode value (9 -> 8.90..9.10) instead of stagnating on the identical number tick after tick, and
                 // the ease-out's mini steps are never numerically the same twice. Soft ceiling = mode + 0.1 (the
                 // user's own example: 9.09 is fine at mode 9). Also spreads the first arc step (~peak/3 +- jitter),
                 // removing the constant-first-step histogram spike flagged in the mining-session audit.
-                final double jitterMag = 0.01 + this.curveRng.nextDouble() * 0.09;
-                v += this.curveRng.nextBoolean() ? jitterMag : -jitterMag;
+                if (!this.deterministicPrecise) {
+                    final double jitterMag = 0.01 + this.curveRng.nextDouble() * 0.09;
+                    v += this.curveRng.nextBoolean() ? jitterMag : -jitterMag;
+                }
                 this.curveVel = Math.max(0.3, Math.min(v, peak + 0.1));
             }
             final double step = Math.min(errMag, this.curveVel);
@@ -883,7 +1059,7 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
          * the natural WALK-GAZE band (default [6, 12] degrees downward — user spec) applies instead. Only ever runs
          * for pitch-agnostic targets (cruising), so break/place/pearl/elytra/drop aims are never fought.
          */
-        private float nudgeToLevel(float pitch) {
+private float nudgeToLevel(float pitch) {
             float lo = -20.0f, hi = 10.0f;
             if (Princeps.settings().humanizedLook.value) {
                 lo = Princeps.settings().humanizedWalkPitchMin.value.floatValue();
@@ -963,14 +1139,18 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         public final Mode mode;
         /** True when the movement needs an EXACT facing (break/place/bridge) — humanized wander is bypassed. */
         public final boolean precise;
-        /** True when this precise aim targets a block about to be BROKEN — eligible for the bell-curve arc. */
-        public final boolean breakIntent;
+        /** The mutually-exclusive interaction this precise aim prepares. */
+        public final AimIntent intent;
+        /** True only for V3 execution: sampled look variance must not affect this target. */
+        public final boolean deterministicIntent;
 
-        public Target(Rotation rotation, Mode mode, boolean precise, boolean breakIntent) {
+        public Target(Rotation rotation, Mode mode, boolean precise, AimIntent intent,
+                      boolean deterministicIntent) {
             this.rotation = rotation;
             this.mode = mode;
             this.precise = precise;
-            this.breakIntent = breakIntent;
+            this.intent = intent;
+            this.deterministicIntent = deterministicIntent;
         }
 
         enum Mode {
@@ -1013,12 +1193,87 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
         }
     }
 
-    /** The bell-curve mode's peak head-turn speed (deg/tick): 0 = superSmooth (5), 1 = standard (9), 2 = fast (20). */
+    /**
+     * Sim-calibrated bell-curve rows: {turnTicks, peakDegPerTick, accelDegPerTick2}. Each completes a 90-degree
+     * turn in EXACTLY {@code turnTicks} game ticks with a monotonic accelerate->plateau->decelerate bell (verified
+     * in navbench/aim_curve_sim.py). The tick count is KNIFE-EDGE (peak 33 -> 4 ticks, 34 -> 3) — do not replace
+     * this table with a smooth formula. The 5 canonical modes: 2 Superfast, 3 Fast, 4 Balanced, 8 Smooth, 12 SuperSmooth.
+     */
+    private static final double[][] TURN_CAL = {
+            {2.0, 45.0, 45.0},
+            {3.0, 34.0, 22.7},
+            {4.0, 26.0, 13.0},
+            {8.0, 15.5, 3.9},
+            {12.0, 11.5, 1.9},
+    };
+
+    /** Interpolate column {@code col} (1 = peak, 2 = accel) of {@link #TURN_CAL} at {@code turnTicks}, clamped to
+     *  the table ends. Exact rows (2/3/4/8/12) return their calibrated value verbatim. */
+    private static double turnCal(final double turnTicks, final int col) {
+        if (turnTicks <= TURN_CAL[0][0]) return TURN_CAL[0][col];
+        final int last = TURN_CAL.length - 1;
+        if (turnTicks >= TURN_CAL[last][0]) return TURN_CAL[last][col];
+        for (int i = 1; i < TURN_CAL.length; i++) {
+            if (turnTicks <= TURN_CAL[i][0]) {
+                final double t0 = TURN_CAL[i - 1][0], t1 = TURN_CAL[i][0];
+                final double f = (turnTicks - t0) / (t1 - t0);
+                return TURN_CAL[i - 1][col] + f * (TURN_CAL[i][col] - TURN_CAL[i - 1][col]);
+            }
+        }
+        return TURN_CAL[last][col];
+    }
+
+    /** Peak head-turn speed (deg/tick) for the current {@code humanizedLookAimCurveTurnTicks} mode, times the fine
+     *  peakScale (1.0 keeps the exact per-mode tick count). */
     static double aimCurvePeak() {
-        final int mode = Princeps.settings().humanizedLookAimCurveMode.value;
-        final double base = mode <= 0 ? 5.0 : mode >= 2 ? 20.0 : 9.0;
-        // Fine per-profile multiplier so the mining-aim speed can be dialed between the discrete modes.
-        return base * Math.max(0.1, Princeps.settings().humanizedLookAimCurvePeakScale.value);
+        final double ticks = aimCurveTurnTicks();
+        return turnCal(ticks, 1) * Math.max(0.1, Princeps.settings().humanizedLookAimCurvePeakScale.value);
+    }
+
+    /**
+     * Ticks-to-90-degrees for this tick's turn: whatever asked for a specific head speed this tick, else the global
+     * setting.
+     *
+     * <p>Set by {@link #requestAimCurveTurnTicks(double)} and cleared in the same POST phase that invalidates the
+     * look target, so an override lives exactly one game tick. That is deliberate: the alternative — writing the
+     * global setting on build start and restoring it on stop — leaves the owner walking at build speed for ever if
+     * any exit path is missed, and this engine has already been bitten once by a value that outlived its owner.
+     * Nothing to restore means nothing to leak.
+     */
+    private static double aimCurveTurnTicks() {
+        double override = turnTicksOverride;
+        return Math.max(1.0, override > 0.0 ? override : Princeps.settings().humanizedLookAimCurveTurnTicks.value);
+    }
+
+    /** Ask for a specific head-turn speed for THIS tick only. Re-assert it every tick for as long as it should
+     *  apply; stop asserting it and the global setting takes over on the next one. */
+    public static void requestAimCurveTurnTicks(double ticksPerNinetyDegrees) {
+        turnTicksOverride = ticksPerNinetyDegrees;
+    }
+
+    /** Zero means "nobody asked this tick". Static because {@link #aimCurvePeak()} and {@link #aimCurveAccel()} are,
+     *  and they already read global mutable settings the same way. */
+    private static double turnTicksOverride;
+
+    /** Ease-in/out acceleration (deg/tick^2) paired with {@link #aimCurvePeak()} so the bell shape (and the exact
+     *  ticks-per-90deg) hold; scaled by the same peakScale so the profile stays self-consistent. */
+    static double aimCurveAccel() {
+        final double ticks = aimCurveTurnTicks();
+        return turnCal(ticks, 2) * Math.max(0.1, Princeps.settings().humanizedLookAimCurvePeakScale.value);
+    }
+
+    /**
+     * Whether the pitch-agnostic walking nudge may touch this aim at all.
+     *
+     * <p>Static and free of game state so the rule itself can be pinned by a test: the two ways an aim declares
+     * that its pitch is load-bearing are an exact prediction ({@code forceExact}, which reach and placement
+     * planning ray-trace against) and a precise interaction ({@code precise}, a break/place/bridge facing). In
+     * both, moving the pitch towards the walking band changes where the aim points, and it does so only after
+     * the aim has arrived, which makes the damage invisible until something downstream stalls forever.
+     */
+    static boolean mayNudgePitchToLevel(boolean forceExact, boolean precise, float desiredPitch,
+                                        float prevPitch) {
+        return !forceExact && !precise && desiredPitch == prevPitch;
     }
 
     /**
@@ -1034,13 +1289,17 @@ public final class LookBehavior extends Behavior implements ILookBehavior {
      * ceiling is never exceeded, and tremor-sized (<=0.5 deg) corrections step sub-degree so the crosshair never
      * leaves the block face mid-break.
      */
-    static double aimCurveNextVel(final double vPrev, final double errMag, final double peakDegPerTick) {
+    static double aimCurveNextVel(final double vPrev, final double errMag, final double peakDegPerTick,
+                                  final double accelDegPerTick2) {
         final double peak = Math.max(0.5, peakDegPerTick);
-        final double accel = Math.max(0.5, peak / 3.0);
-        final double gain = 0.45;
-        final double tailMin = Math.max(0.9, peak / 8.0);
+        final double accel = Math.max(0.1, accelDegPerTick2);
+        // Ease-IN: accelerate by `accel`/tick up to the mode peak (the fast rise of the bell).
         final double rise = Math.min(vPrev + accel, peak);
-        final double tail = Math.max(tailMin, errMag * gain);
-        return Math.min(rise, tail);
+        // Ease-OUT: a CONSTANT-deceleration envelope v <= sqrt(2*accel*err). Unlike the old proportional tail
+        // (which dragged the last ~18deg over 5-6 ticks and made every mode feel washed-out), this decel scales
+        // WITH the tick budget, so a 90deg turn lands in exactly the mode's turnTicks. The caller clamps to
+        // [0.3, peak+0.1], so the ~0.3 floor prevents an end-crawl.
+        final double stop = Math.sqrt(2.0 * accel * Math.max(0.0, errMag));
+        return Math.min(rise, stop);
     }
 }

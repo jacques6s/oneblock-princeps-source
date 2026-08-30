@@ -182,16 +182,32 @@ public final class SurvivalBehavior extends Behavior {
         // "wants to mine and eat" glitch. Defer to a walking gap between blocks. (And once a consume DOES begin,
         // InputOverrideHandler pauses mining for its whole duration, so the two never overlap.) The totem above
         // still runs, so survival isn't compromised while a dig is briefly in progress.
-        if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
-                || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT)) {
-            return;
-        }
+        // A GAP THAT NEVER COMES IS NOT A GAP. The rule above deferred both to "a walking gap between blocks",
+        // and for a builder that walks between placements there is one every few seconds. The excavator has none:
+        // it stands in its tunnel and swings continuously, and the client's own fixes of 20.08. removed the last
+        // accidental pauses -- no tool flapping, no crouch, no stalls. A user on 0.3.201 reported the consequence
+        // exactly: it never repaired the pickaxe and it never ate. Both were waiting for an idle moment that a
+        // working digger does not have.
+        //
+        // Hunger and a dying tool do not wait for convenience. So the cost is paid instead of avoided: if an eat
+        // or a repair genuinely starts, the break in progress is stopped cleanly and its progress is lost. One
+        // block's progress per meal is a trade worth making; starving with a full stack of steak is not. Once a
+        // consume HAS begun, InputOverrideHandler pauses mining for its whole duration, so the two still never
+        // overlap -- this only changes which of them yields.
+        boolean breakingRightNow = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
+                || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT);
 
         if (Princeps.settings().survivalAutoEat.value && tryEat(p)) {
+            if (breakingRightNow) {
+                princeps.getInputOverrideHandler().getBlockBreakHelper().stopBreakingBlock();
+            }
             return;
         }
         if (Princeps.settings().survivalAutoRepair.value) {
             maybeStartRepair(p);
+            if (breakingRightNow && this.repairing) {
+                princeps.getInputOverrideHandler().getBlockBreakHelper().stopBreakingBlock();
+            }
         }
     }
 
@@ -514,15 +530,31 @@ public final class SurvivalBehavior extends Behavior {
         return false;
     }
 
-    /** Prefer an empty slot; on a full hotbar borrow 1..7 and restore it after the session. */
+    /**
+     * Prefer an empty slot; on a full hotbar borrow one and restore it after the session.
+     *
+     * <p>NEVER SLOT 7, AND THAT IS NOT A PREFERENCE. {@code InventoryBehavior.throwaway} hard-codes hotbar 7 as the
+     * staging slot it swaps a placeable stack into and then selects, so on a full hotbar this method used to hand
+     * the borrow the one slot another behaviour is actively writing. A builder or excavator always has a full
+     * hotbar -- pickaxes, the area tool, blocks -- so "on a full hotbar" was its normal state, not an edge case.
+     *
+     * <p>Measured in the owner's 0.3.210 session (autodig-trace-20260821-165408): hotbar 7 carried Stone for 136
+     * ticks and a Golden Apple for 42, and the apple appeared at no other slot. The owner described it exactly --
+     * something kept putting an apple where the stone blocks are. What it cost is worse than the flicker: the eat
+     * never completed once in six attempts (32 ticks are needed; the longest run was 21, three lasted a single
+     * tick), while {@code ownsInventory()} correctly made the excavator stand down for every one of those borrows.
+     * So the bot paid the price of the meal and never got the meal.
+     *
+     * <p>Slots 1..6 are borrowed and restored exactly as before, so nothing about the borrow contract changes.
+     */
     private int borrowableHotbarSlot(LocalPlayer p) {
         final Inventory inv = p.getInventory();
-        for (int i = 1; i <= 7; i++) {
+        for (int i = 1; i <= 6; i++) {
             if (inv.getItem(i).isEmpty()) {
                 return i;
             }
         }
-        return inv.getSelectedSlot() == 7 ? 6 : 7;
+        return inv.getSelectedSlot() == 6 ? 5 : 6;
     }
 
     private void restoreBorrowedSlot(LocalPlayer p) {

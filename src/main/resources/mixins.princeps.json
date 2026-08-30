@@ -9,11 +9,14 @@
   },
   "priority": 2000,
   "client": [
+    "MixinAbstractSignEditScreen",
+    "MixinBlockItem",
     "MixinChunkArray",
     "MixinClientChunkProvider",
-    "MixinClientPlayerEntity",
     "MixinClientPlayNetHandler",
+    "MixinClientPlayerEntity",
     "MixinCommandSuggestionHelper",
+    "MixinDeltaTrackerTimer",
     "MixinEntity",
     "MixinEntityRenderManager",
     "MixinFireworkRocketEntity",
@@ -32,5 +35,7 @@
     "MixinWorldRenderer"
   ],
   "mixins": [
+      "MixinServerGamePacketListenerImpl",
+      "MixinServerPlayerGameMode"
   ]
 }

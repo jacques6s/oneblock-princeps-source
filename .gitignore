@@ -2,6 +2,7 @@
 **/*.swp
 
 run/
+run-server/
 autotest/
 dist/
 volderyarn/
@@ -45,3 +46,7 @@ libs/java-objc-bridge-1.1.jar
 
 mapping
 __pycache__/
+run/logs/build-trace-*.log
+
+# Per-worktree Gradle home used by the bench scripts; never part of a commit.
+.gradle-user/

@@ -146,13 +146,28 @@ public class ToolSet {
             return player.getInventory().getSelectedSlot();
         }
 
-        int best = 0;
+        BlockState blockState = b.defaultBlockState();
+        // THE AREA TOOL IS NEVER AN AUTOMATIC ANSWER. It breaks a 3x3 plane, so choosing it to clear a path takes
+        // out the block the bot is about to stand on; see AreaTool for the measurement that cost an afternoon.
+        // Two passes rather than one condition: if the area pickaxe is the ONLY tool a player carries, mining by
+        // hand instead would be a far worse answer than mining wide.
+        int best = pickBestSlot(blockState, preferSilkTouch, false);
+        if (best < 0) {
+            best = pickBestSlot(blockState, preferSilkTouch, true);
+        }
+        return best < 0 ? 0 : best;
+    }
+
+    private int pickBestSlot(BlockState blockState, boolean preferSilkTouch, boolean allowAreaTool) {
+        int best = -1;
         double highestSpeed = Double.NEGATIVE_INFINITY;
         int lowestCost = Integer.MIN_VALUE;
         boolean bestSilkTouch = false;
-        BlockState blockState = b.defaultBlockState();
         for (int i = 0; i < 9; i++) {
             ItemStack itemStack = player.getInventory().getItem(i);
+            if (!allowAreaTool && AreaTool.is(itemStack)) {
+                continue;
+            }
             if (!Princeps.settings().useSwordToMine.value && itemStack.getItem().components().has(DataComponents.WEAPON)) {
                 continue;
             }

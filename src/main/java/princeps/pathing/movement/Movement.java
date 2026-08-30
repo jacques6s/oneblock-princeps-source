@@ -114,6 +114,28 @@ public abstract class Movement implements IMovement, MovementHelper {
     }
 
     /**
+     * Look-gate tolerances for firing a facing-critical jump. Yaw must be within {@link #LOOK_GATE_JUMP_YAW}
+     * of the heading; pitch is lenient ({@code moveTowards} pins pitch near the current pitch). Chosen ABOVE
+     * the humanization noise floor (tremor &lt;0.5°, cruise micro-jitter &le;0.80°) so the gate can actually
+     * latch, and loose enough (~one bell-curve turn tick) that a normal, already-aligning approach passes
+     * immediately — only a badly mis-oriented arrival is held.
+     */
+    protected static final float LOOK_GATE_JUMP_YAW = 8.0f;
+    protected static final float LOOK_GATE_JUMP_PITCH = 20.0f;
+
+    /**
+     * True when the server-side rotation has converged on this tick's look target (within tolerance), or when
+     * the movement demands no facing this tick. Reads {@code ctx.playerRotations()}, which resolves to the
+     * packet-captured {@code serverRotation} under freeLook/SILENT mode (NOT the stale visible rotation), so
+     * it is correct in both look modes. Used to hold facing-critical jumps until the humanized turn arrives.
+     */
+    protected boolean lookConverged(MovementState state, float yawTol, float pitchTol) {
+        return state.getTarget().getRotation()
+                .map(target -> ctx.playerRotations().isCloseTo(target, yawTol, pitchTol))
+                .orElse(true);
+    }
+
+    /**
      * Handles the execution of the latest Movement
      * State, and offers a Status to the calling class.
      *
@@ -123,7 +145,33 @@ public abstract class Movement implements IMovement, MovementHelper {
     public MovementStatus update() {
         ctx.player().getAbilities().flying = false;
         currentState = updateState(currentState);
-        if (MovementHelper.isLiquid(ctx, ctx.playerFeet()) && ctx.player().position().y < dest.y + 0.6) {
+        // DO NOT SWIM OUT OF A CORRIDOR YOU ARE MEANT TO STAND IN. This is the generic anti-drowning reflex: feet in
+        // liquid, so hold JUMP until the body is 0.6 above the destination. For an excavation it is precisely wrong,
+        // and the arithmetic is the proof. Run e71652ca: the corridor step had dest.y = -51, so this let go at
+        // -50.4 -- and the bot was found parked at y = -50.282, floating, for 1191 consecutive ticks.
+        //
+        // Everything the digger needs dies at that moment, and all of it for the same reason: it is no longer ON
+        // anything. snakeReadyToSwing wants onGround, so no face is ever struck; MovementTraverse's bridge branch
+        // wants standingOnABlock, so the one licensed floor block can never be placed. A flooded band therefore ends
+        // the run even though the rock under the corridor was never gone -- only hidden under half a metre of water.
+        //
+        // A route that licensed wading through this cell has already judged it safe to have a body in (see
+        // WadeLicence, which names the two BODY cells of one corridor step and never the floor). Letting go of JUMP
+        // is all that is needed here: a player with no input sinks in water, so the body settles back down.
+        //
+        // AND THE LICENCE IS ABOUT A CELL, NOT ABOUT WHAT IS IN IT. That distinction is the difference between a
+        // slow corridor and a dead bot: a licence naming this cell says nothing about the fluid that arrived in it
+        // afterwards, and lava arrives the same way water does. Suppressing the climb-out for a licensed cell full
+        // of LAVA would take away the one reflex that saves the run. Every other reader of this licence asks the
+        // same water question (MovementHelper.getMiningDurationTicks, prepared below); this one must too.
+        final net.minecraft.world.level.block.state.BlockState atTheFeet =
+                BlockStateInterface.get(ctx, ctx.playerFeet());
+        final boolean mayStandInThisFluid =
+                MovementHelper.currentRouteWadeLicence(princeps).permitsWading(ctx.playerFeet())
+                        && MovementHelper.isWater(atTheFeet)
+                        && atTheFeet.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock;
+        if (MovementHelper.isLiquid(ctx, ctx.playerFeet()) && ctx.player().position().y < dest.y + 0.6
+                && !mayStandInThisFluid) {
             currentState.setInput(Input.JUMP, true);
         }
         if (ctx.player().isInWall()) {
@@ -136,7 +184,7 @@ public abstract class Movement implements IMovement, MovementHelper {
                 princeps.getLookBehavior().updateTarget(
                         rotation,
                         currentState.getTarget().hasToForceRotations(),
-                        currentState.getTarget().isBreakIntent()));
+                        currentState.getTarget().getAimIntent()));
         princeps.getInputOverrideHandler().clearAllKeys();
         currentState.getInputStates().forEach((input, forced) -> {
             princeps.getInputOverrideHandler().setInputForceState(input, forced);
@@ -172,12 +220,26 @@ public abstract class Movement implements IMovement, MovementHelper {
                 return false;
             }
             if (!MovementHelper.canWalkThrough(ctx, blockPos)) { // can't break air, so don't try
+                // ...and can't break water either. The search that produced this route priced this exact cell as a
+                // step through the water rather than as a wall (WadeLicence), so treating it as something to mine
+                // here would be the two-stroke the licences exist to prevent: a plan the driver refuses, a refusal
+                // that does not change the plan. Unlicensed cells fall through and behave exactly as before --
+                // including lava, which no licence ever names.
+                // Water only, and only where the block IS the water: a waterlogged stair also answers isWater and
+                // would be skipped here as "nothing to mine" while standing in the way as a wall.
+                final net.minecraft.world.level.block.state.BlockState inTheWay =
+                        BlockStateInterface.get(ctx, blockPos);
+                if (MovementHelper.currentRouteWadeLicence(princeps).permitsWading(blockPos)
+                        && MovementHelper.isWater(inTheWay)
+                        && inTheWay.getBlock() instanceof net.minecraft.world.level.block.LiquidBlock) {
+                    continue;
+                }
                 somethingInTheWay = true;
                 MovementHelper.switchToBestToolFor(ctx, BlockStateInterface.get(ctx, blockPos));
                 Optional<Rotation> reachable = RotationUtils.reachable(ctx, blockPos, ctx.playerController().getBlockReachDistance());
                 if (reachable.isPresent()) {
                     Rotation rotTowardsBlock = reachable.get();
-                    state.setTarget(new MovementState.MovementTarget(rotTowardsBlock, true, true));
+                    state.setTarget(MovementState.MovementTarget.forBreak(rotTowardsBlock));
                     if (ctx.isLookingAt(blockPos) || ctx.playerRotations().isReallyCloseTo(rotTowardsBlock)) {
                         state.setInput(Input.CLICK_LEFT, true);
                     }
@@ -187,9 +249,8 @@ public abstract class Movement implements IMovement, MovementHelper {
                 //i'm doing it anyway
                 //i dont care if theres snow in the way!!!!!!!
                 //you dont own me!!!!
-                state.setTarget(new MovementState.MovementTarget(RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
-                        VecUtils.getBlockPosCenter(blockPos), ctx.playerRotations()), true, true)
-                );
+                state.setTarget(MovementState.MovementTarget.forBreak(RotationUtils.calcRotationFromVec3d(
+                        ctx.playerHead(), VecUtils.getBlockPosCenter(blockPos), ctx.playerRotations())));
                 // don't check selectedblock on this one, this is a fallback when we can't see any face directly, it's intended to be breaking the "incorrect" block
                 // ...but only press once the aim has ARRIVED at the intended rotation (tremor-tolerant closeness —
                 // isLookingAt can never pass here, no visible face). With the bell-curve arc the aim sweeps over

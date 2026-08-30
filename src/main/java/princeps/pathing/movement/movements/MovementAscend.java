@@ -26,6 +26,8 @@ import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementState;
+// Imported, never qualified: Movement's `princeps` field shadows the package root inside this class.
+import princeps.process.builder.BuildTrace;
 import princeps.utils.BlockStateInterface;
 import com.google.common.collect.ImmutableSet;
 import java.util.Set;
@@ -70,6 +72,11 @@ public class MovementAscend extends Movement {
         if (!MovementHelper.canWalkOn(context, destX, y, destZ, toPlace)) {
             additionalPlacementCost = context.costOfPlacingAt(destX, y, destZ, toPlace);
             if (additionalPlacementCost >= COST_INF) {
+                return COST_INF;
+            }
+            // We step up ONTO the block placed here — it must be a standable full cube (a schematic build would
+            // otherwise place its own fence/wall/thin block and then be unable to stand on it).
+            if (!context.placedBlockIsStandable(destX, y, destZ, toPlace)) {
                 return COST_INF;
             }
             if (!MovementHelper.isReplaceable(destX, y, destZ, toPlace, context.bsi)) {
@@ -176,9 +183,11 @@ public class MovementAscend extends Movement {
         BlockState jumpingOnto = BlockStateInterface.get(ctx, positionToPlace);
         if (!MovementHelper.canWalkOn(ctx, positionToPlace, jumpingOnto)) {
             ticksWithoutPlacement++;
-            if (MovementHelper.attemptToPlaceABlock(state, princeps, dest.below(), false, true) == PlaceResult.READY_TO_PLACE) {
+            if (MovementHelper.attemptToPlaceABlock(state, princeps, dest.below(), false, true, "ascend") == PlaceResult.READY_TO_PLACE) {
                 state.setInput(Input.SNEAK, true);
                 if (ctx.player().isCrouching()) {
+                    BuildTrace.intendWorldChange("ascend", dest.below().getX(), dest.below().getY(),
+                            dest.below().getZ(), "step up to " + dest.getX() + "," + dest.getY() + "," + dest.getZ());
                     state.setInput(Input.CLICK_RIGHT, true);
                 }
             }
@@ -209,6 +218,14 @@ public class MovementAscend extends Movement {
 
         double lateralMotion = xAxis * ctx.player().getDeltaMovement().z + zAxis * ctx.player().getDeltaMovement().x;
         if (Math.abs(lateralMotion) > 0.1) {
+            return state;
+        }
+
+        // Hold the step-up jump until the humanized look has converged on the heading, so we don't launch a
+        // stair/ascend jump while still mid-turn. moveTowards keeps us walking into the step, so the aim
+        // finishes within a tick or two and the jump then fires exactly as before.
+        if (Princeps.settings().lookGateBeforeJump.value
+                && !lookConverged(state, LOOK_GATE_JUMP_YAW, LOOK_GATE_JUMP_PITCH)) {
             return state;
         }
 

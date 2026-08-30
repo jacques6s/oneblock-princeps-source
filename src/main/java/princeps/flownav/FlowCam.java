@@ -32,9 +32,46 @@ public final class FlowCam {
     private FlowCam() {
     }
 
+    /**
+     * Suspends the view takeover while a caller needs vanilla to read the player's ACTUAL yRot/xRot.
+     *
+     * <p>THE BUG THIS EXISTS FOR, and it was silent and total. {@code BuilderProcess.simulatePlacement} answers "what
+     * block would land if I stood there and looked that way" by temporarily writing {@code setYRot}/{@code setXRot} and
+     * asking vanilla. But vanilla reads the look ONLY through {@code getViewYRot(1.0F)}, and
+     * {@code MixinClientPlayerEntity} injects at its HEAD and returns {@link #viewYaw} instead whenever
+     * {@link #ownsView}. FlowCam knows nothing about a hypothetical rotation, so it handed back the rotation actually
+     * applied this tick -- and every stance the builder ever "verified" was evaluated against wherever the camera
+     * happened to point, not against the candidate being tested.
+     *
+     * <p>The mixin's own comment says "At partialTicks == 1 this returns the exact applied rotation, so gameplay
+     * raycasts are byte-identical". True for gameplay, and precisely wrong for a simulation whose whole purpose is to
+     * substitute a different rotation.
+     *
+     * <p>How it was caught, from the full trace of run 526a0201 on cell 85,-59,67: of 219 distinct (yaw, pitch) pairs,
+     * <b>195 produced more than one outcome</b> -- (yaw=90, pitch=41) gave east 6x, south 34x, north 8x, and yaw=-90 and
+     * yaw=+90 both gave south. Vanilla's placement is a pure function of look and hit point, so one input cannot give
+     * three outputs: the logged rotation was not the rotation being used. That is also why "0 of 21924 attempts on the
+     * owner's own hand-derived face produced facing=west" said nothing about geometry -- the question was never asked.
+     *
+     * <p>Nested deliberately (a counter, not a flag): the builder can ask about a stance from inside another such
+     * question, and a boolean would be reset by the inner scope while the outer one still needed it.
+     */
+    private static int suspended;
+
+    /** Take vanilla's own rotation for the duration of a simulation. ALWAYS pair with {@link #resumeView} in a finally. */
+    public static void suspendView() {
+        suspended++;
+    }
+
+    public static void resumeView() {
+        if (suspended > 0) {
+            suspended--;
+        }
+    }
+
     /** Allocation-free per-frame guard: is this the player whose view we interpolate? */
     public static boolean ownsView(Object player) {
-        return player == owner;
+        return suspended == 0 && player == owner;
     }
 
     /** Called once per tick with the rotation actually applied this tick; shifts current -> previous. */

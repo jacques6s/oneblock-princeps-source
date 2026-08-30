@@ -20,11 +20,14 @@ package princeps.utils;
 import princeps.Princeps;
 import princeps.api.PrincepsAPI;
 import princeps.api.event.events.TickEvent;
+import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.IInputOverrideHandler;
 import princeps.api.utils.input.Input;
 import princeps.behavior.Behavior;
 import princeps.behavior.SurvivalBehavior;
+import princeps.pathing.movement.MovementHelper;
 import net.minecraft.client.player.KeyboardInput;
+import net.minecraft.client.player.LocalPlayer;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -44,13 +47,18 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
      */
     private final Map<Input, Boolean> inputForceStateMap = new HashMap<>();
 
+    /** The keys through which something is actively steering the body, as opposed to merely clicking or looking. */
+    private static final Input[] BODY_INPUTS = {
+            Input.MOVE_FORWARD, Input.MOVE_BACK, Input.MOVE_LEFT, Input.MOVE_RIGHT, Input.JUMP, Input.SNEAK,
+    };
+
     private final BlockBreakHelper blockBreakHelper;
     private final BlockPlaceHelper blockPlaceHelper;
 
     public InputOverrideHandler(Princeps princeps) {
         super(princeps);
         this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext());
-        this.blockPlaceHelper = new BlockPlaceHelper(princeps.getPlayerContext());
+        this.blockPlaceHelper = new BlockPlaceHelper(princeps);
     }
 
     /**
@@ -61,7 +69,67 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
      */
     @Override
     public final boolean isInputForcedDown(Input input) {
-        return input == null ? false : this.inputForceStateMap.getOrDefault(input, false);
+        if (input == null) {
+            return false;
+        }
+        // THE LEDGE GUARD. It has to sit on the READ, not on any of the writes -- see onlyTheCrouchIsHoldingUs.
+        if (input == Input.SNEAK && onlyTheCrouchIsHoldingUs()) {
+            return true;
+        }
+        return this.inputForceStateMap.getOrDefault(input, false);
+    }
+
+    /**
+     * True while the body is standing over a hole and only the crouch edge-clamp is keeping it out of it.
+     *
+     * <p>MEASURED, AutoMapArt run of 2026-08-18, 09:50:09, on a picture suspended at y=128. The bot bridges its own
+     * platform outward: {@link princeps.pathing.movement.movements.MovementTraverse} walks to the lip of the gap,
+     * holds {@link Input#SNEAK} so the clamp keeps the body on the block behind it, and asks
+     * {@code MovementHelper.attemptToPlaceABlock} for the bridge block. The last aim line of that run puts the body
+     * at z=46985.298 -- a 0.6-wide hitbox overlapping its support by 0.002 blocks, which is exactly where vanilla
+     * parks a CROUCHING player and nowhere a walking one can come to rest.
+     *
+     * <p>Then the crouch was taken away from underneath it, and three separate callers do that, none of them wrong
+     * on its own terms. {@link princeps.pathing.movement.Movement#update()} clears every forced key when a movement
+     * reports a complete status, and {@code UNREACHABLE} is complete -- which is what {@code attemptToPlaceABlock}
+     * returns the moment the cell under the bridge is a template pixel the bot has just run out of.
+     * {@link princeps.process.BuilderProcess} clears all keys and cancels the path on the tick it is paused, which
+     * is how the auction-house restock announces itself. Stopping a near-path does the same at the hand-over from
+     * approach to build. In that run the first two fired together, because both are triggered by the same event --
+     * the last block of a colour leaving the hotbar. The bot fell 61 blocks and the picture was over at 4635 of
+     * 16512 cells.
+     *
+     * <p>So the guard cannot live at any of those writes; a fourth one would reopen the hole. It lives on the read
+     * every consumer already goes through -- {@link PlayerMovementInput} asks this very method for the crouch -- and
+     * it speaks only when NOTHING else is driving the body. A movement that steps off a ledge on purpose always
+     * holds a movement key while it does so, so descending, falling and parkour never see this; a body with an empty
+     * input map standing over air is never doing that deliberately.
+     */
+    private boolean onlyTheCrouchIsHoldingUs() {
+        if (!nothingIsDrivingTheBody()) {
+            return false; // a movement is in charge, and it is allowed to step off
+        }
+        if (princeps.getPathingControlManager().mostRecentInControl().isEmpty()) {
+            return false; // nothing of ours is running this tick: the body belongs to the operator
+        }
+        LocalPlayer player = ctx.player();
+        if (player == null || !player.onGround()) {
+            return false; // already in the air, where a crouch catches nothing
+        }
+        BetterBlockPos feet = ctx.playerFeet();
+        // A real floor under the block the body occupies is an ordinary stand, and the guard stays quiet for it.
+        return !MovementHelper.canWalkOn(ctx, feet.below());
+    }
+
+    /** Whether every movement key has been let go, i.e. whatever was steering the body no longer is. */
+    private boolean nothingIsDrivingTheBody() {
+        for (Input input : BODY_INPUTS) {
+            // The raw map on purpose: asking isInputForcedDown here would consult the guard that calls this.
+            if (this.inputForceStateMap.getOrDefault(input, false)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -134,5 +202,9 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     public BlockBreakHelper getBlockBreakHelper() {
         return blockBreakHelper;
+    }
+
+    public BlockPlaceHelper getBlockPlaceHelper() {
+        return blockPlaceHelper;
     }
 }

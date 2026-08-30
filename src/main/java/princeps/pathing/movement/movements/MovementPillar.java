@@ -29,6 +29,9 @@ import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementState;
+// Imported, never written out in full: the inherited field `princeps` shadows the package root, so
+// `princeps.process.builder.BuildTrace` does not resolve here.
+import princeps.process.builder.BuildTrace;
 import princeps.utils.BlockStateInterface;
 import com.google.common.collect.ImmutableSet;
 import net.minecraft.core.BlockPos;
@@ -88,6 +91,13 @@ public class MovementPillar extends Movement {
             // we need to place a block where we started to jump on it
             placeCost = context.costOfPlacingAt(x, y, z, fromState);
             if (placeCost >= COST_INF) {
+                return COST_INF;
+            }
+            // The block placed here becomes the base we jump onto. It MUST be a standable full cube — in a
+            // schematic build the placed block is the schematic's own block, which may be a fence/wall/thin block
+            // you cannot stand on (fence tops are ~1.5 tall, non-full): refuse the pillar so it never loops
+            // jumping on a fence it just placed.
+            if (!context.placedBlockIsStandable(x, y, z, fromState)) {
                 return COST_INF;
             }
             if (fromDown.getBlock() instanceof AirBlock) {
@@ -250,7 +260,7 @@ public class MovementPillar extends Movement {
                 // TODO: Evaluate usage of getMaterial().isReplaceable()
                 if (!(fr instanceof AirBlock || frState.canBeReplaced())) {
                     RotationUtils.reachable(ctx, src, ctx.playerController().getBlockReachDistance())
-                            .map(rot -> new MovementState.MovementTarget(rot, true, true))
+                            .map(MovementState.MovementTarget::forBreak)
                             .ifPresent(state::setTarget);
                     state.setInput(Input.JUMP, false); // breaking is like 5x slower when you're jumping
                     // Gate the press on the crosshair actually being ON the block, like every other break site.
@@ -264,6 +274,47 @@ public class MovementPillar extends Movement {
                     }
                     blockIsThere = false;
                 } else if (ctx.player().isCrouching() && (ctx.isLookingAt(src.below()) || ctx.isLookingAt(src)) && ctx.player().position().y > dest.getY() + 0.1) {
+                    // THE ONE PLACEMENT IN THE WHOLE PATHFINDER THAT USED TO WRITE NOTHING. It does not go through
+                    // MovementHelper.attemptToPlaceABlock, so it produced neither a trace line nor the template guard.
+                    // Measured on the facings run 762769a0: 3 of the 11 leftover cobblestone blocks had no event of ANY
+                    // kind, so every census of helper blocks was short by exactly the ones placed here -- including a
+                    // two-high pillar at x=97 that nothing in the log could account for. The click itself is unchanged;
+                    // only its silence is.
+                    // Same licence as the choke point it bypasses -- and it has to be repeated here for exactly the
+                    // reason the comment above gives: this click never passes through attemptToPlaceABlock, so it gets
+                    // neither the template guard nor the scaffold licence for free.
+                    //
+                    // The template case must be exempted here TOO, and this is not theoretical: the pillar at
+                    // 73,-58,67 in run 50f40a49 put down the stone that cell wanted and was DONE one tick later. A
+                    // pillar that happens to fill a template cell is free progress, exactly as at the other site.
+                    boolean pillarWouldPlaceTemplateBlock = ((Princeps) princeps).getInventoryBehavior()
+                            .wouldPlaceTemplateBlockAt(src.getX(), src.getY(), src.getZ());
+                    if (pillarWouldPlaceTemplateBlock
+                            && !princeps.getBuilderProcess().templatePlacementIsLicensedAt(src)) {
+                        BuildTrace.cell(
+                                BuildTrace.tickNow(), "ROW-FRONTIER-REFUSED",
+                                src.getX(), src.getY(), src.getZ(),
+                                "pillar template pixel belongs to a later Map-Art slice " + BuildTrace.intentNow());
+                        return state.setStatus(MovementStatus.UNREACHABLE);
+                    }
+                    if (!pillarWouldPlaceTemplateBlock
+                            && (!princeps.getBuilderProcess().scaffoldIsLicensedAt(src)
+                                || !MovementHelper.currentRouteLicence(princeps).permitsPlacement(src))) {
+                        BuildTrace.cell(
+                                BuildTrace.tickNow(), "SCAFFOLD-REFUSED",
+                                src.getX(), src.getY(), src.getZ(),
+                                "no proven stance justifies a pillar block here by=pillar " + BuildTrace.intentNow());
+                        // UNREACHABLE rather than a quiet skip: a pillar that neither places nor fails would crouch
+                        // here forever, and the router would never learn to route otherwise.
+                        return state.setStatus(MovementStatus.UNREACHABLE);
+                    }
+                    BuildTrace.cell(
+                            BuildTrace.tickNow(), "PILLAR",
+                            src.getX(), src.getY(), src.getZ(),
+                            "by=pillar climbing to " + dest.getX() + "," + dest.getY() + "," + dest.getZ()
+                                    + " " + BuildTrace.intentNow());
+                    BuildTrace.intendWorldChange("pillar", src.getX(), src.getY(), src.getZ(),
+                            "climbing to " + dest.getX() + "," + dest.getY() + "," + dest.getZ());
                     state.setInput(Input.CLICK_RIGHT, true);
                 }
             }

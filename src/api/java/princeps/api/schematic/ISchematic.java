@@ -19,6 +19,7 @@ package princeps.api.schematic;
 
 import java.util.List;
 import net.minecraft.core.Direction;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.state.BlockState;
 
 /**
@@ -71,6 +72,27 @@ public interface ISchematic {
      * @return The desired block state at the specified position
      */
     BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable);
+
+    /**
+     * The block-entity NBT the schematic carries for a position, or {@code null} when it carries none.
+     *
+     * <p>A block state cannot express a sign's text, a repeater has no NBT at all, and a chest's contents are not a
+     * property — everything a block entity holds is invisible to {@link #desiredState}. Most schematic sources drop
+     * that data at parse time and most consumers never wanted it, so the default here is honest: no NBT.
+     *
+     * <p>Implementations that DO carry it must return the compound in vanilla's own on-disk shape, i.e. what
+     * {@code BlockEntity.saveWithId} would produce, so a consumer can read {@code front_text} / {@code back_text}
+     * off a sign without knowing which file format it came from. Wrapper schematics must translate the coordinate
+     * exactly as they translate {@link #desiredState}, or the text of one sign lands on another.
+     *
+     * @param x The x position of the block, relative to the origin
+     * @param y The y position of the block, relative to the origin
+     * @param z The z position of the block, relative to the origin
+     * @return the block-entity compound for that cell, or {@code null}
+     */
+    default CompoundTag blockEntity(int x, int y, int z) {
+        return null;
+    }
 
     /**
      * Resets possible caches to avoid wrong behavior when moving the schematic around

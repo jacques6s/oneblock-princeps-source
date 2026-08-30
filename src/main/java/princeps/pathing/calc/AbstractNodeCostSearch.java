@@ -58,7 +58,26 @@ public abstract class AbstractNodeCostSearch implements IPathFinder, Helper {
 
     private volatile boolean isFinished;
 
-    protected boolean cancelRequested;
+    /**
+     * VOLATILE, und das ist keine Vorsichtsmassnahme, sondern ein gemessener Fehler.
+     *
+     * <p>Geschrieben wird dieses Feld von {@link #cancel()} auf dem Spielthread, gelesen wird es vom Suchthread
+     * in der Kopfbedingung der A*-Schleife ({@code AStarPathFinder:95}). Ohne {@code volatile} darf die JVM den
+     * Lesezugriff aus einer so heissen Schleife herausziehen -- und sie tut es. Der Abbruch wird dann gesetzt
+     * und nie gesehen.
+     *
+     * <p>GEMESSEN, Lauf 0e2928b9, Fenster T7707 bis T7828: bei T7707 startet eine Suche unter Bahn A, bei T7714
+     * faellt die Bahnentscheidung auf B und der Bauer ruft {@code cancel()}, bei T7716 meldet die Sonde unter
+     * Bahn B einen vollstaendigen Weg von drei Knoten -- und bei T7767 laeuft immer noch dieselbe Suche. Erst
+     * der 120-Tick-Waechter des Bauers loest den Stillstand, bei T7828, und einen einzigen Tick spaeter steht
+     * {@code path=len3} in der Zeile. 36 solcher Strecken in einem Lauf, jede rund 121 Ticks; das sind die
+     * vollen {@code failureTimeoutMS} von 2000 ms bei den 60 Ticks je Sekunde des Bench.
+     *
+     * <p>Das Feld eine Zeile darueber ist volatile, dieses war es nicht. Betroffen ist nicht nur der Bauer:
+     * {@code PathingBehavior.softCancelIfSafe} und {@code secretInternalSegmentCancel} rufen dasselbe
+     * {@code cancel()}, also war jedes "abbrechen und neu planen" im System unzuverlaessig.
+     */
+    protected volatile boolean cancelRequested;
 
     /**
      * This is really complicated and hard to explain. I wrote a comment in the old version of MineBot but it was so

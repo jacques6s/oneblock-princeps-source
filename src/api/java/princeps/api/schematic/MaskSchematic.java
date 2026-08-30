@@ -18,6 +18,7 @@
 package princeps.api.schematic;
 
 import princeps.api.schematic.mask.Mask;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.List;
@@ -41,6 +42,13 @@ public abstract class MaskSchematic extends AbstractSchematic {
     @Override
     public BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable) {
         return schematic.desiredState(x, y, z, current, approxPlaceable);
+    }
+
+    /** A mask hides cells, it does not move them; the NBT of a cell that survives the mask is the wrapped one's. A
+     *  masked-out cell is never asked about, because the planner asks {@code inSchematic} first. */
+    @Override
+    public CompoundTag blockEntity(int x, int y, int z) {
+        return schematic.blockEntity(x, y, z);
     }
 
     public static MaskSchematic create(ISchematic schematic, Mask function) {

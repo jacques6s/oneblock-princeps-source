@@ -22,5 +22,12 @@ import net.minecraft.client.multiplayer.ClientChunkCache;
 public interface IClientChunkProvider {
     ClientChunkCache createThreadSafeCopy();
 
+    /**
+     * Invalidates the cached structural snapshot after the live client chunk array changes.
+     * Existing path calculations retain their old immutable array view; the next calculation
+     * receives a fresh one.
+     */
+    void invalidateThreadSafeCopy();
+
     IChunkArray extractReferenceArray();
 }

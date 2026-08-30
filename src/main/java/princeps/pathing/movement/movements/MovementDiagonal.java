@@ -109,10 +109,35 @@ public class MovementDiagonal extends Movement {
     }
 
     public static void cost(CalculationContext context, int x, int y, int z, int destX, int destZ, MutableMoveResult res) {
-        if (!MovementHelper.canWalkThrough(context, destX, y + 1, destZ)) {
+        BlockState destInto = context.get(destX, y, destZ);
+        BlockState destHead = context.get(destX, y + 1, destZ);
+        BlockState cornerALow = context.get(x, y, destZ);
+        BlockState cornerAHigh = context.get(x, y + 1, destZ);
+        BlockState cornerBLow = context.get(destX, y, z);
+        BlockState cornerBHigh = context.get(destX, y + 1, z);
+        BlockState destBelow = context.get(destX, y - 1, destZ);
+        BlockState destAbove = context.get(destX, y + 2, destZ);
+        BlockState cornerABelow = context.get(x, y - 1, destZ);
+        BlockState cornerAAbove = context.get(x, y + 2, destZ);
+        BlockState cornerBBelow = context.get(destX, y - 1, z);
+        BlockState cornerBAbove = context.get(destX, y + 2, z);
+        BlockState sourceAbove = context.get(x, y + 2, z);
+
+        // A diagonal has no door/gate actuator. Generic canWalkThrough deliberately calls wooden barriers YES on
+        // the promise that a movement will click them, but only MovementTraverse fulfills that promise. The Basalt
+        // stall was exactly this mismatch: 104,-60,97 -> 103,-60,98 was accepted with a CLOSED door in destInto,
+        // MOVE_FORWARD then drove into that door forever. Refuse a barrier anywhere in the complete 2x2 passage;
+        // ordinary navigation can still approach it cardinally and let MovementTraverse operate it.
+        if (passageContainsPathingBarrier(destInto, destHead, cornerALow, cornerAHigh,
+                cornerBLow, cornerBHigh)
+                || passageContainsPathingBarrier(destBelow, destAbove, cornerABelow, cornerAAbove,
+                cornerBBelow, cornerBAbove)
+                || MovementHelper.isPathingBarrier(sourceAbove)) {
             return;
         }
-        BlockState destInto = context.get(destX, y, destZ);
+        if (!MovementHelper.canWalkThrough(context, destX, y + 1, destZ, destHead)) {
+            return;
+        }
         BlockState fromDown;
         boolean ascend = false;
         BlockState destWalkOn;
@@ -182,8 +207,8 @@ public class MovementDiagonal extends Movement {
             multiplier = context.waterWalkSpeed;
             water = true;
         }
-        BlockState pb0 = context.get(x, y, destZ);
-        BlockState pb2 = context.get(destX, y, z);
+        BlockState pb0 = cornerALow;
+        BlockState pb2 = cornerBLow;
         if (ascend) {
             boolean ATop = MovementHelper.canWalkThrough(context, x, y + 2, destZ);
             boolean AMid = MovementHelper.canWalkThrough(context, x, y + 1, destZ);
@@ -213,13 +238,13 @@ public class MovementDiagonal extends Movement {
             // so no need to check pb1 as well, might as well return early here
             return;
         }
-        BlockState pb1 = context.get(x, y + 1, destZ);
+        BlockState pb1 = cornerAHigh;
         optionA += MovementHelper.getMiningDurationTicks(context, x, y + 1, destZ, pb1, true);
         if (optionA != 0 && optionB != 0) {
             // same deal, if pb1 makes optionA nonzero and option B already was nonzero, pb3 can't affect the result
             return;
         }
-        BlockState pb3 = context.get(destX, y + 1, z);
+        BlockState pb3 = cornerBHigh;
         if (optionA == 0 && ((MovementHelper.avoidWalkingInto(pb2) && pb2.getBlock() != Blocks.WATER) || MovementHelper.avoidWalkingInto(pb3))) {
             // at this point we're done calculating optionA, so we can check if it's actually possible to edge around in that direction
             return;
@@ -259,6 +284,18 @@ public class MovementDiagonal extends Movement {
         res.z = destZ;
     }
 
+    /** Pure, allocation-free guard used for the twelve cells a flat/ascending/descending diagonal can enter or cut. */
+    static boolean passageContainsPathingBarrier(BlockState destLow, BlockState destHigh,
+                                                 BlockState cornerALow, BlockState cornerAHigh,
+                                                 BlockState cornerBLow, BlockState cornerBHigh) {
+        return MovementHelper.isPathingBarrier(destLow)
+                || MovementHelper.isPathingBarrier(destHigh)
+                || MovementHelper.isPathingBarrier(cornerALow)
+                || MovementHelper.isPathingBarrier(cornerAHigh)
+                || MovementHelper.isPathingBarrier(cornerBLow)
+                || MovementHelper.isPathingBarrier(cornerBHigh);
+    }
+
     @Override
     public MovementState updateState(MovementState state) {
         super.updateState(state);
@@ -285,7 +322,10 @@ public class MovementDiagonal extends Movement {
     }
 
     private boolean sprint() {
-        if (MovementHelper.isLiquid(ctx, ctx.playerFeet()) && !Princeps.settings().sprintInWater.value) {
+        // Same licence escape as MovementTraverse's sprint gate: a licensed wading cell is the one place
+        // sprint in water is wanted -- it is the only input that lifts the water friction. See run d05f21fd.
+        if (MovementHelper.isLiquid(ctx, ctx.playerFeet()) && !Princeps.settings().sprintInWater.value
+                && !MovementHelper.currentRouteWadeLicence(princeps).permitsWading(ctx.playerFeet())) {
             return false;
         }
         for (int i = 0; i < 4; i++) {

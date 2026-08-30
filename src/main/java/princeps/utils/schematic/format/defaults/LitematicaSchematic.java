@@ -20,6 +20,9 @@ package princeps.utils.schematic.format.defaults;
 import princeps.api.schematic.CompositeSchematic;
 import princeps.api.schematic.IStaticSchematic;
 import princeps.utils.schematic.StaticSchematic;
+import it.unimi.dsi.fastutil.longs.Long2ObjectMap;
+import it.unimi.dsi.fastutil.longs.Long2ObjectOpenHashMap;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Holder;
 import net.minecraft.core.Vec3i;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -46,12 +49,45 @@ import java.util.Optional;
 public final class LitematicaSchematic extends CompositeSchematic implements IStaticSchematic {
 
     /**
+     * Block-entity compounds by schematic-local position, keyed with {@link BlockPos#asLong}.
+     *
+     * <p>Held here rather than pushed down into the {@link StaticSchematic} subregions because those store nothing but
+     * a state array, and because the composite lookup they would be reached through resolves an uncovered position to
+     * {@code null} only after a linear scan — a map of the few hundred block entities a schematic has is both simpler
+     * and the only structure that answers "no NBT here" in constant time, which is the answer for all but a fraction
+     * of a percent of cells.
+     *
+     * <p>Empty for every schematic that carries none, which is most of them: this is a file that HAS the data, not a
+     * guarantee that the data is there.
+     */
+    private final Long2ObjectMap<CompoundTag> blockEntities = new Long2ObjectOpenHashMap<>();
+
+    /**
      * @param nbtTagCompound a decompressed file stream aka nbt data.
      * @param rotated        if the schematic is rotated by 90°.
      */
     public LitematicaSchematic(CompoundTag nbt) {
         super(0, 0, 0);
         fillInSchematic(nbt);
+    }
+
+    /**
+     * The block-entity compound this file carries for a cell, or {@code null}.
+     *
+     * <p>This is the half of a litematic that the parser used to drop on the floor. Everything a block state cannot
+     * express lives here — a sign's four lines per side, a chest's contents, a spawner's mob — and without it a
+     * builder that places a sign can only place a blank one. Nothing else about parsing changes: an unreadable or
+     * absent {@code TileEntities} list simply leaves this map empty, exactly as before.
+     */
+    @Override
+    public CompoundTag blockEntity(int x, int y, int z) {
+        return this.blockEntities.get(BlockPos.asLong(x, y, z));
+    }
+
+    /** How many cells in this schematic carry block-entity data. For the plan report, which says up front what it
+     *  will and will not reproduce rather than letting a run discover it. */
+    public int blockEntityCount() {
+        return this.blockEntities.size();
     }
 
     /**
@@ -177,6 +213,46 @@ public final class LitematicaSchematic extends CompositeSchematic implements ISt
 
             LitematicaBitArray bitArray = new LitematicaBitArray(bitsPerBlock, regionVolume, blockStateArray);
             writeSubregionIntoSchematic(subReg, offsetMinCorner, blockList, bitArray);
+            readBlockEntities(subReg, offsetMinCorner);
+        }
+    }
+
+    /**
+     * Lift one subregion's {@code TileEntities} into {@link #blockEntities}, in schematic-local coordinates.
+     *
+     * <p>Litematica stores each entry as the block entity's own save data with an {@code x}/{@code y}/{@code z} triple
+     * added, relative to the SUBREGION's corner — the same corner {@link #writeSubregionIntoSchematic} offsets the
+     * state array from, so the two land on the same cell by construction rather than by coincidence.
+     *
+     * <p>Out-of-range entries are dropped instead of throwing. A negative Litematica {@code Size} records which corner
+     * was selected first; both the block-state container and every block-entity coordinate are nevertheless stored
+     * from the region's minimum corner in positive local coordinates. {@link #getMinOfSubregion} therefore places both
+     * streams at the same composite offset without mirroring either one. An actually malformed entry can still address
+     * a cell the region does not have; dropping that entry costs one block entity, while throwing costs the whole file.
+     */
+    private void readBlockEntities(CompoundTag subReg, Vec3i offsetMinCorner) {
+        ListTag entities = subReg.getListOrEmpty("TileEntities");
+        if (entities.isEmpty()) {
+            return;
+        }
+        int offsetX = getMinOfSubregion(subReg, "x") - offsetMinCorner.getX();
+        int offsetY = getMinOfSubregion(subReg, "y") - offsetMinCorner.getY();
+        int offsetZ = getMinOfSubregion(subReg, "z") - offsetMinCorner.getZ();
+        CompoundTag size = subReg.getCompound("Size").orElse(new CompoundTag());
+        int sizeX = Math.abs(size.getInt("x").orElse(0));
+        int sizeY = Math.abs(size.getInt("y").orElse(0));
+        int sizeZ = Math.abs(size.getInt("z").orElse(0));
+
+        for (int i = 0; i < entities.size(); i++) {
+            CompoundTag entity = entities.getCompoundOrEmpty(i);
+            int localX = entity.getInt("x").orElse(Integer.MIN_VALUE);
+            int localY = entity.getInt("y").orElse(Integer.MIN_VALUE);
+            int localZ = entity.getInt("z").orElse(Integer.MIN_VALUE);
+            if (localX < 0 || localX >= sizeX || localY < 0 || localY >= sizeY || localZ < 0 || localZ >= sizeZ) {
+                continue;
+            }
+            this.blockEntities.put(
+                    BlockPos.asLong(offsetX + localX, offsetY + localY, offsetZ + localZ), entity);
         }
     }
 

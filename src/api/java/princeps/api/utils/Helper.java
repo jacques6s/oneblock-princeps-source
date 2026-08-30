@@ -19,6 +19,8 @@ package princeps.api.utils;
 
 import princeps.api.PrincepsAPI;
 import princeps.api.Settings;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import net.minecraft.ChatFormatting;
 import net.minecraft.network.chat.TextColor;
 import net.minecraft.client.multiplayer.chat.GuiMessageTag;
@@ -161,6 +163,21 @@ public interface Helper {
         // We won't log debug chat into toasts
         // Because only a madman would want that extreme spam -_-
         logDirect(message, false);
+    }
+
+    /** Dedicated logger for high-frequency internal mechanics (placement retries, stance recovery, deferrals). */
+    Logger MECHANIC_LOGGER = LoggerFactory.getLogger("PrincepsBuilder");
+
+    /**
+     * Report an internal mechanic step (a placement retry, a stance recovery, a deferral). Unlike {@link #logDebug}
+     * — which discards its message entirely when chatDebug is off — this ALWAYS writes to the game log, so the
+     * forensic trail survives without spamming the player's chat. It surfaces in chat only when chatDebug is on.
+     */
+    default void logMechanic(String message) {
+        MECHANIC_LOGGER.info(message);
+        if (PrincepsAPI.getSettings().chatDebug.value) {
+            logDirect(message, false);
+        }
     }
 
     /**

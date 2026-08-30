@@ -27,6 +27,7 @@ import princeps.api.utils.Pair;
 import princeps.cache.CachedChunk;
 import princeps.cache.WorldProvider;
 import princeps.utils.BlockStateInterface;
+import princeps.utils.accessor.IClientChunkProvider;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
@@ -90,6 +91,12 @@ public final class GameEventHandler implements IEventBus, Helper {
         ChunkEvent.Type type = event.getType();
 
         Level world = princeps.getPlayerContext().world();
+
+        // BlockStateInterface snapshots freeze only the chunk-reference array. Refresh that structural view after
+        // chunk events instead of rebuilding the complete render-distance cache on every Princeps tick.
+        if (world != null && world.getChunkSource() instanceof IClientChunkProvider provider) {
+            provider.invalidateThreadSafeCopy();
+        }
 
         // Whenever the server sends us to another dimension, chunks are unloaded
         // technically after the new world has been loaded, so we perform a check

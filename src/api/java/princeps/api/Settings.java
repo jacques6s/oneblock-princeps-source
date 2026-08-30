@@ -73,6 +73,14 @@ public final class Settings {
     public final Setting<Boolean> allowSprint = new Setting<>(true);
 
     /**
+     * Hold a facing-critical jump (parkour gap-jump / ascend step-up) until the humanized look has converged
+     * on the movement's heading, so the bot never launches a jump while still mid-turn (skewed jumps, running
+     * off in the wrong direction). Continuous cruise motion (W/A/D + sprint) is never gated, so momentum keeps
+     * aligning toward the target while the aim finishes. Default on; toggle off to restore the old timing.
+     */
+    public final Setting<Boolean> lookGateBeforeJump = new Setting<>(true);
+
+    /**
      * Allow Princeps to place blocks
      */
     public final Setting<Boolean> allowPlace = new Setting<>(true);
@@ -864,8 +872,8 @@ public final class Settings {
      * the true heading (mean-reverting) instead of holding a laser-locked line, corners are speed-limited into a
      * short human arc instead of a one-tick superhuman snap, and every delta is fed through the mouse-sensitivity
      * quantizer — so the rotation looks like a real player rather than a bot (no rigid heading, no long runs of
-     * identical/zero deltas, no impossible float angles). HARD-BYPASSED during precise phases (block break/place,
-     * airborne jumps/parkour, elytra) so pathing stays 100% accurate — same or better result, just not robotic.
+     * identical/zero deltas, no impossible float angles). Precise interactions bypass wander but declared break/place
+     * aims retain the bounded curve; ballistic jumps and elytra still take their exact safety-critical heading.
      *
      * <p>In this build the drift/tremor components default to 0 (see the settings below) and the bell-curve
      * acceleration profile ({@code humanizedLookAimCurve}) applies to EVERY smooth head movement, so the real,
@@ -939,24 +947,58 @@ public final class Settings {
      *  fires once isLookingAt catches up, so hit/miss is unchanged. Never affects place / jump / elytra. */
     public final Setting<Boolean> humanizedLookCapBreakTurn = new Setting<>(true);
 
-    /** Human ACCELERATION BELL for the mining aim (requires {@link #humanizedLookCapBreakTurn}): instead of jumping
+    /** The same speed-limited arc for every explicitly declared placement aim. Builders and bridge movements gate
+     *  their click on the live ray; bridge back-placement additionally waits for this aim to land before edging over
+     *  the support boundary. The slower turn can therefore delay a placement but cannot redirect it or cause a fall. */
+    public final Setting<Boolean> humanizedLookCapPlaceTurn = new Setting<>(true);
+
+    /** Human ACCELERATION BELL for smooth turns, including declared breaks and placements (controlled by
+     *  {@link #humanizedLookCapBreakTurn} and {@link #humanizedLookCapPlaceTurn}): instead of jumping
      *  straight to the max turn rate (a visible velocity kick), the head EASES IN (accelerates ~peak/3 per tick^2),
      *  rides the mode's peak, then EASES OUT proportionally into the target — the classic fast-rise/long-tail human
      *  re-aim curve. A per-tick absolute jitter (0.01..0.1 deg) makes the plateau breathe around the mode value
      *  (9 -> 8.90..9.10, soft ceiling mode + 0.1) and keeps every mini step numerically distinct — the curve never
      *  stagnates on one repeated number. Sim-validated (navbench/aim_curve_sim.py): peak accel 3x lower than the flat
      *  rate-limit, 30x lower than the old snap; tremor-sized corrections stay sub-degree so the crosshair never
-     *  leaves the block face (the break keeps firing). */
+     *  leaves the block face (the gated interaction remains on its target). */
     public final Setting<Boolean> humanizedLookAimCurve = new Setting<>(true);
 
-    /** Bell-curve mode = the PEAK head-turn speed (deg/tick) of the mining aim: 0 = superSmooth (5), 1 = standard (9),
-     *  2 = fast (20). The standard peak matches the 9-deg cruising cap the whole look system is tuned around. */
+    /** Legacy bell-curve mode retained for config compatibility. Turn ticks now select the calibrated peak. */
     public final Setting<Integer> humanizedLookAimCurveMode = new Setting<>(1);
 
-    /** Fine multiplier on the mode's peak mining-aim speed (see {@link #humanizedLookAimCurveMode}). Lets a profile
+    /** Fine multiplier on the smooth-turn peak. Lets a profile
      *  dial the block-to-block aim speed continuously (e.g. 1.3 = 30% snappier) without jumping to the next discrete
      *  mode. Applied in {@code aimCurvePeak()}; 1.0 = the mode's stock peak. */
     public final Setting<Double> humanizedLookAimCurvePeakScale = new Setting<>(1.0);
+
+    /** The bell-curve turn speed as TICKS-TO-COMPLETE-A-90-DEGREE-TURN — the real, intuitive driver of head-turn
+     *  speed (the old {@link #humanizedLookAimCurveMode} peak table felt washed-out: standard = 15 ticks/90deg).
+     *  {@code aimCurvePeak()}/{@code aimCurveAccel()} derive the accelerate->plateau->decelerate bell from this via
+     *  a sim-calibrated table (navbench/aim_curve_sim.py). The 5 canonical modes: 2 = Superfast, 3 = Fast,
+     *  4 = Balanced (default), 8 = Smooth, 12 = Super smooth. Lower = snappier. */
+    public final Setting<Double> humanizedLookAimCurveTurnTicks = new Setting<>(4.0);
+
+    /** How humanised the head-turn is WHILE BUILDING, in the same unit as {@link #humanizedLookAimCurveTurnTicks}:
+     *  ticks to complete a 90 degree turn. Separate from the global value on purpose — building wants a snappier
+     *  head than walking does, and forcing one number on both means either a twitchy walk or a slow build.
+     *
+     *  <p>This is the owner's speed/realism dial and it is the single largest throughput term in the builder: the
+     *  head turn measured a median of five ticks per placed block, against a total of roughly fifteen. 1 is a near
+     *  instant snap (fastest, least human), 5 is calmer than the stock walk. Values are clamped to that range.
+     *
+     *  <p>4 by default, which is exactly what the builder did before this dial existed, so leaving it alone changes
+     *  nothing. Note that lowering it does NOT multiply throughput one for one: since the turn now runs concurrently
+     *  with the wait for the server acknowledgement, only the part of the turn that outlasts that wait costs time. */
+    public final Setting<Double> builderTurnTicks = new Setting<>(4.0);
+
+    /** Ticks the builder keeps watching a placement AFTER the server confirmed it, guarding against protection
+     *  plugins that revert two to six ticks late. 3 by default, which is where the measured mass of that distribution
+     *  sits; 0 switches the guard off for a server known not to do it. One measured round trip is always added on top
+     *  of whatever is set here, because a revert decided at the moment of confirmation is exactly that far behind.
+     *
+     *  <p>Not a throughput dial any more: since the watch stopped blocking the next cell's preparation it runs under
+     *  work that has to happen anyway. Lowering it mostly gives up protection for nothing. */
+    public final Setting<Double> builderAckHoldTicks = new Setting<>(3.0);
 
     /** Per-axis ceiling on the HORIZONTAL (yaw) share of each bell-curve aim step, as a multiplier on the curve's
      *  peak: the yaw component of a step never exceeds {@code peak * this}. 1.0 = no extra shaping; lower = calmer
@@ -1288,6 +1330,34 @@ public final class Settings {
     public final Setting<Boolean> extendCacheOnThreshold = new Setting<>(false);
 
     /**
+     * Use the Builder V3 engine (PlannedBuilderProcess) instead of the original BuilderProcess.
+     * <p>
+     * V3 proves the whole build order before placing the first block; V2 decides one cell at a time. Both are
+     * registered every session and exactly one is active -- the engine is chosen once, at the first ask, and does not
+     * change while the game runs, so a setting flipped mid-build cannot swap engines under a plan.
+     * <p>
+     * The system property {@code -Dprinceps.builder.engine=v3} overrides this, which is how the bench pins an engine
+     * per run without writing settings.txt.
+     */
+    public final Setting<Boolean> builderEngineV3 = new Setting<>(false);
+
+    /**
+     * Whether the v3 builder is allowed to plan the waterlogged form of a block.
+     *
+     * <p>Off by default, and that is a scope decision rather than a limitation of the machinery. Waterlogging is a
+     * two-part action — place the dry block, then empty a bucket into it — and each pair costs a non-stackable
+     * water bucket, so a build wanting it needs inventory room the owner's real schematics do not have to spare.
+     * Off, the block is placed DRY and the {@code waterlogged} property is declared out of scope in the plan report,
+     * with a count. It is never silently ignored: an unbuildable cell must be named, and a cell built to a state the
+     * schematic did not ask for must be named too.
+     *
+     * <p>Measured on etz-basalt: four {@code oak_leaves[waterlogged=true]} cells were the ONLY thing blocking the
+     * plan, and because the layer rule is hard those four held the 12 251 cells above them. Four cells of fifteen
+     * thousand decided whether the farm could be planned at all.
+     */
+    public final Setting<Boolean> builderV3Waterlogging = new Setting<>(false);
+
+    /**
      * Don't consider the next layer in builder until the current one is done
      */
     public final Setting<Boolean> buildInLayers = new Setting<>(false);
@@ -1362,8 +1432,45 @@ public final class Settings {
     public final Setting<Boolean> okIfWater = new Setting<>(false);
 
     /**
+     * Edge length of the vertical square removed by one mining action; {@code 1} is an ordinary tool.
+     *
+     * <p>Values above one let the builder keep a server-side area pickaxe inside a sliding top-down band and choose
+     * non-overlapping, high-yield targets. The default preserves ordinary breaking exactly.
+     */
+    public final Setting<Integer> areaBreakSize = new Setting<>(1);
+
+    /**
      * The set of incorrect blocks can never grow beyond this size
      */
+    /**
+     * Never set a cell aside, and never leave a layer with anything unbuilt in it.
+     *
+     * <p>The owner's standing rule, and it overrides both escape hatches this builder had: the per-cell retirement
+     * after {@code CELL_DEFERRALS_BEFORE_RETIRING} failures, and the whole-layer give-up. A world audit of one run
+     * found 245 cells missing from three layers, and 175 of them appeared NOWHERE in the log -- they were taken by
+     * the give-up, which records a count and no coordinates. Most were ordinary glass and soul soil that were never
+     * hard, merely in the window while a piston stalled the layer.
+     *
+     * <p>The consequence is deliberate and was accepted explicitly: a build that meets a genuinely impossible cell
+     * now STOPS on it, visibly, instead of quietly dropping a hundred placeable ones. A stall you can name is worth
+     * more than a loss you cannot see.
+     */
+    /**
+     * Nie eine Zelle beiseitelegen. Vorgabe unveraendert {@code true} -- der ausgelieferte Client baut weiter so.
+     *
+     * <p>Der Bench kann es ueber {@code -Dprinceps.bench.discard=true} abschalten, und dafuer gibt es einen Grund,
+     * der erst am 02.08.2026 sichtbar wurde: {@code skipFailedLayers} ist in diesem Fork toter Code
+     * ({@code BuilderProcess:1037} sagt es selbst), also ist {@code giveUpOnLayerIfItHasStalled} der EINZIGE Ausgang
+     * aus einer unfertigen Ebene -- und diese Einstellung ist dessen erste Zeile ({@code :1095}). Solange sie steht,
+     * gibt es ueberhaupt keinen Weg aus einer Ebene heraus, die nicht fertig werden kann. Ebene -59 kann bottom-up
+     * nicht fertig werden: 1261 ihrer 1821 Zellen haben keine Schematic-Zelle unter sich.
+     *
+     * <p>Der Grund, aus dem die Regel eingefuehrt wurde -- "175 Zellen tauchen nirgends im Log auf" -- ist
+     * unabhaengig repariert: {@code giveUpOnLayerIfItHasStalled:1142} schreibt heute eine DROP-Zeile pro Zelle,
+     * {@code deferCellWeighted} eine RETIRE-Zeile pro Zelle, und {@code MAX_RETRY_SWEEPS=3} holt sie zurueck.
+     */
+    public final Setting<Boolean> buildNeverDiscard = new Setting<>(!Boolean.getBoolean("princeps.bench.discard"));
+
     public final Setting<Integer> incorrectSize = new Setting<>(100);
 
     /**

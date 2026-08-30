@@ -30,6 +30,8 @@ import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementState;
 import princeps.pathing.movement.MovementState.MovementTarget;
+// Imported, never qualified: Movement's `princeps` field shadows the package root inside this class.
+import princeps.process.builder.BuildTrace;
 import princeps.utils.pathing.MutableMoveResult;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -113,6 +115,12 @@ public class MovementFall extends Movement {
                 targetRotation = new Rotation(toDest.getYaw(), 90.0F);
 
                 if (ctx.isLookingAt(dest) || ctx.isLookingAt(dest.below())) {
+                    // A water bucket emptied to break a fall is a world change like any other -- and one that is
+                    // planned under GLOBAL settings (`new CalculationContext(princeps)` a few lines above), not
+                    // under whatever rule set the current route was planned with. Counted, so the decision about
+                    // whether a block-free lane may do this can be taken on a number rather than an opinion.
+                    BuildTrace.intendWorldChange("fall-waterbucket", dest.getX(), dest.getY(), dest.getZ(),
+                            "breaking a fall");
                     state.setInput(Input.CLICK_RIGHT, true);
                 }
             }
@@ -143,6 +151,8 @@ public class MovementFall extends Movement {
                 if (Inventory.isHotbarSlot(ctx.player().getInventory().findSlotMatchingItem(STACK_BUCKET_EMPTY))) {
                     ctx.player().getInventory().setSelectedSlot(ctx.player().getInventory().findSlotMatchingItem(STACK_BUCKET_EMPTY));
                     if (ctx.player().getDeltaMovement().y >= 0) {
+                        BuildTrace.intendWorldChange("fall-waterpickup", dest.getX(), dest.getY(), dest.getZ(),
+                                "recovering the bucket");
                         return state.setInput(Input.CLICK_RIGHT, true);
                     } else {
                         return state;

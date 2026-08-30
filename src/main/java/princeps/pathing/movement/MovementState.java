@@ -18,6 +18,7 @@
 package princeps.pathing.movement;
 
 import princeps.api.pathing.movement.MovementStatus;
+import princeps.api.behavior.look.AimIntent;
 import princeps.api.utils.Rotation;
 import princeps.api.utils.input.Input;
 
@@ -72,27 +73,29 @@ public class MovementState {
          */
         private boolean forceRotations;
 
-        /**
-         * {@code true} when this forced rotation aims at a block we intend to BREAK (not place). Carried through to
-         * LookBehavior so the bell-curve mining arc engages from the FIRST aim tick. The CLICK_LEFT input alone
-         * cannot signal this: every break site correctly gates the press on the crosshair having ARRIVED, so
-         * deriving the arc from the live input is circular (curve waits for the click, the click waits for the
-         * arrival — the aim would snap exactly like the flick the curve exists to remove).
-         */
-        private boolean breakIntent;
+        /** The explicit interaction this aim prepares; mouse input is deliberately not used as an intent oracle. */
+        private final AimIntent intent;
 
         public MovementTarget() {
             this(null, false);
         }
 
         public MovementTarget(Rotation rotation, boolean forceRotations) {
-            this(rotation, forceRotations, false);
+            this(rotation, forceRotations, AimIntent.NONE);
         }
 
-        public MovementTarget(Rotation rotation, boolean forceRotations, boolean breakIntent) {
+        public MovementTarget(Rotation rotation, boolean forceRotations, AimIntent intent) {
             this.rotation = rotation;
             this.forceRotations = forceRotations;
-            this.breakIntent = breakIntent;
+            this.intent = intent == null ? AimIntent.NONE : intent;
+        }
+
+        public static MovementTarget forBreak(Rotation rotation) {
+            return new MovementTarget(rotation, true, AimIntent.BREAK);
+        }
+
+        public static MovementTarget forPlacement(Rotation rotation) {
+            return new MovementTarget(rotation, true, AimIntent.PLACE);
         }
 
         public final Optional<Rotation> getRotation() {
@@ -104,7 +107,15 @@ public class MovementState {
         }
 
         public boolean isBreakIntent() {
-            return this.breakIntent;
+            return this.intent == AimIntent.BREAK;
+        }
+
+        public boolean isPlaceIntent() {
+            return this.intent == AimIntent.PLACE;
+        }
+
+        public AimIntent getAimIntent() {
+            return this.intent;
         }
     }
 }

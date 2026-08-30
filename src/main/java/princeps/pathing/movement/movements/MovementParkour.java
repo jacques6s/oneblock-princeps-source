@@ -26,6 +26,8 @@ import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementState;
+// Imported, never qualified: Movement's `princeps` field shadows the package root inside this class.
+import princeps.process.builder.BuildTrace;
 import princeps.utils.BlockStateInterface;
 import princeps.utils.pathing.MutableMoveResult;
 import net.minecraft.core.Direction;
@@ -176,6 +178,13 @@ public class MovementParkour extends Movement {
             if (placeCost >= COST_INF) {
                 continue;
             }
+            // The bot LANDS on the block placed here — it must be a standable full cube. In a schematic build the
+            // placed block is the schematic's own block, which may be a fence/wall/thin block you cannot land on;
+            // refuse it so parkour never plans a jump onto a non-standable placed block (the same fence-base loop
+            // the pillar/ascend/traverse gates prevent).
+            if (!context.placedBlockIsStandable(destX, y - 1, destZ, toReplace)) {
+                continue;
+            }
             if (!MovementHelper.isReplaceable(destX, y - 1, destZ, toReplace, context.bsi)) {
                 continue;
             }
@@ -283,9 +292,12 @@ public class MovementParkour extends Movement {
                         && ((Princeps) princeps).getInventoryBehavior().hasGenericThrowaway()
                         && !MovementHelper.canWalkOn(ctx, dest.below())
                         && !ctx.player().onGround()
-                        && MovementHelper.attemptToPlaceABlock(state, princeps, dest.below(), true, false) == PlaceResult.READY_TO_PLACE
+                        && MovementHelper.attemptToPlaceABlock(state, princeps, dest.below(), true, false, "parkour") == PlaceResult.READY_TO_PLACE
                 ) {
                     // go in the opposite order to check DOWN before all horizontals -- down is preferable because you don't have to look to the side while in midair, which could mess up the trajectory
+                    BuildTrace.intendWorldChange("parkour", dest.below().getX(), dest.below().getY(),
+                            dest.below().getZ(), "landing pad for the jump to " + dest.getX() + "," + dest.getY()
+                                    + "," + dest.getZ());
                     state.setInput(Input.CLICK_RIGHT, true);
                 }
                 // prevent jumping too late by checking for ascend
@@ -298,7 +310,13 @@ public class MovementParkour extends Movement {
                     }
                 }
 
-                state.setInput(Input.JUMP, true);
+                // Only commit the gap-jump once the humanized look has converged on the gap heading. If it
+                // hasn't (still mid-turn), hold the jump this tick — W+SPRINT stay set above, so the body keeps
+                // accelerating along the converging heading and launches straight instead of skewed.
+                if (!Princeps.settings().lookGateBeforeJump.value
+                        || lookConverged(state, LOOK_GATE_JUMP_YAW, LOOK_GATE_JUMP_PITCH)) {
+                    state.setInput(Input.JUMP, true);
+                }
             } else if (!ctx.playerFeet().equals(dest.relative(direction, -1))) {
                 state.setInput(Input.SPRINT, false);
                 if (ctx.playerFeet().equals(src.relative(direction, -1))) {

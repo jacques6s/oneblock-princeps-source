@@ -42,6 +42,7 @@ public final class DefaultCommands {
                 new VersionCommand(princeps),
                 new RepackCommand(princeps),
                 new BuildCommand(princeps),
+                new BenchCommand(princeps, ((princeps.Princeps) princeps).getBuilderBench()),
                 //new SchematicaCommand(princeps),
                 new LitematicaCommand(princeps),
                 new ComeCommand(princeps),

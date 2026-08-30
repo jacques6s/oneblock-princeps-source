@@ -17,6 +17,7 @@
 
 package princeps.api.schematic;
 
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -43,6 +44,18 @@ public class SubstituteSchematic extends AbstractSchematic {
     @Override
     public boolean inSchematic(int x, int y, int z, BlockState currentState) {
         return schematic.inSchematic(x, y, z, currentState);
+    }
+
+    /**
+     * The wrapped cell's NBT, unchanged. A substitution swaps the BLOCK, not the coordinate, so the compound still
+     * belongs to this cell — an oak sign substituted for a spruce one still wants its four lines. When the
+     * substitution lands on a block that has no block entity at all the compound is simply irrelevant, and the
+     * consumer discovers that from the desired state rather than from here: this class cannot know what the caller
+     * intends to read.
+     */
+    @Override
+    public CompoundTag blockEntity(int x, int y, int z) {
+        return schematic.blockEntity(x, y, z);
     }
 
     @Override

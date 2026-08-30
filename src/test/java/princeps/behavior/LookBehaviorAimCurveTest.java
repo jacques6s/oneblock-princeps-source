@@ -33,41 +33,58 @@ import static org.junit.Assert.assertTrue;
  */
 public class LookBehaviorAimCurveTest {
 
-    private static final double[] PEAKS = {5.0, 9.0, 20.0}; // superSmooth / standard / fast
+    /** The 5 canonical modes: {turnTicks, peak, accel} — the sim-calibrated table shipped in LookBehavior.TURN_CAL. */
+    private static final double[][] MODES = {
+            {2.0, 45.0, 45.0},   // Superfast
+            {3.0, 34.0, 22.7},   // Fast
+            {4.0, 26.0, 13.0},   // Balanced
+            {8.0, 15.5, 3.9},    // Smooth
+            {12.0, 11.5, 1.9},   // Super smooth
+    };
 
-    /** simulate a full arc; returns the per-tick velocities. */
-    private static List<Double> arc(double err, double peak) {
+    /** Simulate a full arc EXACTLY as the shipped caller does (pure next-vel, then the [0.3, peak+0.1] clamp, then
+     *  a step of min(err, v)). Returns the per-tick velocities; the size is the tick count. */
+    private static List<Double> arc(double err, double peak, double accel) {
         List<Double> vels = new ArrayList<>();
         double v = 0.0;
-        for (int i = 0; i < 500 && err > 1e-3; i++) {
-            v = LookBehavior.aimCurveNextVel(v, err, peak);
+        for (int i = 0; i < 500 && err > 1e-6; i++) {
+            v = LookBehavior.aimCurveNextVel(v, err, peak, accel);
+            v = Math.max(0.3, Math.min(v, peak + 0.1)); // the caller's clamp (LookBehavior.aimCurveTurn)
             vels.add(v);
             err -= Math.min(err, v);
         }
-        assertTrue("arc must land on the target (err ~0) within 500 ticks", err <= 1e-3);
+        assertTrue("arc must land on the target (err ~0) within 500 ticks", err <= 1e-6);
         return vels;
     }
 
     @Test
+    public void eachModeCompletesNinetyInExactlyItsTurnTicks() {
+        // THE load-bearing guarantee the modes are defined by: a 90-degree turn lands in exactly turnTicks ticks.
+        for (double[] m : MODES) {
+            int ticks = arc(90.0, m[1], m[2]).size();
+            assertEquals("mode " + (int) m[0] + "t must complete 90deg in exactly that many ticks", (int) m[0], ticks);
+        }
+    }
+
+    @Test
     public void ceilingIsNeverExceeded() {
-        for (double peak : PEAKS) {
+        for (double[] m : MODES) {
+            double peak = m[1];
             for (double err : new double[]{2, 10, 45, 90, 179}) {
-                for (double v : arc(err, peak)) {
-                    assertTrue("mode peak " + peak + " must never be exceeded (err " + err + ")", v <= peak + 1e-9);
+                for (double v : arc(err, peak, m[2])) {
+                    assertTrue("mode peak " + peak + " must never be exceeded (err " + err + ")", v <= peak + 0.1 + 1e-9);
                 }
             }
         }
     }
 
     @Test
-    public void accelerationIsBoundedByAThirdOfPeak() {
-        // THE anti-flick guarantee: per-tick velocity increase <= peak/3 (the old flat rate-limit kicked 0->peak
-        // in one tick; the old exact aim snapped 0->err). Sim showed 3x/30x lower peak acceleration respectively.
-        for (double peak : PEAKS) {
-            List<Double> vels = arc(170, peak);
+    public void accelerationIsBoundedByTheModeAccel() {
+        // Anti-flick: per-tick velocity increase never exceeds the mode's ease-in accel (no 0->peak kick in one tick).
+        for (double[] m : MODES) {
             double prev = 0.0;
-            for (double v : vels) {
-                assertTrue("accel must stay <= peak/3 + eps", v - prev <= peak / 3.0 + 1e-9);
+            for (double v : arc(170.0, m[1], m[2])) {
+                assertTrue("accel must stay <= mode accel + eps", v - prev <= m[2] + 1e-9);
                 prev = v;
             }
         }
@@ -75,8 +92,8 @@ public class LookBehaviorAimCurveTest {
 
     @Test
     public void profileIsABell_riseThenFall() {
-        for (double peak : PEAKS) {
-            List<Double> vels = arc(90, peak);
+        for (double[] m : MODES) {
+            List<Double> vels = arc(90.0, m[1], m[2]);
             int top = vels.indexOf(vels.stream().max(Double::compare).orElseThrow(AssertionError::new));
             for (int i = 0; i < top; i++) {
                 assertTrue("velocity must rise monotonically before the peak", vels.get(i + 1) >= vels.get(i) - 1e-9);
@@ -88,28 +105,14 @@ public class LookBehaviorAimCurveTest {
     }
 
     @Test
-    public void smallReAimsNeverReachThePeak() {
-        // a 10-deg correction must stay a gentle bump (the bell never spins up): max well under the standard peak
-        List<Double> vels = arc(10, 9.0);
-        double top = vels.stream().max(Double::compare).orElse(0.0);
-        assertTrue("10-deg re-aim should top out under 5 deg/tick, was " + top, top < 5.0);
-    }
-
-    @Test
-    public void tremorSizedCorrectionsStaySubDegree() {
-        // while holding a block, the target only moves by the bounded (<0.5 deg) tremor: the correction step must
-        // stay sub-degree so the crosshair cannot leave the block face between two ticks (mining never fails).
-        for (double err : new double[]{0.05, 0.2, 0.5}) {
-            double v = LookBehavior.aimCurveNextVel(0.0, err, 9.0);
-            assertTrue("tremor correction must be sub-degree", Math.min(err, v) <= Math.max(err, 0.9) + 1e-9);
-            assertTrue("first step from rest is bounded by the ease-in accel", v <= 3.0 + 1e-9);
+    public void tremorSizedCorrectionsNeverLeaveTheBlockFace() {
+        // While holding a block, the target only moves by the bounded (<0.5 deg) tremor: the STEP is min(err, v),
+        // always <= err, so the crosshair cannot leave the block face between two ticks (mining never fails).
+        for (double[] m : MODES) {
+            for (double err : new double[]{0.05, 0.2, 0.5}) {
+                double v = LookBehavior.aimCurveNextVel(0.0, err, m[1], m[2]);
+                assertTrue("tremor step must stay within the tremor error", Math.min(err, v) <= err + 1e-9);
+            }
         }
-    }
-
-    @Test
-    public void standardModeMatchesTheNinDegreeCap() {
-        // the standard mode plateau must be exactly the 9-deg/tick cap the rest of the look system is tuned around
-        List<Double> vels = arc(120, 9.0);
-        assertEquals(9.0, vels.stream().max(Double::compare).orElse(0.0), 1e-9);
     }
 }

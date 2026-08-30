@@ -18,6 +18,13 @@
 package princeps.pathing.movement;
 
 import princeps.Princeps;
+// Imported rather than fully qualified at the call site: the parameter `princeps` in attemptToPlaceABlock shadows the
+// package root, so `princeps.process.builder.BuildTrace` inside that method resolves against the VARIABLE and fails
+// to compile. The simple name is unaffected.
+import princeps.api.pathing.PlacementLicence;
+import princeps.api.pathing.WadeLicence;
+import princeps.api.pathing.path.IPathExecutor;
+import princeps.process.builder.BuildTrace;
 import princeps.api.PrincepsAPI;
 import princeps.api.IPrinceps;
 import princeps.api.pathing.movement.ActionCosts;
@@ -66,6 +73,53 @@ import static princeps.pathing.precompute.Ternary.*;
  */
 public interface MovementHelper extends ActionCosts, Helper {
 
+    /**
+     * The settings read by the state-only walkability predicates.
+     *
+     * <p>The live pathfinder uses {@link #LIVE_WALK_SETTINGS}; offline planners pass an immutable snapshot. Keeping the
+     * decision in this class gives both callers one definition without forcing pure planning code through
+     * {@code Princeps.settings()} and its client-only initialiser.
+     */
+    interface WalkSettings {
+
+        boolean avoids(Block block);
+
+        boolean allowWalkOnMagmaBlocks();
+
+        boolean allowVines();
+
+        boolean allowWalkOnBottomSlab();
+
+        boolean assumeWalkOnLava();
+    }
+
+    WalkSettings LIVE_WALK_SETTINGS = new WalkSettings() {
+        @Override
+        public boolean avoids(Block block) {
+            return Princeps.settings().blocksToAvoid.value.contains(block);
+        }
+
+        @Override
+        public boolean allowWalkOnMagmaBlocks() {
+            return Princeps.settings().allowWalkOnMagmaBlocks.value;
+        }
+
+        @Override
+        public boolean allowVines() {
+            return Princeps.settings().allowVines.value;
+        }
+
+        @Override
+        public boolean allowWalkOnBottomSlab() {
+            return Princeps.settings().allowWalkOnBottomSlab.value;
+        }
+
+        @Override
+        public boolean assumeWalkOnLava() {
+            return Princeps.settings().assumeWalkOnLava.value;
+        }
+    };
+
     static boolean avoidBreaking(BlockStateInterface bsi, int x, int y, int z, BlockState state) {
         if (!bsi.worldBorder.canPlaceAt(x, z)) {
             return true;
@@ -111,7 +165,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         return !state.getFluidState().isEmpty();
     }
 
-    static boolean canWalkThrough(IPlayerContext ctx, BetterBlockPos pos) {
+    public static boolean canWalkThrough(IPlayerContext ctx, BetterBlockPos pos) {
         return canWalkThrough(new BlockStateInterface(ctx), pos.x, pos.y, pos.z);
     }
 
@@ -120,11 +174,26 @@ public interface MovementHelper extends ActionCosts, Helper {
     }
 
     static boolean canWalkThrough(CalculationContext context, int x, int y, int z, BlockState state) {
+        if (blocksPathingBarrier(context.mayUsePathingBarriers(), state)) {
+            return false;
+        }
         return context.precomputedData.canWalkThrough(context.bsi, x, y, z, state);
     }
 
     static boolean canWalkThrough(CalculationContext context, int x, int y, int z) {
-        return context.precomputedData.canWalkThrough(context.bsi, x, y, z, context.get(x, y, z));
+        return canWalkThrough(context, x, y, z, context.get(x, y, z));
+    }
+
+    /** Doors and gates are special because generic pathing calls them passable on the promise that a movement will
+     *  operate them. Only {@code MovementTraverse} actually owns that actuator. */
+    public static boolean isPathingBarrier(BlockState state) {
+        Block block = state.getBlock();
+        return block instanceof DoorBlock || block instanceof FenceGateBlock;
+    }
+
+    /** Pure half of the context policy, exposed so the no-mutation contract can be pinned without a live client. */
+    static boolean blocksPathingBarrier(boolean mayUsePathingBarriers, BlockState state) {
+        return !mayUsePathingBarriers && isPathingBarrier(state);
     }
 
     static boolean canWalkThrough(BlockStateInterface bsi, int x, int y, int z, BlockState state) {
@@ -139,6 +208,10 @@ public interface MovementHelper extends ActionCosts, Helper {
     }
 
     static Ternary canWalkThroughBlockState(BlockState state) {
+        return canWalkThroughBlockState(state, LIVE_WALK_SETTINGS);
+    }
+
+    static Ternary canWalkThroughBlockState(BlockState state, WalkSettings settings) {
         Block block = state.getBlock();
         if (block instanceof AirBlock) {
             return YES;
@@ -152,7 +225,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         if (block == Blocks.POWDER_SNOW) {
             return NO;
         }
-        if (Princeps.settings().blocksToAvoid.value.contains(block)) {
+        if (settings.avoids(block)) {
             return NO;
         }
         if (block instanceof DoorBlock || block instanceof FenceGateBlock) {
@@ -411,14 +484,18 @@ public interface MovementHelper extends ActionCosts, Helper {
     }
 
     static Ternary canWalkOnBlockState(BlockState state) {
+        return canWalkOnBlockState(state, LIVE_WALK_SETTINGS);
+    }
+
+    static Ternary canWalkOnBlockState(BlockState state, WalkSettings settings) {
         Block block = state.getBlock();
-        if (isBlockNormalCube(state) && (block != Blocks.MAGMA_BLOCK || Princeps.settings().allowWalkOnMagmaBlocks.value) && block != Blocks.BUBBLE_COLUMN && block != Blocks.HONEY_BLOCK) {
+        if (isBlockNormalCube(state) && (block != Blocks.MAGMA_BLOCK || settings.allowWalkOnMagmaBlocks()) && block != Blocks.BUBBLE_COLUMN && block != Blocks.HONEY_BLOCK) {
             return YES;
         }
         if (block instanceof AzaleaBlock) {
             return YES;
         }
-        if (block == Blocks.LADDER || (block == Blocks.VINE && Princeps.settings().allowVines.value)) { // TODO reconsider this
+        if (block == Blocks.LADDER || (block == Blocks.VINE && settings.allowVines())) { // TODO reconsider this
             return YES;
         }
         if (block == Blocks.FARMLAND || block == Blocks.DIRT_PATH || block == Blocks.SOUL_SAND) {
@@ -436,11 +513,11 @@ public interface MovementHelper extends ActionCosts, Helper {
         if (isWater(state)) {
             return MAYBE;
         }
-        if (MovementHelper.isLava(state) && Princeps.settings().assumeWalkOnLava.value) {
+        if (MovementHelper.isLava(state) && settings.assumeWalkOnLava()) {
             return MAYBE;
         }
         if (block instanceof SlabBlock) {
-            if (!Princeps.settings().allowWalkOnBottomSlab.value) {
+            if (!settings.allowWalkOnBottomSlab()) {
                 if (state.getValue(SlabBlock.TYPE) != SlabType.BOTTOM) {
                     return YES;
                 }
@@ -493,7 +570,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         return canWalkOn(new BlockStateInterface(ctx), pos.getX(), pos.getY(), pos.getZ());
     }
 
-    static boolean canWalkOn(IPlayerContext ctx, BetterBlockPos pos) {
+    public static boolean canWalkOn(IPlayerContext ctx, BetterBlockPos pos) {
         return canWalkOn(new BlockStateInterface(ctx), pos.x, pos.y, pos.z);
     }
 
@@ -597,9 +674,26 @@ public interface MovementHelper extends ActionCosts, Helper {
 
     static double getMiningDurationTicks(CalculationContext context, int x, int y, int z, BlockState state, boolean includeFalling) {
         Block block = state.getBlock();
+        // A barrier forbidden by the owning context is not a block to mine instead. In particular, Builder V3 uses
+        // this to say "do not mutate this door/gate"; translating that into a break would violate the same rule more
+        // severely than opening it.
+        if (blocksPathingBarrier(context.mayUsePathingBarriers(), state)) {
+            return COST_INF;
+        }
         if (!canWalkThrough(context, x, y, z, state)) {
             if (!state.getFluidState().isEmpty()) {
-                return COST_INF;
+                // A LIQUID IS NOT A MINING JOB, so the only two honest answers here are "walk into it" and "there is
+                // no route through here". Which one applies is not a property of the block -- flowing water is
+                // ankle-deep and harmless in a corridor with rock under it, and a sweep into a ravine in the open
+                // world -- so it is the route that has to say, and it says it once, before the search starts. See
+                // WadeLicence: unlicensed is the default and keeps today's refusal exactly as it was.
+                //
+                // A WATERLOGGED STAIR IS NOT A PUDDLE. `isWater` answers about the FLUID in the cell, and a
+                // waterlogged solid carries one while still standing there as a wall -- so asking only that would
+                // price a real obstruction as free walking, and the route would be planned straight through a block
+                // that never moves. The block itself must BE the liquid.
+                return isWater(state) && state.getBlock() instanceof LiquidBlock
+                        && context.wadeLicence().permitsWading(x, y, z) ? 0 : COST_INF;
             }
             double mult = context.breakCostMultiplierAt(x, y, z, state);
             if (mult >= COST_INF) {
@@ -1039,12 +1133,121 @@ public interface MovementHelper extends ActionCosts, Helper {
         return false;
     }
 
-    static PlaceResult attemptToPlaceABlock(MovementState state, IPrinceps princeps, BlockPos placeAt, boolean preferDown, boolean wouldSneak) {
+    /**
+     * @param caller which movement is asking, verbatim into the trace. A placement line that cannot say WHO wanted the
+     *               block cannot distinguish "the route stepped up here" from "the route bridged a gap here", and those
+     *               are different bugs with different fixes -- see BuildTrace.context for the run that needed it.
+     */
+    /**
+     * The Setz-Erlaubnis of the route currently being driven, or unrestricted when none is.
+     *
+     * <p>Public because the movements that place a block WITHOUT coming through {@link #attemptToPlaceABlock} have
+     * to ask the same question — {@code MovementPillar} is the known one, and it cost three untraceable cobblestone
+     * blocks in run 762769a0 to find it. There must be exactly one answer to "may this walk place here", and this
+     * is where it lives.
+     */
+    public static PlacementLicence currentRouteLicence(IPrinceps princeps) {
+        IPathExecutor current = princeps.getPathingBehavior().getCurrent();
+        return current == null ? PlacementLicence.UNRESTRICTED : current.placementLicence();
+    }
+
+    /**
+     * The Wat-Erlaubnis of the route currently being driven, or none when there is no route.
+     *
+     * <p>Same shape and same reason as {@link #currentRouteLicence}: the answer must come from the route that is
+     * being driven, because it is the route's own plan that priced the step through the water.
+     */
+    public static WadeLicence currentRouteWadeLicence(IPrinceps princeps) {
+        IPathExecutor current = princeps.getPathingBehavior().getCurrent();
+        return current == null ? WadeLicence.NONE : current.wadeLicence();
+    }
+
+    static PlaceResult attemptToPlaceABlock(MovementState state, IPrinceps princeps, BlockPos placeAt, boolean preferDown, boolean wouldSneak, String caller) {
         IPlayerContext ctx = princeps.getPlayerContext();
+        // NEVER a HELPER block into a cell the template names -- but filling that cell with the block it is actually
+        // waiting for, while walking past it, stays allowed and is free progress. The single choke point through
+        // which every movement places something to stand on, so it is the only place the rule cannot be routed around.
+        //
+        // The distinction is the whole fix. A first version refused every placement into a planned cell and froze the
+        // bot for 8800 ticks at 104,-58,89: the route wanted to step north onto 104,-59,88, the bot was holding the
+        // black_stained_glass that cell wants, and the refusal fired every tick while the router handed back the same
+        // two-node path. "Routing around instead" was a promise the guard could not keep, because refusing a movement
+        // does not make the router avoid the node.
+        //
+        // The build already prices such a cell at COST_INF, and that was not enough: a cost governs which path the
+        // SEARCH picks, not what a running movement does, and it is not consulted at all by a route computed without
+        // the builder's calculation context. Measured in run 20260802-221511 with the infinite cost live -- a
+        // cobblestone in 124,-59,114 (wants sticky_piston), then 710 ticks of the builder trying to mine it back out
+        // while the route kept re-placing it. Both of the cell's click faces, the target at 125,-59,114 and the wire
+        // at 123,-59,114, had been standing since tick 11717.
+        boolean templateWantsABlockHere = princeps.getBuilderProcess().templateNamesABlockAt(placeAt);
+        boolean wouldPlaceTheTemplateBlock = ((Princeps) princeps).getInventoryBehavior()
+                .wouldPlaceTemplateBlockAt(placeAt.getX(), placeAt.getY(), placeAt.getZ());
+        if (templateWantsABlockHere && !wouldPlaceTheTemplateBlock) {
+            BuildTrace.cell(BuildTrace.tickNow(), "SCAFFOLD-REFUSED", placeAt.getX(), placeAt.getY(), placeAt.getZ(),
+                    "only a helper block is available and the template names this cell by=" + caller
+                            + " " + BuildTrace.intentNow());
+            state.setStatus(MovementStatus.UNREACHABLE);
+            return PlaceResult.NO_OPTION;
+        }
+        if (wouldPlaceTheTemplateBlock && !princeps.getBuilderProcess().templatePlacementIsLicensedAt(placeAt)) {
+            BuildTrace.cell(BuildTrace.tickNow(), "ROW-FRONTIER-REFUSED", placeAt.getX(), placeAt.getY(), placeAt.getZ(),
+                    "template pixel belongs to a later Map-Art slice by=" + caller + " " + BuildTrace.intentNow());
+            state.setStatus(MovementStatus.UNREACHABLE);
+            return PlaceResult.NO_OPTION;
+        }
+        // Past the refusal there are still TWO different things this method places, and the first version of the
+        // trace event ran them together. Either the template has no opinion about the cell (or wants air) and a
+        // throwaway goes in -- that is scaffolding, the thing the owner is counting -- or the template names the
+        // cell and the block going in is the one it is waiting for, which is free progress and not scaffolding at
+        // all. Measured in 20260802-232954: all six y=-59 "scaffold" coordinates were the second case, each ending
+        // in DONE got=black_stained_glass, five of them without the builder ever touching the cell. A count that
+        // conflates the two cannot answer "is layer -59 built without helper blocks", which is the acceptance
+        // criterion it exists to serve.
+        String kind = wouldPlaceTheTemplateBlock ? "TEMPLATE-PLACE" : "SCAFFOLD";
+        // NO HELPER BLOCK FOR A WALK THAT WAS NEVER PROVEN WORTH TAKING. The owner's rule, and the one leftover
+        // cobblestone of the 96/96 run 50f40a49 is the whole case: see IBuilderProcess.scaffoldIsLicensedAt.
+        //
+        // Placed AFTER the template refusal above (that one keeps priority and its own reason string) and after `kind`
+        // is computed, so TEMPLATE-PLACE -- putting in the block the cell is actually waiting for -- is exempt; and
+        // BEFORE the reachable/aim work below, so a refused placement does not even turn the bot's head.
+        //
+        // Backfill is exempt at the call site rather than in the predicate: BackfillProcess is CLEANUP, re-filling air
+        // it created itself, and it passes a throwaway MovementState and continues on NO_OPTION -- so vetoing it would
+        // be both wrong in spirit and silently inert.
+        if (!wouldPlaceTheTemplateBlock && !"backfill".equals(caller)
+                && !princeps.getBuilderProcess().scaffoldIsLicensedAt(placeAt)) {
+            BuildTrace.cell(BuildTrace.tickNow(), "SCAFFOLD-REFUSED", placeAt.getX(), placeAt.getY(), placeAt.getZ(),
+                    "no proven stance justifies a helper block here by=" + caller + " " + BuildTrace.intentNow());
+            state.setStatus(MovementStatus.UNREACHABLE);
+            return PlaceResult.NO_OPTION;
+        }
+        // THE ROUTE'S OWN RULE, asked of the route rather than of a global field.
+        //
+        // The check above reads a predicate on the builder process, which is exactly the thing that cannot be
+        // trusted while a route is in flight: its answer depends on fields that every placement resets, so a route
+        // that was allowed to bridge lost the permission the moment it bridged. This one reads the licence the
+        // route was CREATED with, which nothing can change afterwards.
+        //
+        // Filling a cell the template names is deliberately NOT governed by it: that is construction, not a helper
+        // block, and the owner's rule is about helper blocks ("only where the template wants air"). Refusing it was
+        // measured once and froze the bot for 8800 ticks at 104,-58,89.
+        //
+        // Both checks stand side by side for now, and that is on purpose: every licence is unrestricted until the
+        // lane driver starts issuing real ones, so introducing this changes no behaviour and can be measured as the
+        // no-op it is. The predicate above goes when the driver lands.
+        if (!wouldPlaceTheTemplateBlock && !"backfill".equals(caller)
+                && !currentRouteLicence(princeps).permitsPlacement(placeAt)) {
+            BuildTrace.cell(BuildTrace.tickNow(), "LANE-REFUSED", placeAt.getX(), placeAt.getY(), placeAt.getZ(),
+                    "the route being driven may not place here (" + currentRouteLicence(princeps) + ") by=" + caller
+                            + " " + BuildTrace.intentNow());
+            state.setStatus(MovementStatus.UNREACHABLE);
+            return PlaceResult.NO_OPTION;
+        }
         Optional<Rotation> direct = RotationUtils.reachable(ctx, placeAt, wouldSneak); // we assume that if there is a block there, it must be replacable
         boolean found = false;
         if (direct.isPresent()) {
-            state.setTarget(new MovementTarget(direct.get(), true));
+            state.setTarget(MovementTarget.forPlacement(direct.get()));
             found = true;
         }
         for (int i = 0; i < 5; i++) {
@@ -1062,7 +1265,7 @@ public interface MovementHelper extends ActionCosts, Helper {
                 Rotation actual = princeps.getLookBehavior().getAimProcessor().peekRotationExact(place);
                 HitResult res = RayTraceUtils.rayTraceTowards(ctx.player(), actual, ctx.playerController().getBlockReachDistance(), wouldSneak);
                 if (res != null && res.getType() == HitResult.Type.BLOCK && ((BlockHitResult) res).getBlockPos().equals(against1) && ((BlockHitResult) res).getBlockPos().relative(((BlockHitResult) res).getDirection()).equals(placeAt)) {
-                    state.setTarget(new MovementTarget(place, true));
+                    state.setTarget(MovementTarget.forPlacement(place));
                     found = true;
 
                     if (!preferDown) {
@@ -1081,7 +1284,31 @@ public interface MovementHelper extends ActionCosts, Helper {
                 if (wouldSneak) {
                     state.setInput(Input.SNEAK, true);
                 }
-                ((Princeps) princeps).getInventoryBehavior().selectThrowawayForLocation(true, placeAt.getX(), placeAt.getY(), placeAt.getZ());
+                // THE SELECTION HAS TO SUCCEED AT THE CLICK, not merely have succeeded when we looked earlier.
+                //
+                // This return value was thrown away, and it is the whole bug. The check pass above (select=false,
+                // ~30 lines up) runs while a face is being searched for, and refuses the movement if no suitable
+                // block can be selected. This is the act pass, ticks later, and if it fails -- because the hotbar
+                // has moved underneath it, which on a map art it does constantly -- the click went out anyway with
+                // whatever happened to be in the hand.
+                //
+                // MEASURED 2026-08-18: "Cell 54235,81,39694 wanted: clay, got: lodestone" and "wanted:
+                // gray_terracotta, got: black_terracotta". Neither came from the builder's own click (its plan
+                // check fired zero times all run); both came through here, where a new row's first block is laid
+                // by the navigation rather than by the builder. Which block belongs in a cell is never in doubt --
+                // so a click that cannot hold that block must not be a click.
+                if (!((Princeps) princeps).getInventoryBehavior()
+                        .selectThrowawayForLocation(true, placeAt.getX(), placeAt.getY(), placeAt.getZ())) {
+                    BuildTrace.cell(BuildTrace.tickNow(), kind + "-REFUSED", placeAt.getX(), placeAt.getY(),
+                            placeAt.getZ(), "the block this cell wants was gone from the hand at the click by="
+                                    + caller + " " + BuildTrace.intentNow());
+                    state.setStatus(MovementStatus.UNREACHABLE);
+                    return PlaceResult.NO_OPTION;
+                }
+                // The branch that actually hands the click to the caller, and it used to write nothing at all -- so
+                // the one moment a block really goes in was the one moment with no line. Everything downstream had
+                // to infer landings from a later BREAK, which only ever proves the 24 of 41 that got broken again.
+                BuildTrace.cell(BuildTrace.tickNow(), kind, placeAt.getX(), placeAt.getY(), placeAt.getZ(), "ready to place by=" + caller + " " + BuildTrace.intentNow());
                 return PlaceResult.READY_TO_PLACE;
             }
         }
@@ -1090,6 +1317,16 @@ public interface MovementHelper extends ActionCosts, Helper {
                 state.setInput(Input.SNEAK, true);
             }
             ((Princeps) princeps).getInventoryBehavior().selectThrowawayForLocation(true, placeAt.getX(), placeAt.getY(), placeAt.getZ());
+            // Helper blocks were invisible until now: the build trace records what the BUILDER does, and a block the
+            // pathfinder lays to stand on is not a build action. So "cobblestone LAND: 0" could be read off a run
+            // that was placing them steadily, and nobody could count what goal.md's criterion 7 forbids leaving
+            // behind.
+            //
+            // This is the AIMING branch, not the placing one -- named accordingly, because the original name said
+            // "placed" and got counted as such: 57 lines over 41 coordinates in 20260802-232954, up to four lines
+            // for a single block while the bot turned towards it.
+            BuildTrace.cell(BuildTrace.tickNow(), kind + "-AIM", placeAt.getX(), placeAt.getY(), placeAt.getZ(),
+                    "turning towards the face to place against");
             return PlaceResult.ATTEMPTING;
         }
         return PlaceResult.NO_OPTION;

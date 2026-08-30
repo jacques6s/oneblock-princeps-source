@@ -19,6 +19,9 @@ package princeps.pathing.movement;
 
 import princeps.Princeps;
 import princeps.api.IPrinceps;
+// Imported, never qualified: this class has a public field named `princeps`, which shadows the package root.
+import princeps.api.pathing.PlacementLicence;
+import princeps.api.pathing.WadeLicence;
 import princeps.api.pathing.movement.ActionCosts;
 import princeps.cache.WorldData;
 import princeps.pathing.precompute.PrecomputedData;
@@ -64,7 +67,16 @@ public class CalculationContext {
     protected final double placeBlockCost; // protected because you should call the function instead
     public final boolean allowBreak;
     public final List<Block> allowBreakAnyway;
-    public final boolean allowParkour;
+    // NOT final, unlike its neighbours: BuilderCalculationContext raises it. The builder has a reason the ordinary
+    // pathfinder does not -- it must REACH cells, and a course that is only partly built is full of one-block gaps in
+    // the floor. Forbidding the jump does not stop the bot, it makes it fill the gap with a helper block instead, and
+    // a helper block is the thing that gets built in and cannot be taken out again. Measured on run bc6db984: 171 of
+    // 174 helper blocks went in at y=-60, i.e. into the FLOOR, 123 of them 20-34 blocks out at the rim. Those are
+    // jumps, priced as construction. The user's setting stays untouched; only the builder's own context differs.
+    public boolean allowParkour;
+    // Stays as the user set it, deliberately, and the builder does NOT raise it: allowParkourPlace is the jump that
+    // places a block in mid-air, which is precisely the unreachable, unremovable helper block the owner's rule exists
+    // to prevent. Pure jumping adds no blocks at all; that is why only the field above is opened.
     public final boolean allowParkourPlace;
     public final boolean allowJumpAtBuildLimit;
     public final boolean allowParkourAscend;
@@ -212,6 +224,14 @@ public class CalculationContext {
         return placeBlockCost;
     }
 
+    /**
+     * Route-local node filter. Ordinary navigation accepts every geometrically valid destination; specialised
+     * callers may narrow one calculation without replacing the pathfinder or its human movement controller.
+     */
+    public boolean isPathPositionAllowed(int x, int y, int z) {
+        return true;
+    }
+
     public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
         if (!allowBreak && !allowBreakAnyway.contains(current.getBlock())) {
             return COST_INF;
@@ -220,6 +240,54 @@ public class CalculationContext {
             return COST_INF;
         }
         return 1;
+    }
+
+    /**
+     * Whether a route owned by this context may use doors and fence gates.
+     *
+     * <p>The ordinary navigator may: {@code MovementTraverse} knows how to open them. A builder that has frozen and
+     * proved an exact world-state plan may not, because toggling one is an unplanned world mutation and invalidates
+     * that proof. Kept on the calculation context so the rule follows the path that requested it instead of changing
+     * navigation globally.
+     */
+    public boolean mayUsePathingBarriers() {
+        return true;
+    }
+
+    /**
+     * Would the block this context PLACES at (x,y,z) be a standable full cube? Pillar / ascend / bridge moves stand
+     * on the block they place, so a placement that yields a fence/wall/thin non-cube top is not a valid step-up
+     * target. The base context places a generic throwaway full cube, so this is always true; the schematic builder
+     * overrides it to check the schematic's own block (a schematic fence must never be pillared onto).
+     */
+    public boolean placedBlockIsStandable(int x, int y, int z, BlockState current) {
+        return true;
+    }
+
+    /**
+     * What a route planned with THIS context may do to the world while it is driven — the "Setz-Erlaubnis".
+     *
+     * <p>Read at exactly two moments and never in between: once by the search, so a lane that may not place blocks
+     * cannot return a route that does; and once when the route's executor is created, so the driving obeys the rules
+     * the planning used. That is the whole of "no mixed operation", and it is why this lives on the context rather
+     * than on a process: a context belongs to one search, a process outlives every route it starts.
+     *
+     * <p>The base context is unrestricted, so ordinary navigation is untouched.
+     */
+    public PlacementLicence placementLicence() {
+        return PlacementLicence.UNRESTRICTED;
+    }
+
+    /**
+     * Where a route planned with THIS context may stand in water instead of treating it as a wall — the
+     * "Wat-Erlaubnis". Read at the same two moments as {@link #placementLicence()} and for the same reason.
+     *
+     * <p>The base context licenses nothing, so ordinary navigation is untouched: it goes on refusing flowing liquid
+     * outright, which in an open world is the correct caution. Only a caller that owns the cell it is asking about
+     * — the excavation lane owns the corridor it cut — may say otherwise.
+     */
+    public WadeLicence wadeLicence() {
+        return WadeLicence.NONE;
     }
 
     public double placeBucketCost() {

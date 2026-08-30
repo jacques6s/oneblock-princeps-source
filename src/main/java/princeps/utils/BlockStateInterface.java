@@ -94,7 +94,33 @@ public class BlockStateInterface {
         return get0(pos.getX(), pos.getY(), pos.getZ());
     }
 
+    // EINE ANGENOMMENE WELT, zweite Haelfte. Die erste sitzt in BuilderProcess.mitAngenommenemBlock und fasst die
+    // Client-Welt an, damit vanillas getPlacementState den Block sieht; diese hier deckt die Wegfindung ab, die
+    // ueber get0 liest. BEIDE zusammen, oder gar nicht: die Fassung mit nur dieser Haelfte war gemessen schlechter
+    // als keine Pruefung (4315 -> 2752 Zellen), weil sie fuer jeden Fall, in dem der Hilfsblock die Klickflaeche
+    // IST, keinen Standplatz fand und ausgerechnet den guten Kandidaten verwarf.
+    private BlockState angenommenerZustand;
+    private int angenommenX;
+    private int angenommenY;
+    private int angenommenZ;
+
+    /** Tu so, als staende an dieser Stelle dieser Block. Gilt bis {@link #vergissAnnahme()}. */
+    public void nimmBlockAn(BlockPos wo, BlockState was) {
+        this.angenommenX = wo.getX();
+        this.angenommenY = wo.getY();
+        this.angenommenZ = wo.getZ();
+        this.angenommenerZustand = was;
+    }
+
+    /** Zurueck zur wirklichen Welt. Gehoert IMMER in ein finally -- eine vergessene Annahme verfaelscht alles. */
+    public void vergissAnnahme() {
+        this.angenommenerZustand = null;
+    }
+
     public BlockState get0(int x, int y, int z) { // Mickey resigned
+        if (angenommenerZustand != null && x == angenommenX && y == angenommenY && z == angenommenZ) {
+            return angenommenerZustand;
+        }
         y -= world.dimensionType().minY();
         // Invalid vertical position
         if (y < 0 || y >= world.dimensionType().height()) {

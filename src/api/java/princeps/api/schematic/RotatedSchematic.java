@@ -17,6 +17,7 @@
 
 package princeps.api.schematic;
 
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.Rotation;
 
@@ -55,6 +56,19 @@ public class RotatedSchematic implements ISchematic {
                 rotate(current, inverseRotation),
                 rotate(approxPlaceable, inverseRotation)
         ), rotation);
+    }
+
+    /**
+     * The rotated cell's NBT. Coordinates go through the same inverse rotation {@link #desiredState} uses; the
+     * compound itself is passed through untouched, because a sign's text does not rotate.
+     */
+    @Override
+    public CompoundTag blockEntity(int x, int y, int z) {
+        return schematic.blockEntity(
+                rotateX(x, z, widthX(), lengthZ(), inverseRotation),
+                y,
+                rotateZ(x, z, widthX(), lengthZ(), inverseRotation)
+        );
     }
 
     @Override

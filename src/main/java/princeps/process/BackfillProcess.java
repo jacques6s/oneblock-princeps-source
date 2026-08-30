@@ -25,6 +25,8 @@ import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementState;
 import princeps.pathing.path.PathExecutor;
+// Imported, never qualified: this class has a field named `princeps`, which shadows the package root.
+import princeps.process.builder.BuildTrace;
 import princeps.utils.PrincepsProcessHelper;
 import java.util.*;
 import java.util.stream.Collectors;
@@ -73,16 +75,22 @@ public final class BackfillProcess extends PrincepsProcessHelper {
         princeps.getInputOverrideHandler().clearAllKeys();
         for (BlockPos toPlace : toFillIn()) {
             MovementState fake = new MovementState();
-            switch (MovementHelper.attemptToPlaceABlock(fake, princeps, toPlace, false, false)) {
+            switch (MovementHelper.attemptToPlaceABlock(fake, princeps, toPlace, false, false, "backfill")) {
                 case NO_OPTION:
                     continue;
                 case READY_TO_PLACE:
+                    // Backfill places entirely OUTSIDE any route: it is its own process, it pauses the pathing while
+                    // it works, and MovementHelper lets it through on a string comparison (!"backfill".equals(caller)).
+                    // No rule that binds a placement to a path can ever reach it, so the census has to name it
+                    // separately -- otherwise a build that forbids helper blocks would still quietly grow some.
+                    BuildTrace.intendWorldChange("backfill",
+                            toPlace.getX(), toPlace.getY(), toPlace.getZ(), "filling a hole left behind");
                     princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
                     return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
                 case ATTEMPTING:
-                    // patience (forward the fake movement's break intent so a break aim keeps its arc shape)
+                    // Patience: forward the movement's full intent so both break and placement aims keep their arc.
                     princeps.getLookBehavior().updateTarget(fake.getTarget().getRotation().get(), true,
-                            fake.getTarget().isBreakIntent());
+                            fake.getTarget().getAimIntent());
                     return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
                 default:
                     throw new IllegalStateException();

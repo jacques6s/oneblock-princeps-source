@@ -41,11 +41,22 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
 
     private final Favoring favoring;
     private final CalculationContext calcContext;
+    private final SearchBudget budget;
 
-    public AStarPathFinder(BetterBlockPos realStart, int startX, int startY, int startZ, Goal goal, Favoring favoring, CalculationContext context) {
+    /**
+     * @param budget how many nodes this search may expand. MANDATORY rather than optional on purpose — see
+     *               {@link SearchBudget}. Pass {@link SearchBudget#UNLIMITED} for today's behaviour.
+     */
+    public AStarPathFinder(BetterBlockPos realStart, int startX, int startY, int startZ, Goal goal, Favoring favoring,
+                           CalculationContext context, SearchBudget budget) {
         super(realStart, startX, startY, startZ, goal, context);
         this.favoring = favoring;
         this.calcContext = context;
+        if (budget == null) {
+            throw new IllegalArgumentException("a search without a budget is the thing this parameter exists to"
+                    + " prevent; pass SearchBudget.UNLIMITED to keep the old behaviour");
+        }
+        this.budget = budget;
     }
 
     @Override
@@ -80,7 +91,15 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
         int pathingMaxChunkBorderFetch = Princeps.settings().pathingMaxChunkBorderFetch.value; // grab all settings beforehand so that changing settings during pathing doesn't cause a crash or unpredictable behavior
         double minimumImprovement = Princeps.settings().minimumImprovementRepropagation.value ? MIN_IMPROVEMENT : 0;
         Moves[] allMoves = Moves.values();
+        boolean outOfBudget = false;
         while (!openSet.isEmpty() && numEmptyChunk < pathingMaxChunkBorderFetch && !cancelRequested) {
+            // Checked before the clock, and every node rather than every 64: a budget is a promise about work done,
+            // and one that can be overrun by up to 63 nodes is a weaker promise than it looks. The comparison is an
+            // int compare against a field, so it costs nothing next to the movement expansion below it.
+            if (numNodes >= budget.maxNodes()) {
+                outOfBudget = true;
+                break;
+            }
             if ((numNodes & (timeCheckInterval - 1)) == 0) { // only call this once every 64 nodes (about half a millisecond)
                 long now = System.currentTimeMillis(); // since nanoTime is slow on windows (takes many microseconds)
                 if (now - failureTimeoutTime >= 0 || (!failing && now - primaryTimeoutTime >= 0)) {
@@ -96,6 +115,18 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
             mostRecentConsidered = currentNode;
             numNodes++;
             if (goal.isInGoal(currentNode.x, currentNode.y, currentNode.z)) {
+                // THE NUMBER NOBODY HAD, and its absence made every estimate of search cost wrong by an order of
+                // magnitude. The three println lines after the loop -- movements considered, open set size, PathNode
+                // map size, nodes per second -- are on the FAILURE path: a search that reaches its goal returns HERE
+                // and prints none of them. So every node count in every log of this project belongs to a search that
+                // did NOT arrive, which is why "a 47-block path costs the same as a 7-block path" came out of the
+                // data: both numbers were really the wall clock (500 ms primary / 2000 ms failure) in disguise, at
+                // the measured ~115000 nodes per second.
+                //
+                // A budget for lane A has to be derived from the searches that SUCCEED, and until this line existed
+                // there was no way to see one. Printed at debug level, so it costs nothing unless someone is looking.
+                System.out.println("reached goal after " + numNodes + " nodes, " + numMovementsConsidered
+                        + " movements, " + (System.currentTimeMillis() - startTime) + "ms");
                 logDebug("Took " + (System.currentTimeMillis() - startTime) + "ms, " + numMovementsConsidered + " movements considered");
                 return Optional.of(new Path(realStart, startNode, currentNode, numNodes, goal, calcContext));
             }
@@ -130,6 +161,9 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
                             SettingsUtil.maybeCensor(currentNode.y),
                             SettingsUtil.maybeCensor(currentNode.z),
                             actionCost));
+                }
+                if (!calcContext.isPathPositionAllowed(res.x, res.y, res.z)) {
+                    continue;
                 }
                 // check destination after verifying it's not COST_INF -- some movements return COST_INF without adjusting the destination
                 if (moves.dynamicXZ && !worldBorder.entirelyContains(res.x, res.z)) { // see issue #218
@@ -200,6 +234,13 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
         System.out.println("Open set size: " + openSet.size());
         System.out.println("PathNode map size: " + mapSize());
         System.out.println((int) (numNodes * 1.0 / ((System.currentTimeMillis() - startTime) / 1000F)) + " nodes per second");
+        if (outOfBudget) {
+            // Said out loud, because "the search stopped early" and "the search found nothing" look identical from
+            // the outside and mean opposite things: the first is a budget that may be too small, the second is a
+            // world that has no route in it. Every past investigation into a stalled build had to guess which.
+            logDebug("Search ended on its node budget (" + budget + ") after " + numNodes + " nodes; whatever it"
+                    + " returns is the best it had, not the best there is");
+        }
         Optional<IPath> result = bestSoFar(true, numNodes);
         if (result.isPresent()) {
             logDebug("Took " + (System.currentTimeMillis() - startTime) + "ms, " + numMovementsConsidered + " movements considered");

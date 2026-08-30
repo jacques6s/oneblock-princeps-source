@@ -31,6 +31,8 @@ import princeps.api.utils.PathCalculationResult;
 import princeps.api.utils.interfaces.IGoalRenderPos;
 import princeps.pathing.calc.AStarPathFinder;
 import princeps.pathing.calc.AbstractNodeCostSearch;
+// Imported, never qualified: this class has a field named `princeps`, which shadows the package root.
+import princeps.pathing.calc.SearchBudget;
 import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.path.PathExecutor;
@@ -521,7 +523,11 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
 
             PathCalculationResult calcResult = pathfinder.calculate(primaryTimeout, failureTimeout);
             synchronized (pathPlanLock) {
-                Optional<PathExecutor> executor = calcResult.getPath().map(p -> new PathExecutor(PathingBehavior.this, p));
+                // The licences of the context THIS search ran under, not of whatever the field holds now: by the time
+                // this callback runs, a newer command may already have replaced `context`.
+                Optional<PathExecutor> executor = calcResult.getPath()
+                        .map(p -> new PathExecutor(PathingBehavior.this, p,
+                                context.placementLicence(), context.wadeLicence()));
                 if (current == null) {
                     if (executor.isPresent()) {
                         if (executor.get().getPath().positions().contains(expectedSegmentStart)) {
@@ -584,7 +590,11 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
         if (feet.getY() == realStart.getY() && Math.abs(sub.getX()) <= 1 && Math.abs(sub.getZ()) <= 1) {
             realStart = feet;
         }
-        return new AStarPathFinder(realStart, start.getX(), start.getY(), start.getZ(), transformed, favoring, context);
+        // UNLIMITED, i.e. exactly today's behaviour: bounded by primaryTimeoutMS / failureTimeoutMS and nothing else.
+        // The parameter is mandatory so that the two-lane builder search, which asks per CELL and cannot afford a
+        // two-second failure timeout each time, has to state its own budget rather than inherit this one by silence.
+        return new AStarPathFinder(realStart, start.getX(), start.getY(), start.getZ(), transformed, favoring, context,
+                SearchBudget.UNLIMITED);
 
     }
 

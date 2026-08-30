@@ -174,6 +174,27 @@ public final class RotationUtils {
         return reachable(ctx, pos, blockReachDistance, false);
     }
 
+    /**
+     * Stable reachability for a work target, independent of the live look direction.
+     *
+     * <p>The normal helper intentionally favours the point nearest the current gaze. That is useful for free looking,
+     * but selecting a block from that answer closes a feedback loop: target changes aim and aim changes target. Work
+     * selection is instead seeded from eye to block centre and then uses the same guarded, humanised scatter.
+     */
+    public static Optional<Rotation> reachableForWork(IPlayerContext ctx, BlockPos pos,
+                                                       double blockReachDistance, boolean wouldSneak) {
+        if (PrincepsAPI.getSettings().humanizedLook.value && !wouldSneak) {
+            Vec3 eyes = ctx.player().getEyePosition(1.0F);
+            Vec3 center = VecUtils.calculateBlockCenter(ctx.world(), pos);
+            Optional<Rotation> humanized = reachableHumanized(ctx, pos, blockReachDistance,
+                    center.subtract(eyes).normalize());
+            if (humanized.isPresent()) {
+                return humanized;
+            }
+        }
+        return reachableGeometric(ctx, pos, blockReachDistance, wouldSneak);
+    }
+
     public static Optional<Rotation> reachable(IPlayerContext ctx, BlockPos pos, double blockReachDistance, boolean wouldSneak) {
         if (PrincepsAPI.getSettings().remainWithExistingLookDirection.value && ctx.isLookingAt(pos)) {
             /*
@@ -205,12 +226,19 @@ public final class RotationUtils {
         // centroid / face centers below, unchanged. Predictions go through peekRotationExact (in reachableOffset), so
         // reach/place stays byte-consistent. Only breaking/interacting use this; placement-against has its own aim.
         if (PrincepsAPI.getSettings().humanizedLook.value && !wouldSneak) {
-            Optional<Rotation> humanized = reachableHumanized(ctx, pos, blockReachDistance);
+            Optional<Rotation> humanized = reachableHumanized(ctx, pos, blockReachDistance,
+                    calcLookDirectionFromRotation(ctx.playerRotations()));
             if (humanized.isPresent()) {
                 return humanized;
             }
         }
 
+        return reachableGeometric(ctx, pos, blockReachDistance, wouldSneak);
+    }
+
+    /** The original centre-and-face-centre reach test, with no dependency on the current look. */
+    public static Optional<Rotation> reachableGeometric(IPlayerContext ctx, BlockPos pos,
+                                                         double blockReachDistance, boolean wouldSneak) {
         Optional<Rotation> possibleRotation = reachableCenter(ctx, pos, blockReachDistance, wouldSneak);
         //System.out.println("center: " + possibleRotation);
         if (possibleRotation.isPresent()) {
@@ -283,12 +311,13 @@ public final class RotationUtils {
      * correctness is never traded for realism. Deterministic per block (stable across ticks) so the reach raytrace
      * never flips hit&lt;-&gt;miss from tick jitter.
      */
-    private static Optional<Rotation> reachableHumanized(IPlayerContext ctx, BlockPos pos, double blockReachDistance) {
+    private static Optional<Rotation> reachableHumanized(IPlayerContext ctx, BlockPos pos,
+                                                          double blockReachDistance, Vec3 seedLook) {
         final Vec3 eyes = ctx.player().getEyePosition(1.0F);
         final Vec3 center = VecUtils.calculateBlockCenter(ctx.world(), pos);
 
         // Closest point on our current look ray to the block center → where the block sits relative to our aim.
-        final Vec3 look = calcLookDirectionFromRotation(ctx.playerRotations());
+        final Vec3 look = seedLook;
         final double t = Mth.clamp(center.subtract(eyes).dot(look), 0.0, blockReachDistance);
         final Vec3 rayPt = eyes.add(look.scale(t));
 

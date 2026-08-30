@@ -29,9 +29,13 @@ import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementState;
+// Imported rather than written out: Movement carries a field named `princeps`, which shadows the package root, so
+// `princeps.process.builder.BuildTrace` does not resolve inside this class.
+import princeps.process.builder.BuildTrace;
 import princeps.utils.BlockStateInterface;
 import com.google.common.collect.ImmutableSet;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Direction;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -43,6 +47,8 @@ import net.minecraft.world.level.block.SlabBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.SlabType;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 
 import java.util.Optional;
 import java.util.Set;
@@ -53,6 +59,8 @@ public class MovementTraverse extends Movement {
      * Did we have to place a bridge block or was it always there
      */
     private boolean wasTheBridgeBlockAlwaysThere = true;
+    /** Once the back-place look has landed, keep edging out while the exact live-ray gate waits for placement range. */
+    private boolean backplaceAimReady;
 
     public MovementTraverse(IPrinceps princeps, BetterBlockPos from, BetterBlockPos to) {
         super(princeps, from, to, new BetterBlockPos[]{to.above(), to}, to.below());
@@ -62,6 +70,7 @@ public class MovementTraverse extends Movement {
     public void reset() {
         super.reset();
         wasTheBridgeBlockAlwaysThere = true;
+        backplaceAimReady = false;
     }
 
     @Override
@@ -135,6 +144,10 @@ public class MovementTraverse extends Movement {
                 }
                 double placeCost = context.costOfPlacingAt(destX, y - 1, destZ, destOn);
                 if (placeCost >= COST_INF) {
+                    return COST_INF;
+                }
+                // We walk ONTO the bridged block — it must be a standable full cube (never a schematic fence/wall).
+                if (!context.placedBlockIsStandable(destX, y - 1, destZ, destOn)) {
                     return COST_INF;
                 }
                 double hardness1 = MovementHelper.getMiningDurationTicks(context, destX, y, destZ, pb1, false);
@@ -215,7 +228,8 @@ public class MovementTraverse extends Movement {
                 pitchToBreak = 26f + ((Long.hashCode(dest.asLong()) & 7) - 3) * 1.1f; // ~23..30, stable per block
             }
 
-            return state.setTarget(new MovementState.MovementTarget(new Rotation(yawToDest, pitchToBreak), true, true))
+            return state.setTarget(MovementState.MovementTarget.forBreak(
+                            new Rotation(yawToDest, pitchToBreak)))
                     .setInput(Input.MOVE_FORWARD, true)
                     .setInput(Input.SPRINT, true);
         }
@@ -231,6 +245,10 @@ public class MovementTraverse extends Movement {
             boolean canOpen = !(Blocks.IRON_DOOR.equals(pb0.getBlock()) || Blocks.IRON_DOOR.equals(pb1.getBlock()));
 
             if (notPassable && canOpen) {
+                // Declared as its own kind: opening a door is a world change the census must be able to tell apart
+                // from placing a block, because the two answer different questions about a block-free lane.
+                BuildTrace.intendWorldChange("traverse-door", positionsToBreak[0].getX(),
+                        positionsToBreak[0].getY(), positionsToBreak[0].getZ(), "opening to walk through");
                 return state.setTarget(new MovementState.MovementTarget(RotationUtils.calcRotationFromVec3d(ctx.playerHead(), VecUtils.calculateBlockCenter(ctx.world(), positionsToBreak[0]), ctx.playerRotations()), true))
                         .setInput(Input.CLICK_RIGHT, true);
             }
@@ -243,6 +261,8 @@ public class MovementTraverse extends Movement {
             if (blocked != null) {
                 Optional<Rotation> rotation = RotationUtils.reachable(ctx, blocked);
                 if (rotation.isPresent()) {
+                    BuildTrace.intendWorldChange("traverse-gate", blocked.getX(), blocked.getY(), blocked.getZ(),
+                            "opening to walk through");
                     return state.setTarget(new MovementState.MovementTarget(rotation.get(), true)).setInput(Input.CLICK_RIGHT, true);
                 }
             }
@@ -276,7 +296,15 @@ public class MovementTraverse extends Movement {
             BlockPos into = dest.subtract(src).offset(dest);
             BlockState intoBelow = BlockStateInterface.get(ctx, into);
             BlockState intoAbove = BlockStateInterface.get(ctx, into.above());
-            if (wasTheBridgeBlockAlwaysThere && (!MovementHelper.isLiquid(ctx, feet) || Princeps.settings().sprintInWater.value) && (!MovementHelper.avoidWalkingInto(intoBelow) || MovementHelper.isWater(intoBelow)) && !MovementHelper.avoidWalkingInto(intoAbove)) {
+            // SPRINT IS THE INPUT THE FLOODED CORRIDOR WAS MISSING. Wading under vanilla physics moves at a
+            // ~0.02 base factor with 0.8/tick friction; sprint-swimming lifts that friction to ~0.9 and is the
+            // only lever a walker has in water. This gate refused it whenever the feet were wet -- so the digger,
+            // licensed to stand in its own flooded corridor, could ask for forward every tick and still never
+            // exceed creep speed. Measured in run d05f21fd: 0% of ticks at walking speed in the flooded band
+            // against 20% in the healthy phase, and the run died of it. A licensed wading cell is the one place
+            // sprint in water is wanted; everywhere else the old refusal stands.
+            final boolean licensedWade = MovementHelper.currentRouteWadeLicence(princeps).permitsWading(feet);
+            if (wasTheBridgeBlockAlwaysThere && (!MovementHelper.isLiquid(ctx, feet) || Princeps.settings().sprintInWater.value || licensedWade) && (!MovementHelper.avoidWalkingInto(intoBelow) || MovementHelper.isWater(intoBelow)) && !MovementHelper.avoidWalkingInto(intoAbove)) {
                 state.setInput(Input.SPRINT, true);
             }
 
@@ -308,13 +336,15 @@ public class MovementTraverse extends Movement {
                 }
             }
             double dist1 = Math.max(Math.abs(ctx.player().position().x - (dest.getX() + 0.5D)), Math.abs(ctx.player().position().z - (dest.getZ() + 0.5D)));
-            PlaceResult p = MovementHelper.attemptToPlaceABlock(state, princeps, dest.below(), false, !Princeps.settings().assumeSafeWalk.value);
+            PlaceResult p = MovementHelper.attemptToPlaceABlock(state, princeps, dest.below(), false, !Princeps.settings().assumeSafeWalk.value, "traverse");
             if ((p == PlaceResult.READY_TO_PLACE || dist1 < 0.6) && !Princeps.settings().assumeSafeWalk.value) {
                 state.setInput(Input.SNEAK, true);
             }
             switch (p) {
                 case READY_TO_PLACE: {
                     if (ctx.player().isCrouching() || Princeps.settings().assumeSafeWalk.value) {
+                        BuildTrace.intendWorldChange("traverse-bridge", dest.below().getX(), dest.below().getY(),
+                                dest.below().getZ(), "bridging toward " + dest.getX() + "," + dest.getY() + "," + dest.getZ());
                         state.setInput(Input.CLICK_RIGHT, true);
                     }
                     return state;
@@ -352,18 +382,37 @@ public class MovementTraverse extends Movement {
                 double dist2 = Math.max(Math.abs(ctx.player().position().x - faceX), Math.abs(ctx.player().position().z - faceZ));
                 if (dist2 < 0.29) { // see issue #208
                     float yaw = RotationUtils.calcRotationFromVec3d(VecUtils.getBlockPosCenter(dest), ctx.playerHead(), ctx.playerRotations()).getYaw();
-                    state.setTarget(new MovementState.MovementTarget(new Rotation(yaw, pitch), true));
-                    state.setInput(Input.MOVE_BACK, true);
+                    state.setTarget(MovementState.MovementTarget.forPlacement(new Rotation(yaw, pitch)));
                 } else {
-                    state.setTarget(new MovementState.MovementTarget(backToFace, true));
+                    state.setTarget(MovementState.MovementTarget.forPlacement(backToFace));
                 }
-                if (ctx.isLookingAt(goalLook)) {
+                // The old exact aim could edge backwards and acquire the support face in the same tick. A curved
+                // placement aim first faces backwards while fully supported; otherwise its multi-tick turn and edge
+                // motion race. Once acquired, latch the motion so tiny geometry changes cannot chatter MOVE_BACK.
+                backplaceAimReady = backplaceMotionReady(backplaceAimReady,
+                        ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f));
+                if (backplaceAimReady) {
+                    state.setInput(Input.MOVE_BACK, true);
+                }
+                HitResult liveHit = ctx.objectMouseOver();
+                boolean exactBackplaceFace = liveHit != null && liveHit.getType() == HitResult.Type.BLOCK
+                        && ((BlockHitResult) liveHit).getBlockPos().equals(goalLook)
+                        && backplaceFaceReachesTarget(goalLook, ((BlockHitResult) liveHit).getDirection(), dest.below());
+                if (exactBackplaceFace) {
+                    // The sneak backplace. It never passes attemptToPlaceABlock, so it carries neither the template
+                    // guard nor the scaffold licence -- the same shape of leak MovementPillar had, and the reason
+                    // the census is declared at the button rather than at the decision.
+                    BuildTrace.intendWorldChange("traverse-backplace", dest.below().getX(), dest.below().getY(),
+                            dest.below().getZ(), "sneak backplace from " + goalLook.getX() + "," + goalLook.getY()
+                                    + "," + goalLook.getZ());
                     return state.setInput(Input.CLICK_RIGHT, true); // wait to right click until we are able to place
                 }
                 // Out.log("Trying to look at " + goalLook + ", actually looking at" + Princeps.whatAreYouLookingAt());
                 // Tremor-tolerant (see above): CLICK_LEFT just breaks the crosshair block, so sub-degree closeness
                 // to the intended aim is functionally identical to the old exact check.
-                if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)) {
+                if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)
+                        && liveHit != null && liveHit.getType() == HitResult.Type.BLOCK
+                        && !((BlockHitResult) liveHit).getBlockPos().equals(goalLook)) {
                     state.setInput(Input.CLICK_LEFT, true);
                 }
                 return state;
@@ -371,6 +420,14 @@ public class MovementTraverse extends Movement {
             MovementHelper.moveTowardsWithSlightRotation(ctx, state, dest);
             return state;
         }
+    }
+
+    static boolean backplaceMotionReady(boolean alreadyReady, boolean aimAligned) {
+        return alreadyReady || aimAligned;
+    }
+
+    static boolean backplaceFaceReachesTarget(BlockPos support, Direction face, BlockPos target) {
+        return support != null && face != null && target != null && support.relative(face).equals(target);
     }
 
     @Override

@@ -21,6 +21,8 @@ import princeps.api.PrincepsAPI;
 import princeps.api.utils.IPlayerContext;
 import princeps.utils.accessor.IPlayerControllerMP;
 import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.FallingBlock;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
@@ -48,6 +50,8 @@ public final class BlockBreakHelper {
     // every consecutive instamined block would pay a fresh 1..3-tick sighting stall (a 2-4x cadence regression,
     // confirmed in review). The full reaction only applies when the crosshair lands after a genuine idle/re-aim.
     private int rhythmTimer;
+    /** One-shot execution intent, consumed by the next helper tick. V2 never sets it and keeps its sampled cadence. */
+    private boolean deterministicThisTick;
 
     // ── glitch-block blacklist ──────────────────────────────────────────────────────────────────────────
     // A block that re-appears after we break it (the server re-sets it / it isn't really breakable and just
@@ -55,10 +59,13 @@ public final class BlockBreakHelper {
     // time within the window, blacklist it. Cheap to be wrong — we simply take another route; the caller's
     // stuck detection then re-routes / RTPs away. Once blacklisted the spot is never mined again.
     private static final int REGROW_LIMIT = 1;          // MORE than this many rapid re-breaks of the SAME block → blacklist (so the 2nd break blacklists)
+    private static final int COLUMN_SCAN_HEIGHT = 24;
     private static final long REGROW_WINDOW_MS = 4000L; // re-breaks farther apart than this are treated as unrelated
     private final java.util.Set<Long> blacklist = new java.util.HashSet<>();
     private long lastBrokenPosPacked = Long.MIN_VALUE;
     private int regrowCount;
+    /** Height of the fallable stack above the last broken cell when that break completed. */
+    private int lastColumnAbove;
     private long lastBrokenAtMs;
 
     BlockBreakHelper(IPlayerContext ctx) {
@@ -82,19 +89,41 @@ public final class BlockBreakHelper {
         blacklist.clear();
         lastBrokenPosPacked = Long.MIN_VALUE;
         regrowCount = 0;
+        lastColumnAbove = 0;
     }
 
-    /** Records a completed break of {@code pos} and blacklists it once it has regrown+been re-broken too often. */
+    /** Number of contiguous sand/gravel-like blocks directly above {@code pos}. */
+    private int fallableColumnAbove(BlockPos pos) {
+        int count = 0;
+        for (int dy = 1; dy <= COLUMN_SCAN_HEIGHT; dy++) {
+            BlockState above = ctx.world().getBlockState(pos.above(dy));
+            if (!(above.getBlock() instanceof FallingBlock)) {
+                break;
+            }
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * Records a completed break and distinguishes a server reset from a falling column refilling the cell.
+     * A real refill consumes one block above; a glitch reset leaves that column unchanged.
+     */
     private void noteBreak(BlockPos pos) {
         final long packed = pos.asLong();
         final long now = System.currentTimeMillis();
-        if (packed == this.lastBrokenPosPacked && (now - this.lastBrokenAtMs) < REGROW_WINDOW_MS) {
+        final int column = fallableColumnAbove(pos);
+        final boolean sameCellAgain = packed == this.lastBrokenPosPacked
+                && (now - this.lastBrokenAtMs) < REGROW_WINDOW_MS;
+        final boolean fallingRefill = sameCellAgain && column < this.lastColumnAbove;
+        if (sameCellAgain && !fallingRefill) {
             this.regrowCount++;
         } else {
             this.regrowCount = 1;
         }
         this.lastBrokenPosPacked = packed;
         this.lastBrokenAtMs = now;
+        this.lastColumnAbove = column;
         if (this.regrowCount > REGROW_LIMIT) {
             this.blacklist.add(packed);
         }
@@ -109,7 +138,14 @@ public final class BlockBreakHelper {
         }
     }
 
+    /** Mark the next helper tick as a replayable V3 break tick (no sampled sight delay or cooldown variance). */
+    public void requestDeterministicBreak() {
+        this.deterministicThisTick = true;
+    }
+
     public void tick(boolean isLeftClick) {
+        final boolean deterministic = this.deterministicThisTick;
+        this.deterministicThisTick = false;
         HitResult trace = ctx.objectMouseOver();
         boolean isBlockTrace = trace != null && trace.getType() == HitResult.Type.BLOCK;
         if (rhythmTimer > 0) {
@@ -120,7 +156,8 @@ public final class BlockBreakHelper {
         // arm a 1..3 tick wait from the moment of sighting. This runs BEFORE the cooldown early-return so the wait
         // counts down in parallel with the post-break cooldown (overlap, not stack: throughput ~unchanged). Leaving
         // the block resets the sighting, so re-acquiring it re-arms — "erst bei anvisieren starten".
-        if (PrincepsAPI.getSettings().humanizedLook.value && PrincepsAPI.getSettings().humanizedBreakSightDelay.value) {
+        if (!deterministic && PrincepsAPI.getSettings().humanizedLook.value
+                && PrincepsAPI.getSettings().humanizedBreakSightDelay.value) {
             if (isLeftClick && isBlockTrace) {
                 BlockPos pos = ((BlockHitResult) trace).getBlockPos();
                 if (!pos.equals(sightedPos)) {
@@ -176,7 +213,7 @@ public final class BlockBreakHelper {
                     // constant inter-break gap over thousands of blocks is a periodogram tell; a human's click-to-next
                     // gap varies by a few ticks. Symmetric ~Gaussian jitter (sum-of-3 uniforms) preserves the mean
                     // throughput exactly (verified 0.0% delta); floored at 2 so two breaks never collapse into a tick.
-                    if (PrincepsAPI.getSettings().humanizedLook.value && base > 2) {
+                    if (!deterministic && PrincepsAPI.getSettings().humanizedLook.value && base > 2) {
                         final double g = this.breakRng.nextDouble() + this.breakRng.nextDouble() + this.breakRng.nextDouble() - 1.5;
                         breakDelayTimer = Math.max(2, base + (int) Math.round(g * 2.2));
                     } else {

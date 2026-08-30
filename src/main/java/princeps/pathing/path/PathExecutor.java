@@ -18,6 +18,8 @@
 package princeps.pathing.path;
 
 import princeps.Princeps;
+import princeps.api.pathing.PlacementLicence;
+import princeps.api.pathing.WadeLicence;
 import princeps.api.pathing.calc.IPath;
 import princeps.api.pathing.movement.ActionCosts;
 import princeps.api.pathing.movement.IMovement;
@@ -75,11 +77,49 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     private boolean sprintNextTick;
 
+    /**
+     * The rules this route was planned under, captured once and never re-read.
+     *
+     * <p>Final on purpose. The thing it replaces — a predicate on the builder that the executor consulted live —
+     * could change while the route was in flight, and did: every placement reset the fields its answer depended on,
+     * so a route that was allowed to bridge lost that permission the moment it bridged. A field that cannot change
+     * cannot do that.
+     */
+    private final PlacementLicence placementLicence;
+
+    /** The other half of the same promise, and final for the same reason. See {@link WadeLicence}. */
+    private final WadeLicence wadeLicence;
+
     public PathExecutor(PathingBehavior behavior, IPath path) {
+        this(behavior, path, PlacementLicence.UNRESTRICTED, WadeLicence.NONE);
+    }
+
+    /**
+     * @param placementLicence the licence of the CalculationContext that produced {@code path}. Passed in rather
+     *                         than read from the behavior, because by the time a search's callback runs, the
+     *                         behavior's own context field may already belong to a newer command.
+     * @param wadeLicence      likewise, and it must come from the SAME context object: a search that priced a step
+     *                         through water and a driver that then tries to mine that water is the two-stroke stall
+     *                         the two licences exist to make impossible.
+     */
+    public PathExecutor(PathingBehavior behavior, IPath path, PlacementLicence placementLicence,
+                        WadeLicence wadeLicence) {
         this.behavior = behavior;
         this.ctx = behavior.ctx;
         this.path = path;
         this.pathPosition = 0;
+        this.placementLicence = placementLicence == null ? PlacementLicence.UNRESTRICTED : placementLicence;
+        this.wadeLicence = wadeLicence == null ? WadeLicence.NONE : wadeLicence;
+    }
+
+    @Override
+    public PlacementLicence placementLicence() {
+        return placementLicence;
+    }
+
+    @Override
+    public WadeLicence wadeLicence() {
+        return wadeLicence;
     }
 
     /** Same-tick re-entrancy depth of {@link #onTick()} (SUCCESS-advance / skips recurse); 0 = outermost call. */
@@ -681,7 +721,8 @@ public class PathExecutor implements IPathExecutor, Helper {
                         "Path has end %s instead of %s after splicing",
                         path.getDest(), next.getPath().getDest()));
             }
-            PathExecutor ret = new PathExecutor(behavior, path);
+            // Inherits the licences: a spliced or cut route is the SAME route under the same rules.
+            PathExecutor ret = new PathExecutor(behavior, path, placementLicence, wadeLicence);
             ret.pathPosition = pathPosition;
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             ret.costEstimateIndex = costEstimateIndex;
@@ -700,7 +741,8 @@ public class PathExecutor implements IPathExecutor, Helper {
                         newPath.getDest(), path.getDest()));
             }
             logDebug("Discarding earliest segment movements, length cut from " + path.length() + " to " + newPath.length());
-            PathExecutor ret = new PathExecutor(behavior, newPath);
+            // Inherits the licences: a spliced or cut route is the SAME route under the same rules.
+            PathExecutor ret = new PathExecutor(behavior, newPath, placementLicence, wadeLicence);
             ret.pathPosition = pathPosition - cutoffAmt;
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             if (costEstimateIndex != null) {

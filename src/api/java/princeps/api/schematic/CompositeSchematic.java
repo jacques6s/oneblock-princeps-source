@@ -19,6 +19,7 @@ package princeps.api.schematic;
 
 import java.util.ArrayList;
 import java.util.List;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.level.block.state.BlockState;
 
 public class CompositeSchematic extends AbstractSchematic {
@@ -69,6 +70,20 @@ public class CompositeSchematic extends AbstractSchematic {
             throw new IllegalStateException("couldn't find schematic for this position");
         }
         return entry.schematic.desiredState(x - entry.x, y - entry.y, z - entry.z, current, approxPlaceable);
+    }
+
+    /**
+     * The NBT of whichever subregion covers this cell, asked in the subregion's own coordinates.
+     *
+     * <p>Unlike {@link #desiredState} this returns {@code null} for an uncovered position rather than throwing: a
+     * missing block entity is the normal answer for almost every cell in a schematic, so a caller cannot be asked to
+     * guard every call with {@code inSchematic}, and a whole-volume scan that throws on the first gap is exactly the
+     * failure {@code BenchSchematics.fromFile} already pays for.
+     */
+    @Override
+    public CompoundTag blockEntity(int x, int y, int z) {
+        CompositeSchematicEntry entry = getSchematic(x, y, z, null);
+        return entry == null ? null : entry.schematic.blockEntity(x - entry.x, y - entry.y, z - entry.z);
     }
 
     @Override

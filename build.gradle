@@ -1,5 +1,5 @@
 plugins {
-    id 'net.fabricmc.fabric-loom' version '1.15.5'
+    id 'net.fabricmc.fabric-loom' version '1.15-SNAPSHOT'
     id 'java'
 }
 
@@ -42,6 +42,191 @@ repositories {
         url = 'https://babbaj.github.io/maven/'
     }
     mavenCentral()
+}
+
+// Dev runs, tuned for the builder test bench (docs/BENCH.md).
+loom {
+    runs {
+        client {
+            // A fixed name instead of the default Player###: op/whitelist state and log greps stay valid across
+            // launches, which is what lets an unattended run be scripted at all.
+            programArgs '--username', 'BenchBot'
+
+            // `gradlew runClient -Pbench=<scenario>` is the whole unattended entry point: join the bench server and
+            // run the scenario. A Gradle property rather than an env var, because JavaExec inherits the *daemon's*
+            // environment — which is a long-lived process that may predate the shell that launched this build.
+            if (project.hasProperty('bench')) {
+                programArgs '--quickPlayMultiplayer', project.findProperty('benchServer') ?: 'localhost:25566'
+                vmArgs "-Dprinceps.bench=${project.property('bench')}"
+                // -PbenchKeep leaves the client in the world after the verdict, for watching a run to its end.
+                if (project.hasProperty('benchKeep')) {
+                    vmArgs '-Dprinceps.bench.keep=true'
+                }
+                // -PbenchRun stamps every bench line with this launch's id, so a driver never mistakes the previous
+                // run's verdict (still sitting in latest.log until log4j rolls it) for this one's.
+                if (project.hasProperty('benchRun')) {
+                    vmArgs "-Dprinceps.bench.run=${project.property('benchRun')}"
+                }
+                // -PtimeScale=3 runs the client's game clock three times faster (MixinDeltaTrackerTimer). The bench
+                // raises the server to match; accelerating one side alone warps the world around the bot.
+                if (project.hasProperty('timeScale')) {
+                    vmArgs "-Dprinceps.bench.timescale=${project.property('timeScale')}"
+                }
+                // Map-art scenarios are supplied by the unprotected MapArtBenchDriver. The protected generic bench
+                // sees the sentinel scenario "none" and remains idle; both drivers still share its verifier.
+                if (project.hasProperty('mapArtScenario')) {
+                    vmArgs "-Dprinceps.bench.mapart=${project.property('mapArtScenario')}"
+                }
+                if (project.hasProperty('mapArtImage')) {
+                    vmArgs "-Dprinceps.bench.mapart.image=${project.property('mapArtImage')}"
+                }
+                // -PmapArtPad=1 shrinks the bench's 36-block launch pad to the ONE block the client module actually
+                // preserves. The generous pad is the only place this bench is easier than the product, and it is
+                // exactly where a real DonutSMP run failed, so it has to be reproducible here.
+                if (project.hasProperty('mapArtPad')) {
+                    vmArgs "-Dprinceps.bench.mapart.pad=${project.property('mapArtPad')}"
+                }
+                if (project.hasProperty('mapArtSize')) {
+                    vmArgs "-Dprinceps.bench.mapart.size=${project.property('mapArtSize')}"
+                }
+                if (project.hasProperty('mapArtMaterials')) {
+                    vmArgs "-Dprinceps.bench.mapart.materials=${project.property('mapArtMaterials')}"
+                }
+                if (project.hasProperty('buildRows')) {
+                    vmArgs '-Dprinceps.builder.rows=true'
+                }
+                if (project.hasProperty('bandRows')) {
+                    vmArgs "-Dprinceps.builder.bandrows=${project.property('bandRows')}"
+                }
+                // -PnoScaffold withholds the bot's throwaway block. The bench hands one over by default so it can
+                // pillar and bridge; withholding it is how the scaffold's interaction with the placement goal was
+                // isolated, so the switch stays available for that kind of bisection.
+                if (project.hasProperty('noScaffold')) {
+                    vmArgs '-Dprinceps.bench.scaffold=false'
+                }
+                // -PnoLayers builds by reach rather than strictly bottom-up. This is the experiment the whole build
+                // order rests on, not a convenience: see BuilderBench.applyProductionBuildSettings.
+                // Zusaetzlich ueber eine Umgebungsvariable, weil scripts/bench.ps1 geschuetzt ist und nur sieben
+                // Flags durchreicht -- noLayers und skipLayers sind nicht dabei. Der Kommentar in BuilderBench:311
+                // sagt aber "one flag settles it either way", und diese Frage ist die offene Hauptfrage des
+                // Projekts. Das Gate setzt die Variable, bench.ps1 bleibt unberuehrt.
+                if (project.hasProperty('noLayers') || System.getenv('PRINCEPS_NO_LAYERS')) {
+                    vmArgs '-Dprinceps.bench.nolayers=true'
+                }
+                // -PskipLayers lets the build climb past a layer it could not finish. See BuilderBench: layers earn
+                // their keep as a locality device, it is their strictness that blocks.
+                if (project.hasProperty('skipLayers') || System.getenv('PRINCEPS_SKIP_LAYERS')) {
+                    vmArgs '-Dprinceps.bench.skiplayers=true'
+                }
+                // -PdiscardCells / PRINCEPS_DISCARD schaltet buildNeverDiscard ab. Siehe Settings.buildNeverDiscard:
+                // ohne das gibt es in diesem Fork ueberhaupt keinen Ausgang aus einer unfertigen Ebene.
+                if (project.hasProperty('discardCells') || System.getenv('PRINCEPS_DISCARD')) {
+                    vmArgs '-Dprinceps.bench.discard=true'
+                }
+                // The aim hold is the thing under test, so it has to be switchable per run. Two runs that
+                // differ only in this flag are the only way to attribute a change in the shake numbers to it
+                // rather than to the terrain, the seed or the weather.
+                if (project.hasProperty('aimHold')) {
+                    vmArgs "-Dprinceps.bench.aimhold=${project.property('aimHold')}"
+                }
+                // -PtopDown builds the layers downward. See BuilderBench: the row that collapses an etz-basalt run
+                // holds 448 down-facing pistons, and those are placeable only once something stands above them.
+                if (project.hasProperty('topDown')) {
+                    vmArgs '-Dprinceps.bench.topdown=true'
+                }
+                if (project.hasProperty('snakeTrace')) {
+                    vmArgs '-Dprinceps.bench.snaketrace=true'
+                }
+                // -Pencase=<n> packs n blocks of solid rock around a dig scenario on every side and seals the bot
+                // into a two-block pocket at the body's edge, so the run has to mine its way IN before it can start
+                // clearing. Read by BuilderBench when it writes the setup commands.
+                if (project.hasProperty('encase')) {
+                    vmArgs "-Dprinceps.bench.encase=${project.property('encase')}"
+                }
+                def visibleAutoDigFixture = project.hasProperty('simple30x12')
+                        || project.hasProperty('integrityStress') || project.hasProperty('clusterStress')
+                if (project.hasProperty('areaTool') || visibleAutoDigFixture) {
+                    // Shard-pickaxe mode: a three-high band, a three-wide swing, and a server that honours the name.
+                    vmArgs '-Dprinceps.bench.areatool=true'
+                    vmArgs "-Dprinceps.bench.areapick=${project.findProperty('areaPick') ?: 'Shard Pickaxe'}"
+                }
+                // Damaged-slice regression: remove selected centre cells after the cube fill but before the clear
+                // starts. Optionally stock a second, ordinary pickaxe so both cleanup policies can be measured.
+                if (project.hasProperty('areaHoles')) {
+                    vmArgs '-Dprinceps.bench.areaholes=true'
+                }
+                if (project.hasProperty('areaFloorHoles')) {
+                    vmArgs '-Dprinceps.bench.areafloorholes=true'
+                }
+                if (project.hasProperty('areaCleanupPick')) {
+                    vmArgs '-Dprinceps.bench.areacleanpick=true'
+                }
+                // Visible AutoDig fixtures. clusterStress is the release-candidate superset: a 30x12x30 clear,
+                // clustered water/lava sources and exactly 30% missing side walls.
+                if (visibleAutoDigFixture) {
+                    vmArgs '-Dprinceps.bench.simple30x12=true'
+                    // The OneBlock production AutoDig profile does not pin the previous aim between interactions.
+                    vmArgs '-Dprinceps.bench.aimhold=false'
+                }
+                if (project.hasProperty('integrityStress')) {
+                    vmArgs '-Dprinceps.bench.integritystress=true'
+                }
+                if (project.hasProperty('clusterStress')) {
+                    vmArgs '-Dprinceps.bench.clusterstress=true'
+                }
+                if (project.hasProperty('ownerStart')) {
+                    vmArgs '-Dprinceps.bench.ownerstart=true'
+                }
+                // -PnoStall makes a run spend its whole tick budget instead of ending on the STALLED test, whose
+                // firing point is erratic. See BuilderBench.NO_STALL for the three runs that proved it.
+                if (project.hasProperty('noStall')) {
+                    vmArgs '-Dprinceps.bench.nostall=true'
+                }
+                // -PbuilderEngine=v3 pins the builder engine for this launch. Both engines are registered every
+                // session and the choice is resolved once, so a bench run must state it BEFORE the client starts --
+                // the alternative is the `builderEngineV3` setting, which is persisted and would therefore leak the
+                // bench's choice into the owner's next real launch. A system property is per-run and leaves no trace.
+                if (project.hasProperty('builderEngine')) {
+                    vmArgs "-Dprinceps.builder.engine=${project.property('builderEngine')}"
+                }
+                // -PbuildTrace turns on the v3 per-tick record. Off by default because it costs a line every tick and
+                // tens of megabytes a run; on, it is the only thing that answers "the bot is standing still and the log
+                // says nothing" -- which is the exact question a fault-only log cannot answer, and the reason 175
+                // missing cells stayed invisible for eight sessions.
+                // -PturnTicks=N pins the builder's head-turn speed for this launch, in ticks per 90 degrees (1..5).
+                // Same reasoning as builderEngine: a bench measurement must not write the owner's persisted setting.
+                if (project.hasProperty('turnTicks')) {
+                    vmArgs "-Dprinceps.builder.turnticks=${project.property('turnTicks')}"
+                }
+                // -PfullTrace adds the discard journal: every candidate the planner threw away, with its
+                // reason, its cell and the stance it was tried from. Gigabytes on a real schematic, and meant to be.
+                if (project.hasProperty('fullTrace')) {
+                    vmArgs "-Dprinceps.buildtrace.full=true"
+                }
+                if (project.hasProperty('buildTrace')) {
+                    vmArgs '-Dprinceps.buildtrace=true'
+                }
+                // -PwatchCells="x,y,z;x,y,z" makes the builder say out loud what it decides about those cells and
+                // nothing else. See CellWatch: the alternative is a line per skipped cell over 15004 cells, and the
+                // alternative to THAT is what A28 and A29 both did -- infer from missing lines and be wrong.
+                if (project.hasProperty('watchCells')) {
+                    vmArgs "-Dprinceps.builder.watch=${project.property('watchCells')}"
+                }
+            }
+        }
+        server {
+            // Client and server both default to `run/`, and a bench run has BOTH alive at once — they would share
+            // run/logs/latest.log, two log4j instances rolling and rewriting the same file. The bench reads its
+            // verdict out of that log, so the collision would corrupt exactly the artifact it exists to produce.
+            runDir = 'run-server'
+            // The area pickaxe is a SERVER behaviour -- the mixin that turns one swing into nine lives on this
+            // side. Arming only the client would leave the bot aiming at the right cells and mining one block a
+            // time, which measures a perfectly ordinary pickaxe and looks like a disappointing result.
+            if (project.hasProperty('areaTool')) {
+                vmArgs "-Dprinceps.bench.areapick=${project.findProperty('areaPick') ?: 'Shard Pickaxe'}"
+            }
+        }
+    }
 }
 
 // MC 26.1 is unobfuscated, no mappings needed
