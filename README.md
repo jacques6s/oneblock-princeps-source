@@ -45,6 +45,22 @@ Requires JDK 25.
 
 Output: `build/libs/princeps-*.jar`
 
+## Running a modified build with OneBlock
+
+OneBlock 0.3.214 and newer provide a supported LGPL replacement path. Copy an
+interface-compatible jar produced above to this location inside the isolated
+OneBlock game directory:
+
+```text
+oneblock/princeps/princeps-override.jar
+```
+
+Then start the game with the OneBlock installer/bootstrap supplied with that
+release. The bootstrap validates the Fabric id and required public API and uses
+your jar in place of the official Princeps artifact. A modified build may use
+its own version suffix. Delete `princeps-override.jar` to restore the official
+signed artifact on the next launch.
+
 ## License
 
 LGPL-3.0 - See [LICENSE](LICENSE)
