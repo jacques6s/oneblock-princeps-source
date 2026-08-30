@@ -1,19 +1,13 @@
-# NewPrinceps
+# OneBlock Princeps source
 
-Princeps mod ported to **Minecraft 26.1** (Fabric).
+This repository is the complete corresponding source for the Princeps build
+distributed with OneBlock for **Minecraft 26.1.2** (Fabric).
 
 Forked from [cabaletta/princeps](https://github.com/cabaletta/princeps) and updated for the unobfuscated MC 26.1.
 
-## Download
-
-**[Latest Release](https://github.com/XMRhapsody0807/NewPrinceps/releases/latest)**
-
-## Installation
-
-1. Install [Fabric Loader](https://fabricmc.net/) for Minecraft 26.1
-2. Download the jar from [Releases](https://github.com/XMRhapsody0807/NewPrinceps/releases)
-3. Place the jar into your `.minecraft/mods/` folder
-4. Launch the game
+The compiled module is delivered by the OneBlock installer. This repository is
+public so every recipient can inspect, modify, and rebuild the LGPL-covered
+pathfinding module independently of the proprietary OneBlock client.
 
 ## Usage
 
@@ -43,7 +37,7 @@ In game chat, type `#` followed by a command:
 
 ## Building from Source
 
-Requires JDK 21+ (JDK 25 for runtime).
+Requires JDK 25.
 
 ```bash
 ./gradlew jar
