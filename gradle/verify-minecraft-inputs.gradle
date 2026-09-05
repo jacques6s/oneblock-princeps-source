@@ -1,0 +1,131 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurper
+import java.nio.charset.StandardCharsets
+import java.security.DigestOutputStream
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+
+// Loom exposes its locally merged Minecraft ZIP as a Maven artifact. Its entry
+// order/timestamps vary, so verify complete file contents separately from ZIP
+// representation. The one matching archive is the sole verification exception.
+def pinsFile = file('gradle/minecraft-inputs.json')
+def reportFile = layout.buildDirectory.file('reports/minecraft-input-verification.json')
+def hex = { byte[] bytes -> HexFormat.of().formatHex(bytes) }
+def digestStream = { InputStream stream ->
+    def digest = MessageDigest.getInstance('SHA-256')
+    long length = 0
+    byte[] buffer = new byte[65536]
+    int count
+    while ((count = stream.read(buffer)) != -1) {
+        digest.update(buffer, 0, count)
+        length += count
+    }
+    [length: length, digest: digest.digest()]
+}
+def digestFile = { File source -> source.withInputStream { digestStream(it) } }
+
+def verifyMinecraftInputs = tasks.register('verifyMinecraftInputs') {
+    group = 'verification'
+    description = 'Verify official Minecraft inputs and all contents of Loom\'s resolved generated JAR'
+    // Recheck actual cache bytes on every invocation, including otherwise up-to-date builds.
+    outputs.upToDateWhen { false }
+    outputs.cacheIf { false }
+    doLast {
+        def pins = new JsonSlurper().parse(pinsFile)
+        def result = [verified: false, minecraft_version: project.minecraft_version,
+                      upstream: [:], resolved_artifacts: [], generated: [:], error: null]
+        try {
+            if (project.minecraft_version != pins.minecraft_version ||
+                    pins.content_digest_algorithm != 'Princeps Minecraft content v1') {
+                throw new GradleException('Minecraft version/content algorithm requires reviewed verification pins')
+            }
+            def cache = new File(gradle.gradleUserHomeDir, 'caches/fabric-loom')
+            pins.upstream_files.each { String name, expected ->
+                def actual = digestFile(new File(cache, "${pins.minecraft_version}/${name}"))
+                def observed = [bytes: actual.length, sha256: hex(actual.digest)]
+                result.upstream[name] = observed
+                if (observed.bytes != expected.bytes || observed.sha256 != expected.sha256) {
+                    throw new GradleException("Minecraft upstream verification failed: ${name}")
+                }
+            }
+
+            // Verify the actual resolved artifact, not merely a similarly named cache file.
+            // Both configurations supply the existing main/API and launch/test source sets.
+            def resolved = new LinkedHashSet<File>()
+            ['minecraftNamedCompile', 'minecraftNamedRuntime'].each { String configName ->
+                def matches = configurations.getByName(configName).incoming.artifacts.artifacts.findAll { artifact ->
+                    def id = artifact.id.componentIdentifier
+                    id instanceof ModuleComponentIdentifier && id.group == 'net.minecraft' &&
+                            id.module == 'minecraft-merged-deobf'
+                }
+                if (matches.size() != 1) {
+                    throw new GradleException("Expected exactly one generated Minecraft artifact in ${configName}")
+                }
+                def artifact = matches.first()
+                if (artifact.id.componentIdentifier.toString() != pins.generated_module ||
+                        artifact.file.name != pins.generated_file) {
+                    throw new GradleException("Unexpected generated Minecraft coordinate in ${configName}")
+                }
+                result.resolved_artifacts.add([configuration: configName,
+                        module: artifact.id.componentIdentifier.toString(), file: artifact.file.absolutePath])
+                resolved.add(artifact.file.canonicalFile)
+            }
+            if (resolved.size() != 1) {
+                throw new GradleException('Minecraft compile/runtime resolved different artifacts')
+            }
+            def generated = resolved.first()
+            def expectedPath = new File(cache, "minecraftMaven/net/minecraft/minecraft-merged-deobf/${pins.minecraft_version}/${pins.generated_file}")
+            if (generated != expectedPath.canonicalFile) {
+                throw new GradleException('Generated Minecraft artifact did not come from the expected local Loom cache')
+            }
+
+            def digest = MessageDigest.getInstance('SHA-256')
+            def framed = new DataOutputStream(new DigestOutputStream(OutputStream.nullOutputStream(), digest))
+            framed.write('Princeps Minecraft content v1\n'.getBytes(StandardCharsets.UTF_8))
+            int fileCount = 0
+            new ZipFile(generated).withCloseable { zip ->
+                def seen = new HashSet<String>()
+                def files = []
+                zip.entries().each { entry ->
+                    String name = entry.name
+                    if (!seen.add(name) || !(name ==~ /[\x20-\x7e]+/) || name.contains('\\') ||
+                            name.startsWith('/') || name.split('/').any { it == '.' || it == '..' || it.isEmpty() }) {
+                        throw new GradleException("Duplicate or noncanonical generated entry: ${name}")
+                    }
+                    if (!entry.directory) { files.add(entry) }
+                }
+                files.sort { a, b -> a.name <=> b.name }.each { entry ->
+                    byte[] name = entry.name.getBytes(StandardCharsets.UTF_8)
+                    def content = zip.getInputStream(entry).withCloseable { digestStream(it) }
+                    framed.writeInt(name.length)
+                    framed.write(name)
+                    framed.writeLong(content.length)
+                    framed.write(content.digest)
+                    fileCount++
+                }
+            }
+            framed.close()
+            result.generated = [archive_sha256: hex(digestFile(generated).digest),
+                    file_entries: fileCount, canonical_content_sha256: hex(digest.digest())]
+            if (fileCount != pins.file_entries || result.generated.canonical_content_sha256 != pins.canonical_content_sha256) {
+                throw new GradleException('Generated Minecraft content verification failed; see the verification report')
+            }
+            result.verified = true
+            logger.lifecycle("Minecraft input verification passed: {} files, content SHA-256 {}",
+                    fileCount, result.generated.canonical_content_sha256)
+        } catch (Exception failure) {
+            result.error = failure.message
+            throw failure
+        } finally {
+            def destination = reportFile.get().asFile
+            destination.parentFile.mkdirs()
+            destination.setText(JsonOutput.prettyPrint(JsonOutput.toJson(result)) + '\n', 'UTF-8')
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach { dependsOn(verifyMinecraftInputs) }
+tasks.withType(Test).configureEach { dependsOn(verifyMinecraftInputs) }
+tasks.withType(JavaExec).configureEach { dependsOn(verifyMinecraftInputs) }
+tasks.withType(Jar).configureEach { dependsOn(verifyMinecraftInputs) }

@@ -17,7 +17,8 @@ the existing OneBlock artifact or its published source offer by itself.
   Compilation uses UTF-8 and `--release 25`.
 - Minecraft 26.1.2, Fabric Loader 0.18.4, Nether Pathfinder 1.6, jsr305 3.0.2.
   Resolved versions are in `gradle.lockfile`; downloaded plugin/dependency bytes
-  are pinned by `gradle/verification-metadata.xml`.
+  are pinned by `gradle/verification-metadata.xml`. The locally generated
+  Minecraft JAR uses the complete-content verification described below.
 - Version comes from `mod_version=1.17.0` in `gradle.properties`. Local Git tags,
   dirty status, absence of Git, and the exporting computer do not change it.
 - Text inputs use LF. Archives have stable entry order and normalized timestamps.
@@ -54,6 +55,56 @@ The same API class bytes must occur in the full runtime jar.
 Do not use `--write-locks`, `--update-locks`, `--write-verification-metadata`, or
 disabled dependency verification when reproducing a release. Updating those
 files is a reviewed source change, not part of the rebuild procedure.
+
+## Portable verification of Loom's generated Minecraft archive
+
+Loom 1.15.5 publishes a local `net.minecraft:minecraft-merged-deobf:26.1.2`
+artifact. Its whole-ZIP hash is not reproducible: `MinecraftJarMerger` writes
+entries with parallel workers and preserves/creates ZIP filesystem timestamps.
+For unobfuscated Minecraft 26.1.2, `AbstractMappedMinecraftProvider.remapJar`
+copies that merged archive into the local Maven repository. These details were
+verified against the [pinned Loom sources](https://maven.fabricmc.net/net/fabricmc/fabric-loom/1.15.5/fabric-loom-1.15.5-sources.jar)
+and the checked plugin bytecode. A fresh Windows cache reproduced the original
+Linux CI failure: whole-file SHA-256 changed from `039ebfdc...` to `5da52570...`,
+while all 29,433 file names, lengths and uncompressed contents were identical.
+
+Gradle's archive verification therefore exempts **only** that exact generated
+JAR coordinate/version/filename. The generated POM and every external dependency
+remain subject to their existing checks. This is an exact match, not a group or
+configuration wildcard; global verification remains strict. See
+[Gradle's artifact matching rules](https://docs.gradle.org/current/userguide/dependency_verification.html#sec:trusting-artifacts).
+
+The mandatory `verifyMinecraftInputs` task replaces that single archive check
+with stronger content checks, before all JavaCompile, Test, JavaExec and Jar
+tasks, including otherwise up-to-date builds:
+
+1. Check the version JSON and original client/server downloads against reviewed
+   SHA-256 and byte-length pins in `gradle/minecraft-inputs.json`. The pins were
+   independently checked against fresh official downloads and Mojang's SHA-1
+   metadata. Loom also applies those upstream SHA-1 download checks.
+2. Resolve the actual Minecraft compile/runtime artifacts, require the expected
+   exact coordinates and local Loom path, and require both to refer to one file.
+3. Reject duplicate/noncanonical names. Sort all non-directory file entries by
+   their ASCII name, and compute a SHA-256 over the UTF-8 domain
+   `Princeps Minecraft content v1\n`, then for each file: big-endian 32-bit name
+   byte length, UTF-8 name, big-endian 64-bit actual content length, and the
+   32-byte SHA-256 of its entire uncompressed contents. Require the pinned file
+   count and resulting content digest. No classes or resources may be omitted,
+   added or altered. Directory metadata, order and compression do not affect it.
+
+The content digest is
+`cf9fbb33eb6c0d7d99283a5a451ad506704d0c7ad7bbcf5dbdc5fad9fddcd980`.
+This verifies a known complete derived artifact; it does not simply trust any
+output labelled as locally generated. A normal build never learns or updates
+hashes automatically. Changes to Minecraft or Loom require a reviewed input and
+content-pin update. Do not exclude `verifyMinecraftInputs` from the task graph.
+
+The check runs before compilation/test/game/package task execution. Loom may
+already parse ZIP/ASM data during project configuration, so this is not a
+pre-parser sandbox. The separate Gradle plugin/dependency checks remain active
+throughout. Reports are written to
+`build/reports/minecraft-input-verification.json`; both CI workflows upload them
+and any Gradle dependency-verification reports even on failure.
 
 ## Independent comparison
 

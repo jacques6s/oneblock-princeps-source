@@ -1,1 +1,4 @@
 * text=auto eol=lf
+
+# Immutable raw verification evidence retains its recorded bytes and hashes.
+autonomy/evidence/20260905-portable-inputs/** -text -whitespace

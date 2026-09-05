@@ -1,0 +1,69 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.4.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+Fabric Loom: 1.15.5
+
+> Task :verifyMinecraftInputs
+Minecraft input verification passed: 29433 files, content SHA-256 cf9fbb33eb6c0d7d99283a5a451ad506704d0c7ad7bbcf5dbdc5fad9fddcd980
+
+> Task :compileApiJava
+C:\Users\jacqu\Desktop\Princeps-codex-ci\src\api\java\princeps\api\utils\BlockOptionalMeta.java:60: Warnung: Unsafe ist eine interne proprietäre API, die in einem zukünftigen Release entfernt werden kann
+import sun.misc.Unsafe;
+               ^
+C:\Users\jacqu\Desktop\Princeps-codex-ci\src\api\java\princeps\api\utils\BlockOptionalMeta.java:262: Warnung: Unsafe ist eine interne proprietäre API, die in einem zukünftigen Release entfernt werden kann
+        private static Unsafe unsafe = getUnsafe();
+                       ^
+C:\Users\jacqu\Desktop\Princeps-codex-ci\src\api\java\princeps\api\utils\BlockOptionalMeta.java:292: Warnung: Unsafe ist eine interne proprietäre API, die in einem zukünftigen Release entfernt werden kann
+        public static Unsafe getUnsafe() {
+                      ^
+C:\Users\jacqu\Desktop\Princeps-codex-ci\src\api\java\princeps\api\utils\BlockOptionalMeta.java:294: Warnung: Unsafe ist eine interne proprietäre API, die in einem zukünftigen Release entfernt werden kann
+                Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+                                  ^
+C:\Users\jacqu\Desktop\Princeps-codex-ci\src\api\java\princeps\api\utils\BlockOptionalMeta.java:296: Warnung: Unsafe ist eine interne proprietäre API, die in einem zukünftigen Release entfernt werden kann
+                return (Unsafe) theUnsafe.get(null);
+                        ^
+Hinweis: C:\Users\jacqu\Desktop\Princeps-codex-ci\src\api\java\princeps\api\PrincepsAPI.java verwendet oder überschreibt eine veraltete API.
+Hinweis: Wiederholen Sie die Kompilierung mit -Xlint:deprecation, um Details zu erhalten.
+Hinweis: Einige Eingabedateien verwenden nicht geprüfte oder unsichere Vorgänge.
+Hinweis: Wiederholen Sie die Kompilierung mit -Xlint:unchecked, um Details zu erhalten.
+5 Warnungen
+
+> Task :processApiResources NO-SOURCE
+> Task :apiClasses
+> Task :compileSchematica_apiJava
+> Task :processSchematica_apiResources NO-SOURCE
+> Task :schematica_apiClasses
+
+> Task :compileJava
+Hinweis: Einige Eingabedateien verwenden oder überschreiben eine veraltete API.
+Hinweis: Wiederholen Sie die Kompilierung mit -Xlint:deprecation, um Details zu erhalten.
+Hinweis: Einige Eingabedateien verwenden nicht geprüfte oder unsichere Vorgänge.
+Hinweis: Wiederholen Sie die Kompilierung mit -Xlint:unchecked, um Details zu erhalten.
+
+> Task :processResources
+> Task :classes
+
+> Task :compileLaunchJava
+Hinweis: C:\Users\jacqu\Desktop\Princeps-codex-ci\src\launch\java\princeps\launch\mixins\MixinPalettedContainer.java verwendet nicht geprüfte oder unsichere Vorgänge.
+Hinweis: Wiederholen Sie die Kompilierung mit -Xlint:unchecked, um Details zu erhalten.
+
+> Task :processLaunchResources
+> Task :launchClasses
+
+> Task :processIncludeJars
+(1.6) is not valid semver for dependency dev.babbaj:nether-pathfinder:1.6
+
+> Task :apiJar
+> Task :jar
+
+[Incubating] Problems report is available at: file:///C:/Users/jacqu/Desktop/Princeps-codex-ci/build/reports/problems/problems-report.html
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/9.4.0/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 52s
+10 actionable tasks: 10 executed

@@ -22,7 +22,17 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Build with Gradle
-        run: chmod +x gradlew && ./gradlew jar
+        run: chmod +x gradlew && ./gradlew jar -Porg.gradle.dependency.verification.console=verbose
+
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: princeps-build-verification
+          path: |
+            build/reports/dependency-verification/
+            build/reports/minecraft-input-verification.json
+          if-no-files-found: ignore
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

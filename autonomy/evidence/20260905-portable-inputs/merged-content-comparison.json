@@ -1,0 +1,53 @@
+{
+  "algorithm": "SHA256(domain UTF8 then sorted non-directory name UTF8 length BE32 +name +actual content length BE64 +SHA256(content)); ASCII names only",
+  "domain": "Princeps Minecraft content v1\n",
+  "archives": [
+    {
+      "path": "C:\\Users\\jacqu\\Desktop\\Princeps-codex-repro-artifacts\\gradle-user\\caches\\fabric-loom\\minecraftMaven\\net\\minecraft\\minecraft-merged-deobf\\26.1.2\\minecraft-merged-deobf-26.1.2.jar",
+      "archive_sha256": "039ebfdc071ce4071b9f0498377e3e76d0064bfaf275014c1732b257de1a1c6d",
+      "file_entries": 29433,
+      "canonical_content_sha256": "cf9fbb33eb6c0d7d99283a5a451ad506704d0c7ad7bbcf5dbdc5fad9fddcd980",
+      "inputs": {
+        "mojang_minecraft_info.json": {
+          "bytes": 42491,
+          "sha256": "57a5616430219b32ea4b7c8e834bd611722aa6a53a0786004e372cf3af42f531",
+          "sha1": "0936ffb5a6dd44735578d5785fa4b0022a2df64c"
+        },
+        "minecraft-client.jar": {
+          "bytes": 38113927,
+          "sha256": "b1b3158572666445eff01e82fad8c7de2e4953db6d354f311730d77a8359d0b0",
+          "sha1": "4e618f09a0c649dde3fdf829df443ce0b8831e65"
+        },
+        "minecraft-server.jar": {
+          "bytes": 60417480,
+          "sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42",
+          "sha1": "97ccd4c0ed3f81bbb7bfacddd1090b0c56f9bc51"
+        }
+      }
+    },
+    {
+      "path": "C:\\Users\\jacqu\\Desktop\\Princeps-codex-ci-artifacts\\gradle-user\\caches\\fabric-loom\\minecraftMaven\\net\\minecraft\\minecraft-merged-deobf\\26.1.2\\minecraft-merged-deobf-26.1.2.jar",
+      "archive_sha256": "5da52570eba1aa56bcad307b295aaa8b0fd03c53a38dd5de2bd3dbaf37bf8c7b",
+      "file_entries": 29433,
+      "canonical_content_sha256": "cf9fbb33eb6c0d7d99283a5a451ad506704d0c7ad7bbcf5dbdc5fad9fddcd980",
+      "inputs": {
+        "mojang_minecraft_info.json": {
+          "bytes": 42491,
+          "sha256": "57a5616430219b32ea4b7c8e834bd611722aa6a53a0786004e372cf3af42f531",
+          "sha1": "0936ffb5a6dd44735578d5785fa4b0022a2df64c"
+        },
+        "minecraft-client.jar": {
+          "bytes": 38113927,
+          "sha256": "b1b3158572666445eff01e82fad8c7de2e4953db6d354f311730d77a8359d0b0",
+          "sha1": "4e618f09a0c649dde3fdf829df443ce0b8831e65"
+        },
+        "minecraft-server.jar": {
+          "bytes": 60417480,
+          "sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42",
+          "sha1": "97ccd4c0ed3f81bbb7bfacddd1090b0c56f9bc51"
+        }
+      }
+    }
+  ],
+  "all_names_lengths_and_content_hashes_identical": true
+}

@@ -1,0 +1,36 @@
+{
+    "verified": false,
+    "minecraft_version": "26.1.2",
+    "upstream": {
+        "mojang_minecraft_info.json": {
+            "bytes": 42491,
+            "sha256": "57a5616430219b32ea4b7c8e834bd611722aa6a53a0786004e372cf3af42f531"
+        },
+        "minecraft-client.jar": {
+            "bytes": 38113927,
+            "sha256": "b1b3158572666445eff01e82fad8c7de2e4953db6d354f311730d77a8359d0b0"
+        },
+        "minecraft-server.jar": {
+            "bytes": 60417480,
+            "sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42"
+        }
+    },
+    "resolved_artifacts": [
+        {
+            "configuration": "minecraftNamedCompile",
+            "module": "net.minecraft:minecraft-merged-deobf:26.1.2",
+            "file": "C:\\Users\\jacqu\\Desktop\\Princeps-codex-ci-artifacts\\gradle-user\\caches\\fabric-loom\\minecraftMaven\\net\\minecraft\\minecraft-merged-deobf\\26.1.2\\minecraft-merged-deobf-26.1.2.jar"
+        },
+        {
+            "configuration": "minecraftNamedRuntime",
+            "module": "net.minecraft:minecraft-merged-deobf:26.1.2",
+            "file": "C:\\Users\\jacqu\\Desktop\\Princeps-codex-ci-artifacts\\gradle-user\\caches\\fabric-loom\\minecraftMaven\\net\\minecraft\\minecraft-merged-deobf\\26.1.2\\minecraft-merged-deobf-26.1.2.jar"
+        }
+    ],
+    "generated": {
+        "archive_sha256": "ff0ec99896ecf287cf9985df8366eda85e3f0f600d4cb2fc1ad9fab9f189cad8",
+        "file_entries": 29433,
+        "canonical_content_sha256": "2169b55018e297179125fb9b509bdf7fe38bdcf1d3e6942a8262d4436ae5bf0b"
+    },
+    "error": "Generated Minecraft content verification failed; see the verification report"
+}

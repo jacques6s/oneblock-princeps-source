@@ -3,6 +3,8 @@ plugins {
     id 'java'
 }
 
+apply from: 'gradle/verify-minecraft-inputs.gradle'
+
 group = project.maven_group
 
 // Source archives have no Git checkout. Their version must match a checkout with any local tags.

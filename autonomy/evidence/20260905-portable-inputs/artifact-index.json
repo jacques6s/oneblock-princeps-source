@@ -1,0 +1,72 @@
+[
+  {
+    "file": "baseline-fresh-cache.log",
+    "bytes": 2777,
+    "sha256": "06A4724DF4DB16A2D24C0EE61239A29B63ED54BD32C1C72D225B8BDE3EE6466A"
+  },
+  {
+    "file": "corrupt-generated.init.gradle",
+    "bytes": 839,
+    "sha256": "BF8D91AE0440465DFACF08B3634DBE6609C9C685F39F87F9BB289ED3C09A6D0D"
+  },
+  {
+    "file": "corrupt-upstream.init.gradle",
+    "bytes": 677,
+    "sha256": "EA8DF0857F2EBF6949DD935A676F5088B550F02FF06892F507DBEC8B7F23D645"
+  },
+  {
+    "file": "merged-content-comparison.json",
+    "bytes": 2615,
+    "sha256": "C6B4E565D2909799C0D5641EE0F62BCAD50F2C764FA390CBED4C01964A63EFF9"
+  },
+  {
+    "file": "negative-controls-summary.json",
+    "bytes": 367,
+    "sha256": "B020FE454D6F40E99AE8DB18A3813356E531E456CB04A329457186F89E5F6868"
+  },
+  {
+    "file": "negative-generated-report.json",
+    "bytes": 1672,
+    "sha256": "622C1B4E06608E95FCC81FCEA0844207D3CDD72F3CC4D9D692128FC97039D45B"
+  },
+  {
+    "file": "negative-generated.log",
+    "bytes": 1614,
+    "sha256": "2A254BBC65DBFCDCA5C41635A22BD94005D0950E7FAA00068B47B899C36FC8C7"
+  },
+  {
+    "file": "negative-upstream-report.json",
+    "bytes": 574,
+    "sha256": "0121F6FB70B43E5218FEC72850C43410B7FFE1EE51CAC81150AB04FA1FA0EF44"
+  },
+  {
+    "file": "negative-upstream.log",
+    "bytes": 1585,
+    "sha256": "411093485A437F61C23ECD043566C5E63685B01FBE70F815EE8D0F3FA5BC41A2"
+  },
+  {
+    "file": "portable-verification-build-online.log",
+    "bytes": 4037,
+    "sha256": "640E466D639BD59D3D83315C2C76C5DA636D148702479E40D001B6ED3A762BC4"
+  },
+  {
+    "file": "portable-verification-build.log",
+    "bytes": 3234,
+    "sha256": "4BD286EFD709CCFDAE69A67D31225BB8C0833FFB3D6F36E359499DAC0A3280F0"
+  },
+  {
+    "file": "positive-verification-report.json",
+    "bytes": 1597,
+    "sha256": "735BA22B74F2A1487EE63F81A2C8865B6B99590E1A47DB7C5E6546ABB3F85270"
+  },
+  {
+    "file": "restored-clean-build.log",
+    "bytes": 4054,
+    "sha256": "9027F938ED5D9CA3F2E63883AB35DA1F88B588A92E5F81EEE32CF4D81CD09C63"
+  },
+  {
+    "file": "restored-verification-report.json",
+    "bytes": 1597,
+    "sha256": "735BA22B74F2A1487EE63F81A2C8865B6B99590E1A47DB7C5E6546ABB3F85270"
+  }
+]
