@@ -23,6 +23,9 @@ the existing OneBlock artifact or its published source offer by itself.
 - Text inputs use LF. Archives have stable entry order and normalized timestamps.
   Both produced jars include the existing LGPL-3.0 `LICENSE` under `META-INF`.
   Source copyright headers and other notices are retained.
+  Loom 1.15.5 nests dependencies after Gradle's archive writer; a final action
+  waits for its workers and uses Loom's archive normalizer to remove the new
+  nested entry's wall-clock timestamp as well.
 
 ## Build from an exported source tree
 

@@ -310,3 +310,29 @@ tasks.withType(AbstractArchiveTask).configureEach {
 tasks.withType(Jar).configureEach {
     from('LICENSE') { into 'META-INF' }
 }
+
+// Loom 1.15.5 adds nested jars in a worker after Gradle's archive writer. Those
+// new ZIP entries otherwise get wall-clock timestamps despite the flags above.
+// Register after Loom's configuration and wait for its workers before applying
+// the pinned plugin's existing archive normalizer to the completed runtime jar.
+abstract class NormalizeNestedJarAction implements Action<Task>, Serializable {
+    @javax.inject.Inject
+    abstract org.gradle.workers.WorkerExecutor getWorkerExecutor()
+
+    @Override
+    void execute(Task task) {
+        workerExecutor.await()
+        Jar archive = (Jar) task
+        net.fabricmc.loom.util.ZipReprocessorUtil.reprocessZip(
+                archive.archiveFile.get().asFile.toPath(),
+                archive.reproducibleFileOrder,
+                archive.preserveFileTimestamps,
+                archive.entryCompression)
+    }
+}
+
+afterEvaluate {
+    tasks.named('jar', Jar).configure {
+        doLast(objects.newInstance(NormalizeNestedJarAction))
+    }
+}
