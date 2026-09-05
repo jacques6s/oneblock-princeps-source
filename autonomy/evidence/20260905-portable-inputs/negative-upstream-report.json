@@ -1,0 +1,21 @@
+{
+    "verified": false,
+    "minecraft_version": "26.1.2",
+    "upstream": {
+        "mojang_minecraft_info.json": {
+            "bytes": 42491,
+            "sha256": "57a5616430219b32ea4b7c8e834bd611722aa6a53a0786004e372cf3af42f531"
+        },
+        "minecraft-client.jar": {
+            "bytes": 38113927,
+            "sha256": "426734fd3eb5c3f1af43b38b1fcb7bfcf6317f7b5d398b2eb0db5ae0ad52e80c"
+        }
+    },
+    "resolved_artifacts": [
+        
+    ],
+    "generated": {
+        
+    },
+    "error": "Minecraft upstream verification failed: minecraft-client.jar"
+}

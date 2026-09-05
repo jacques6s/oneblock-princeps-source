@@ -1,0 +1,203 @@
+{
+  "_comment": "Die Baseline, gegen die jede Verbesserung gemessen wird. Nur der Lead schreibt hier, und nur nach einem ACCEPT des Kritikers -- oder, wie beim Block 'full', nach einer ausdruecklichen Freigabe des Besitzers, die dann DABEISTEHT.",
+  "_uebernommen_am": "2026-08-01, aus accepted-baseline.proposed.json. Die Sperre Edit(autonomy/accepted-baseline.json) hat der Besitzer am 01.08.2026 ueber INBOX.md aufgehoben; bis dahin lag der Vorschlag daneben, statt sich selbst freizugeben. accepted-baseline.proposed.json ist damit erledigt und nur noch Historie.",
+  "_ersetzt": "Die vorherige Fassung uebernahm Zahlen aus HANDOFF.md, die nie durch ein Gate gelaufen sind -- darunter basalt 3191af9f mit 1358 Zellen. Das war ein Bediener-Stop, kein Lauf-Ende (iterations/4.md).",
+
+  "measured_at": "2026-07-31T18:36:54+02:00",
+  "commit": "e6cc1f7",
+  "tree_state": "HEAD ohne A7 (stash@{0}); Tag vor-autonomie",
+  "branch": "builder/v3",
+
+  "tests": {
+    "run_id": "20260731-182918-tests",
+    "count": 526,
+    "failures": 0,
+    "note": "Aus build/test-results/test/TEST-*.xml gezaehlt, nicht aus dem Konsolentext. tests_fresh=false: Gradle hat die Task als UP-TO-DATE uebersprungen, die Zahlen stammen vom Lauf 17:05:49 desselben unveraenderten Baums."
+  },
+
+  "dryrun": {
+    "run_id": "20260731-182937-dryrun",
+    "truncated": true,
+    "cap_seconds": 300,
+    "layers": [
+      { "layer": -60, "cells": 936,  "seconds": 6.0 },
+      { "layer": -59, "cells": 1817, "seconds": 135.5 }
+    ],
+    "note": "Belegt Zellverlust NUR fuer -60 und -59. Ueber -58 und hoeher sagt diese Stufe nichts. Vier Laeufe desselben Baums: -60 5.7/6.2/6.1/6.0 s, -59 138.2/137.7/136.7/135.5 s -- die ZELLZAHLEN sind in allen vier identisch, und genau das ist der Regressionsschutz, nicht die Sekunden."
+  },
+
+  "ringbig": {
+    "run_id": "20260731-183439-ringbig",
+    "verdict": "SUCCESS",
+    "placed": 120,
+    "total": 120,
+    "server_audit": "120/120",
+    "ticks": 1900,
+    "divergences": 0,
+    "replans": 0,
+    "ticks_per_sec_achieved": 20,
+    "time_faithful": true,
+    "note": "Stein. Sieht Eis, Redstone und Slabs nicht -- gruen hier heisst nichts fuer Basalt. Fuer Orientierungslogik ist die Stufe beweisbar blind: sie betritt den achsenlesenden Zweig nie. Dafuer ist suite/facings zustaendig."
+  },
+
+  "suite": {
+    "run_id": "20260801-013312",
+    "verdict": "PASS",
+    "scenarios": 7,
+    "note": "Alle sieben Szenarien SUCCESS, darunter facings -- baut sticky_piston/piston/observer/dropper in allen sechs Richtungen. Die einzige billige Stufe, die den achsenlesenden Zweig ueberhaupt betritt. Lief in der Nacht zum 01.08. zum ersten Mal ueberhaupt."
+  },
+
+  "basalt": {
+    "run_id": "20260731-172808-basalt",
+    "flags": "-Engine v3 -BuildTrace -NoStall -TimeScale 3 -TimeoutSeconds 680",
+    "ended": "Fenster ohne Verdikt, planmaessig bei -NoStall",
+    "ticks": 26400,
+    "placed": 1123,
+    "total": 15004,
+    "server_audit": "41/578",
+    "ticks_per_sec_asked": 60,
+    "ticks_per_sec_achieved": 40.27,
+    "time_faithful": false,
+    "divergence_families": {
+      "APPROACH waited <n>ticks (patience <n>) on PLACE at <n>: waiting for path-travel momentum to stop before the proved fine approach": 8,
+      "APPROACH waited <n>ticks (patience <n>) on PLACE at <n>: could not settle on the approach point <n>within <n>": 6,
+      "the live body has no collision surface at its fine-approach position <n>": 1,
+      "the click face at <n>no longer reaches the proven aim point <n>": 1
+    },
+    "note": "NICHT zeittreu (40.27 statt 60 Ticks/s). Tickbasierte Zahlen bleiben gueltig, jede Wanduhr-Aussage nicht. Ein spaeterer Lauf ist nur ueber -CompareTo auf gemeinsamem Tickstand vergleichbar, und nur wenn seine erreichte Rate innerhalb von 15 % von 40.27 liegt.",
+    "_varianz_warnung": "Ein einzelner Basalt-Lauf beweist nichts: derselbe Builder lieferte 1641 / 2629 / 5069 Zellen in drei Laeufen. Diese 1123 sind EIN Fenster, kein Erwartungswert."
+  },
+
+  "full": {
+    "_status": "Referenz fuer die Stufe full, gesetzt am 01.08.2026 nach Annahme von A12.",
+    "_freigabe": "Der Kritiker gab INCONCLUSIVE -- ausschliesslich, weil das vorab festgeschriebene K1 ('= 0') verfehlt ist. Der BESITZER hat K1 auf 'deutliche, reproduzierte Reduktion' geaendert und den Commit freigegeben (INBOX.delivered-20260801-111514.md). Das steht hier ausdruecklich dabei, damit niemand diese Zahlen fuer ein Kritikerurteil haelt.",
+    "commit": "5b4041e",
+    "flags": "-Engine v3 -BuildTrace -NoStall -TimeScale 3, Zeitfenster 7200 s",
+
+    "runs": [
+      {
+        "run_id": "20260801-015252-full",
+        "verdict": null,
+        "ended": "Wanduhr nach 7216 s -- KEIN Verdikt",
+        "ticks": 85080,
+        "placed": 3272,
+        "_korrektur": "Der Handover nannte 3281 @ t=85220. Aus dem ARCHIVIERTEN client.log liest sich 3272 @ t=85080 (letzte Sample-Zeile, 15004-11732). Die 3281 stammten aus dem laufenden Ausgabestrom, der ein paar Zeilen weiter war als die Datei, die bench.ps1 dann wegkopiert hat. Hier steht die Zahl aus dem Artefakt, das ueberlebt.",
+        "total": 15004,
+        "server_audit": "124/578",
+        "axis_refusals": 1,
+        "piston_clicks": 625,
+        "shorthold": 0,
+        "aim_never_converged": 0
+      },
+      {
+        "run_id": "20260801-040936-full",
+        "verdict": null,
+        "ended": "Wanduhr nach 7216 s -- KEIN Verdikt",
+        "ticks": 85780,
+        "placed": 3235,
+        "total": 15004,
+        "server_audit": "124/578",
+        "axis_refusals": 2,
+        "piston_clicks": 626,
+        "shorthold": 0,
+        "aim_never_converged": 0,
+        "compare_to": "20260731-231939-full"
+      }
+    ],
+
+    "vorgaenger": {
+      "run_id": "20260731-231939-full",
+      "verdict": "INACTIVE",
+      "ended": "Blocker nach 2871 von 7200 s -- 'the server reverted the change at 108,-59,122'",
+      "ticks": 66440,
+      "placed": 2624,
+      "server_audit": "101/578",
+      "axis_refusals": 49,
+      "piston_clicks": 597,
+      "_messfalle": "Mitternacht rollte latest.log; im archivierten client.log fehlen 40 von 48 Minuten. ticks_per_sec_achieved 42.97 ist ueber die letzten 19k Ticks gemessen, echte Ganzlaufrate 23.45. Deshalb ist rates_comparable gegen diesen Lauf false, und der comparison-Block der Nachfolger ist NICHT belastbar."
+    },
+
+    "was_belastbar_ist": "Zaehlgroessen und Wanduhr-Offsets. Auf gemeinsamem Tickstand (Nachrechnung des Kritikers): t=30000 1436 gegen 1405, t=50000 2145 gegen 2124, t=66440 2693 gegen 2624 -- und zwar nach 1894 s statt 2858 s. Zellen bei gleichem Wanduhr-Offset: 759 s +1.2 %, 1531 s +47.4 %, 2811 s +6.1 %.",
+    "was_nicht_belastbar_ist": "Der comparison-Block in summary.json von 20260801-040936-full: rates_comparable false (12.82 gegen 42.97), und die 42.97 sind das Trunkierungsartefakt.",
+
+    "_achtung_summary_json_dieser_laeufe": "Das Feld summary.placed ist in ALLEN DREI archivierten full-Laeufen falsch (2145 / 2108 / 2124). gate.ps1 nahm den ersten Regex-Treffer und erwischte damit die Checkpointzeile bei t=50000 statt der Verdiktzeile -- siebte Messfalle, gefunden und behoben am 01.08.2026. Die Archive werden NICHT nachtraeglich umgeschrieben; sie sind der Beleg dafuer, was das Instrument damals gesagt hat. Die richtigen Werte stehen hier oben und sind aus denselben client.log-Dateien nachgerechnet. NICHT betroffen: der comparison-Block und sample_series, die rechnen aus 'remaining' und waren immer richtig -- deshalb steht die Nachrechnung des Kritikers auf gemeinsamem Tickstand unveraendert.",
+
+    "meilenstein": "Ebene -60 UND -59 in beiden Laeufen fertig. MILESTONE.md hielt fest: '-60 wird fertig, -59 nie.'",
+    "offen": "Ein bis zwei Ablehnungen ueberleben den ERFUELLTEN Fuenf-Tick-Halt, in beiden Laeufen an derselben Zelle 119,-59,107, mit SHORTHOLD 0. Nicht erledigt, sondern Aufgabe von Iteration 6.",
+    "naechste_abbruchstelle": "die Wanduhr -- kein Lauf endet mehr an einem benannten Defekt. Genau dagegen richtet sich der strenge Diagnosemodus aus dem Nachtrag in MILESTONE.md."
+  },
+
+  "v1": {
+    "_was_das_ist": "Die V1-Baseline nach autonomy/MISSION-v1.md vom 02.08.2026. V1 = src/main/java/princeps/process/BuilderProcess.java, im Bench -Engine v2, die Engine im ausgelieferten Client. Alle Bloecke OBERHALB dieses hier beschreiben V3 und bleiben unveraendert als Historie stehen.",
+    "_status": "GUELTIG. ACCEPT des Kritikers am 02.08.2026 nach einer Runde INCONCLUSIVE (die +436-Aussage war eine Schlussfolgerung aus einem Delta bei rates_comparable=false und ist auf einen Rohwert zurueckgenommen).",
+    "engine": "v2",
+    "commit": "2abb9ab",
+    "branch": "builder/v3",
+    "tree_state": "src/ sauber (der abgelehnte V3-Entwurf 2 aus Iteration 12 wurde zurueckgesetzt und liegt in autonomy/evidence/20260802-p07-v3-frozen/). Geaendert nur autonomy/.",
+    "gate_flags": "-Stage full -Engine v2 -TimeScale 3, also -BuildTrace -TimeoutSeconds 7200, identisch zu den drei V3-Vollaeufen.",
+    "measured_at": "2026-08-02T10:17:00+02:00",
+
+    "ringbig": {
+      "run_id": "20260802-101536-ringbig",
+      "verdict": "SUCCESS",
+      "placed": 120,
+      "total": 120,
+      "server_audit": "120/120",
+      "ticks": 960,
+      "blocks_per_min": 150.0,
+      "ticks_per_sec_achieved": 20,
+      "time_faithful": true,
+      "gegen_v3": "20260731-183439-ringbig, identisches Szenario und Instrument: V3 brauchte 1900 Ticks und 75.8 bpm, V1 960 Ticks und 150.0 bpm. Faktor 1.98 auf BEIDEN Groessen.",
+      "_divergences_replans": "0/0 gemeldet, aber WERTLOS: IBuilderProcess:194 gibt {0,0} als Default zurueck und BuilderProcess.java ueberschreibt executionQuality() nicht. Bei -Engine v2 ist die Null eine Konstante, keine Messung -- dreizehnte Messfalle, siehe iterations/12.md."
+    },
+
+    "full": {
+      "_drei_laeufe": "Ein einzelner Basalt-Lauf beweist nichts (Messfalle 2). Die ersten beiden lieferten BITGLEICH 942 und 36/578; der dritte 1669 und 65/578.",
+      "_ACHTUNG_BIMODAL_WIDERLEGT": "KORRIGIERT am 02.08.2026 durch Iteration 18 (neun Baseline-Laeufe): es gibt KEINE zwei Regime. Die Endstaende bilden ein Kontinuum 942/942/1142/1314/1669/2107/2150/2248/2374, und walks steigt monoton mit placed -- der Zaehler ist ein ERGEBNIS (wer mehr baut, reist mehr), keine Ursache. Was streut, ist die LAUFLAENGE: max_tick 8900..35400. Bei gemeinsamem Tickstand T=8900 liegen alle neun Laeufe zwischen 942 und 1089, also innerhalb von 16 Prozent, gegen Faktor 2.52 am Laufende. placed am Laufende misst zu zwei Dritteln, wie lange der Lauf ueberlebt hat, und ist deshalb KEINE Messgroesse fuer den Builder. Jeder Vergleich laeuft ab jetzt ueber gate.ps1 -CompareTo auf gemeinsamem Tickstand. Der urspruengliche Eintrag lautete: ", "_ACHTUNG_BIMODAL_urspruenglich": "Nachgetragen am 02.08.2026 nach Iteration 17: die drei Zahlen sind KEIN Streuband um einen Mittelwert, sondern ZWEI REGIME, und die Trennlinie ist walks aus der Verdiktzeile. walks<=5 -> 942 Zellen (101737 mit walks=2, 102127 mit walks=5). walks>=61 -> 1314 bis 2197 (102503 mit walks=172 und 1669, dazu drei Laeufe aus Iteration 17). Die beiden Gruppen ueberlappen NICHT. Gefunden vom Kritiker, als eine 3-gegen-3-Messung als Verbesserung vorgelegt wurde, die in Wahrheit zwei zufaellig verschieden gewuerfelte Regime verglich. JEDE kuenftige V1-Messung fuehrt walks mit und vergleicht INNERHALB des Regimes -- sonst misst sie, ob der Bot ueberhaupt losgegangen ist.",
+      "runs": [
+        { "run_id": "20260802-101737-full", "client_run": "4ce745c3", "verdict": "STALLED", "placed": 942,  "total": 15004, "ticks": 8900,  "blocks_per_min": 127.0, "server_audit": "36/578", "ticks_per_sec_achieved": 58.42, "time_faithful": true, "elapsed_seconds": 190 },
+        { "run_id": "20260802-102127-full", "client_run": "984d8d0c", "verdict": "STALLED", "placed": 942,  "total": 15004, "ticks": 9180,  "blocks_per_min": 123.1, "server_audit": "36/578", "ticks_per_sec_achieved": 58.72, "time_faithful": true, "elapsed_seconds": 195 },
+        { "run_id": "20260802-102503-full", "client_run": "c5e59cb2", "verdict": "STALLED", "placed": 1669, "total": 15004, "ticks": 25320, "blocks_per_min": 79.1,  "server_audit": "65/578", "ticks_per_sec_achieved": 59.53, "time_faithful": true, "elapsed_seconds": 466 }
+      ],
+
+      "tempo": "BELEGT. 79.1 bis 127.0 Bloecke/min gegen V3s 26.9, und auf ringbig 150.0 gegen 75.8. Die Schwelle der MISSION-v1.md ('unter 60 waere die Praemisse falsch') ist in keinem Lauf unterschritten. Die 140 des Besitzers werden NICHT erreicht, die Groessenordnung stimmt.",
+
+      "zeittreue": "Der eigentliche Unterschied und in der MISSION nicht vorhergesehen: V1 erreicht 58.4-59.5 der angeforderten 60 Client-Ticks/s, V3 im Vergleichslauf 12.94. Pro Wanduhrsekunde laeuft V1 also rund 4.5x so viele Ticks. Ob V1 auch PRO TICK mehr setzt, sagt diese Baseline NICHT -- die einzige Zahl dazu ist das delta bei at_tick 25320, und die ist nach Vergleichsregel 5 kein Beleg. V3s Planer-Freezes (571-1078 s Wanduhr fuer je 20 Ticks) haben in V1 kein Gegenstueck; genau daher kommt der Ratenunterschied.",
+
+      "vergleich_auf_gemeinsamem_tickstand": {
+        "against": "20260802-062732-full",
+        "at_tick": 25320,
+        "placed_here": 1669,
+        "placed_there": 1233,
+        "delta": 436,
+        "rates_comparable": false,
+        "_kein_beleg": "delta=436 ist KEIN BELEG. AUTONOMY.md Abschnitt 'Zwei Fenster vergleichen', Regel 5: 'Bei rates_comparable: false ist ein Delta kein Beleg.' Hier ist es false (59.53 gegen 12.94), und das Gate schreibt denselben Satz selbst in seinen comparison-Block. Dazu: nur EIN Lauf je Seite erreicht Tick 25320 -- die V1-Laeufe 1 und 2 endeten bei 8900 und 9180 und konnten ihn nie erreichen. Die Zahl steht hier als Rohwert, damit sie nicht neu erhoben werden muss; eine Schlussfolgerung wird ausdruecklich NICHT daraus gezogen.",
+        "_frueherer_fehler": "Eine erste Fassung dieses Blocks berief sich fuer die Gueltigkeit auf 'AUTONOMY.md Regel 2'. Das war eine Verwechslung zweier verschieden nummerierter Listen derselben Datei -- gemeint war die TimeScale-Regel 2 ('Tickbasierte Zahlen bleiben immer gueltig'), zitiert wurde die Vergleichsregel 2 ('letzte Sample-Zeile mit t <= T'), und einschlaegig ist ohnehin die Vergleichsregel 5, die das Gegenteil sagt. Vom Kritiker im Abschluss-Review gefunden.",
+        "_was_stattdessen_traegt": "Das Tempo-Ergebnis braucht diesen Vergleich nicht. Es steht auf zwei Beinen, die beide reproduziert sind: ringbig bei IDENTISCHER erreichter Rate (20/20 auf beiden Seiten, also rates_comparable) mit 960 gegen 1900 Ticks, und drei V1-Vollaeufe mit 79-127 bpm gegen V3s 26.9."
+      },
+
+      "wo_und_woran_der_lauf_endet": "STALLED, in DREI von DREI Laeufen, und zwar am Stall-Detektor des Benchs (BuilderBench:71, STALL_TICKS = 1920). Gemessener Leerlauf vor dem Ende: 1915 / 1922 / 1932 Ticks -- also endet jeder Lauf exakt dann, wenn der Detektor greift, nicht frueher und nicht spaeter.",
+
+      "warum_der_stillstand_nicht_aufgeloest_wird": "Das ist KEIN Defekt, sondern die eingestellte Absicht. giveUpOnLayerIfItHasStalled (BuilderProcess:1088) traegt bei :1095 ein return false, sobald Settings.buildNeverDiscard gesetzt ist -- und der Vorgabewert ist true (Settings.java:1453); der Bench aendert ihn nicht. Dieselbe Einstellung schaltet bei :2658 auch das Ausmustern einzelner Zellen ab. LAYER_GIVE_UP_TICKS (900) haette also VOR dem Stall-Detektor (1920) gegriffen, ist aber abgeschaltet. Woertlich im Code: 'A build that meets a genuinely impossible cell now STOPS on it, visibly, which is the trade that was asked for'.",
+
+      "die_abbruchstelle_selbst": "Ein Streit zwischen Navigation und Platzierung, der nie entschieden wird. Beispiel aus 20260802-102503-full: der Bot steht auf 107,-59,126, will gray_concrete nach 106,-59,126, also DIREKT daneben. Die Platzierung meldet alle 120 Ticks 'ROUTE: a different valid stance exists and still needs to be reached' -- sie will einen ANDEREN Standplatz. Die Navigation bekommt dafuer GoalAdjacent{106,-59,126}, und das ist dort, wo der Bot schon steht, bereits erfuellt. abandonAGoalAlreadySatisfiedWhereWeStand (:1181) erkennt das korrekt und verwirft das Ziel -- worauf assemble im naechsten Tick DASSELBE Ziel neu baut. 1932 Ticks lang, jeden Tick eine DEADGOAL-Zeile. Der vorhandene Fix wandelt 'ewig warten' in 'ewig kreisen' um; das Ergebnis ist dasselbe.",
+
+      "die_blockierenden_klassen": "Aus den DEFER-Zeilen des dritten Laufs, 173 insgesamt: sticky_piston 114, polished_blackstone_slab 26, black_stained_glass 4 -- der Rest sind Routenfehler ohne Blocknamen. Der Text lautet fast immer 'no standable, occlusion-safe stance can currently place X'.",
+
+      "arbeitsliste_aus_dem_server_audit": "Nach ARBEITSWEISE.md nach betroffenen Zellen sortiert, aus 20260802-102503-full (513 der 578 gezogenen Zellen fehlen): black_stained_glass 109, redstone_wire 68, obsidian 60, piston 55, repeater 48, gray_concrete 40, soul_soil 23, note_block 21, sticky_piston 19, observer 16, target 14, blue_ice 13. ACHTUNG: das ist ueberwiegend eine Folge des Stillstands bei 1669 von 15004 Zellen, nicht eine Liste von Platzierungsfehlern -- was nie versucht wurde, kann nicht falsch platziert worden sein.",
+
+      "was_diese_baseline_NICHT_sagt": "Ob V1 die Schematic in unter zwei Stunden schaffen WUERDE. Kein Lauf ist ueber 11 % hinausgekommen, und die gemessene Rate faellt mit der Laufzeit (127.0 bei Zelle 942, 79.1 bei Zelle 1669). Die Hochrechnung der MISSION-v1.md ('bei 140 bpm passt die Schematic ins Fenster') setzt eine konstante Rate voraus, und konstant ist sie nicht."
+    }
+  },
+
+  "tick_census_5a29505e": {
+    "approach_total": 0.385,
+    "settled_no_key": 0.1535,
+    "key_held": 0.1491,
+    "no_key_not_settled": 0.0829,
+    "travel": 0.285,
+    "aim": 0.13,
+    "_census_warning": "Nur ueber act=/vel=/keys=/ground= gemessen. why= ist klebrig und ergab faelschlich 15.5 %.",
+    "_herkunft": "Aus HANDOFF.md uebernommen, NICHT durch ein Gate gelaufen. Wer damit argumentiert, misst nach."
+  }
+}

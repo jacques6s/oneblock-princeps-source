@@ -1,0 +1,26 @@
+{
+    "server_response":  "execute if blocks 52 -60 52 88 -46 88 52 190 52 all -\u003e Test failed",
+    "expected_bounds":  [
+                            52,
+                            190,
+                            52,
+                            88,
+                            204,
+                            88
+                        ],
+    "expected_y_offset":  250,
+    "target_cells":  120,
+    "volume_cells":  20535,
+    "manifest_sha256":  "B036E9413625F73E45D2B39E7795EC7C198C2CE45EA5C5C96637EDEF942A3211",
+    "expected_air_cells":  20415,
+    "bounds":  [
+                   52,
+                   -60,
+                   52,
+                   88,
+                   -46,
+                   88
+               ],
+    "run_id":  "2bc29084",
+    "all_target_and_air_cells_match":  false
+}

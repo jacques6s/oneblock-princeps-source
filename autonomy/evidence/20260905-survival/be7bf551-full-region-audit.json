@@ -1,0 +1,17 @@
+{
+    "run_id":  "be7bf551",
+    "bounds":  [
+                   52,
+                   -60,
+                   52,
+                   88,
+                   -46,
+                   88
+               ],
+    "manifest_sha256":  "AD070CDC8B0033C06F6B2AE7242722499C5994C3BE7F9F5715C1E09610223085",
+    "all_target_and_air_cells_match":  true,
+    "server_response":  "execute if blocks 52 -60 52 88 -46 88 52 190 52 all -\u003e Test passed. Count: 20535",
+    "volume_cells":  20535,
+    "target_cells":  81,
+    "expected_air_cells":  20454
+}

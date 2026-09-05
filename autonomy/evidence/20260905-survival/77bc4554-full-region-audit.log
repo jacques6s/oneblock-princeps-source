@@ -1,0 +1,24 @@
+fill 52 190 52 88 204 88 air -> Successfully filled 120 block(s)
+setblock 67 190 67 minecraft:stone -> Changed the block at 67, 190, 67
+setblock 68 190 67 minecraft:stone -> Changed the block at 68, 190, 67
+setblock 69 190 67 minecraft:stone -> Changed the block at 69, 190, 67
+setblock 70 190 67 minecraft:stone -> Changed the block at 70, 190, 67
+setblock 71 190 67 minecraft:stone -> Changed the block at 71, 190, 67
+setblock 72 190 67 minecraft:stone -> Changed the block at 72, 190, 67
+setblock 73 190 67 minecraft:stone -> Changed the block at 73, 190, 67
+setblock 74 190 67 minecraft:stone -> Changed the block at 74, 190, 67
+setblock 75 190 67 minecraft:stone -> Changed the block at 75, 190, 67
+setblock 76 190 67 minecraft:stone -> Changed the block at 76, 190, 67
+setblock 77 190 67 minecraft:stone -> Changed the block at 77, 190, 67
+setblock 67 191 67 minecraft:stone -> Changed the block at 67, 191, 67
+setblock 68 191 67 minecraft:stone -> Changed the block at 68, 191, 67
+setblock 69 191 67 minecraft:stone -> Changed the block at 69, 191, 67
+setblock 70 191 67 minecraft:stone -> Changed the block at 70, 191, 67
+setblock 71 191 67 minecraft:stone -> Changed the block at 71, 191, 67
+setblock 72 191 67 minecraft:stone -> Changed the block at 72, 191, 67
+setblock 73 191 67 minecraft:stone -> Changed the block at 73, 191, 67
+setblock 74 191 67 minecraft:stone -> Changed the block at 74, 191, 67
+setblock 75 191 67 minecraft:stone -> Changed the block at 75, 191, 67
+setblock 76 191 67 minecraft:stone -> Changed the block at 76, 191, 67
+setblock 77 191 67 minecraft:stone -> Changed the block at 77, 191, 67
+execute if blocks 52 -60 52 88 -46 88 52 190 52 all -> Test passed. Count: 20535

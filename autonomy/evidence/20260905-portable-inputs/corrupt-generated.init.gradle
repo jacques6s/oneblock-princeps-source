@@ -1,0 +1,14 @@
+import java.nio.file.FileSystems
+import java.nio.file.Files
+import java.nio.file.StandardOpenOption
+gradle.projectsEvaluated {
+    def expected = new File('C:/Users/jacqu/Desktop/Princeps-codex-ci-artifacts/gradle-user').canonicalFile
+    if (gradle.gradleUserHomeDir.canonicalFile != expected) {
+        throw new GradleException('Negative control may only mutate the isolated CI cache')
+    }
+    def target = new File(expected, 'caches/fabric-loom/minecraftMaven/net/minecraft/minecraft-merged-deobf/26.1.2/minecraft-merged-deobf-26.1.2.jar')
+    FileSystems.newFileSystem(target.toPath(), (ClassLoader) null).withCloseable { zip ->
+        Files.write(zip.getPath('/version.json'), [10] as byte[], StandardOpenOption.APPEND)
+    }
+    println '[NEGATIVE-CONTROL] appended one byte to generated version.json after Loom configuration'
+}

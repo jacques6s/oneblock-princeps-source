@@ -1,0 +1,2 @@
+execute if block 65 -60 67 minecraft:cobblestone -> Test passed
+execute if block 66 -59 67 minecraft:cobblestone -> Test passed

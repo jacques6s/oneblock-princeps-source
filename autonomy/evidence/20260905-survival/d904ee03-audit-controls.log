@@ -1,0 +1,7 @@
+setblock 52 190 52 cobblestone -> Changed the block at 52, 190, 52
+execute if blocks 52 -60 52 88 -46 88 52 190 52 all -> Test failed
+setblock 52 190 52 air -> Changed the block at 52, 190, 52
+setblock 67 190 67 air -> Changed the block at 67, 190, 67
+execute if blocks 52 -60 52 88 -46 88 52 190 52 all -> Test failed
+setblock 67 190 67 stone -> Changed the block at 67, 190, 67
+execute if blocks 52 -60 52 88 -46 88 52 190 52 all -> Test passed. Count: 20535

@@ -1,0 +1,23 @@
+{
+  "minecraft_version": "26.1.2",
+  "metadata_url": "https://piston-meta.mojang.com/v1/packages/0936ffb5a6dd44735578d5785fa4b0022a2df64c/26.1.2.json",
+  "upstream_files": {
+    "mojang_minecraft_info.json": {
+      "bytes": 42491,
+      "sha256": "57a5616430219b32ea4b7c8e834bd611722aa6a53a0786004e372cf3af42f531"
+    },
+    "minecraft-client.jar": {
+      "bytes": 38113927,
+      "sha256": "b1b3158572666445eff01e82fad8c7de2e4953db6d354f311730d77a8359d0b0"
+    },
+    "minecraft-server.jar": {
+      "bytes": 60417480,
+      "sha256": "cd47e7c38328f64768fd17af8fcd8b22496b40b63d4ffee81e71ae059fedcb42"
+    }
+  },
+  "generated_module": "net.minecraft:minecraft-merged-deobf:26.1.2",
+  "generated_file": "minecraft-merged-deobf-26.1.2.jar",
+  "file_entries": 29433,
+  "content_digest_algorithm": "Princeps Minecraft content v1",
+  "canonical_content_sha256": "cf9fbb33eb6c0d7d99283a5a451ad506704d0c7ad7bbcf5dbdc5fad9fddcd980"
+}

@@ -1,0 +1,459 @@
+{
+    "verdict_line":  "[16:09:37] [Render thread/INFO] (PrincepsBuilder) [BENCH] run=f7815303 verdict=FROZEN scenario=ring11x3 placed=120/120 remaining=0 ticks=2040 blocksPerMin=70.6 walks=47 paidOff=27 (57%) stanceless=0 recalled=0 travelled=139.2 still=43% longestStill=258 turnPerTick=3.08 reversals=3% shake=0.0% rock=0.2% clicks=123 landed=120 wrong=0 broke=413 firsttry=98% divergences=0 replans=0",
+    "branch":  "codex/princeps-survival-bench",
+    "ticks":  2040,
+    "tick_budget":  30000,
+    "discard_cells":  false,
+    "missing_protected":  [
+                              "tools/dryrun/run-dryrun.ps1",
+                              "run/schematics/etz-basalt.litematic"
+                          ],
+    "run_id":  "20260905-160727-suite",
+    "last_sample_ticks":  2020,
+    "verdict":  "FROZEN",
+    "reason":  "1 Szenarien nicht SUCCESS: ringbig=FROZEN",
+    "ticks_per_sec_asked":  20,
+    "engine":  "v2",
+    "started":  "2026-09-05T16:07:28.1668098+02:00",
+    "time_faithful":  true,
+    "skip_layers":  false,
+    "archived_logs":  [
+                          "ringbig-20260905-160729-f7815303.log"
+                      ],
+    "max_tick":  2020,
+    "stage":  "suite",
+    "protected_ok":  true,
+    "placed":  120,
+    "top_down":  false,
+    "sample_series":  [
+                          {
+                              "placed":  2,
+                              "t":  20
+                          },
+                          {
+                              "placed":  5,
+                              "t":  40
+                          },
+                          {
+                              "placed":  8,
+                              "t":  60
+                          },
+                          {
+                              "placed":  8,
+                              "t":  80
+                          },
+                          {
+                              "placed":  9,
+                              "t":  100
+                          },
+                          {
+                              "placed":  11,
+                              "t":  120
+                          },
+                          {
+                              "placed":  13,
+                              "t":  140
+                          },
+                          {
+                              "placed":  15,
+                              "t":  160
+                          },
+                          {
+                              "placed":  16,
+                              "t":  180
+                          },
+                          {
+                              "placed":  16,
+                              "t":  200
+                          },
+                          {
+                              "placed":  19,
+                              "t":  220
+                          },
+                          {
+                              "placed":  20,
+                              "t":  240
+                          },
+                          {
+                              "placed":  23,
+                              "t":  260
+                          },
+                          {
+                              "placed":  25,
+                              "t":  280
+                          },
+                          {
+                              "placed":  26,
+                              "t":  300
+                          },
+                          {
+                              "placed":  29,
+                              "t":  320
+                          },
+                          {
+                              "placed":  29,
+                              "t":  340
+                          },
+                          {
+                              "placed":  32,
+                              "t":  360
+                          },
+                          {
+                              "placed":  33,
+                              "t":  380
+                          },
+                          {
+                              "placed":  35,
+                              "t":  400
+                          },
+                          {
+                              "placed":  36,
+                              "t":  420
+                          },
+                          {
+                              "placed":  39,
+                              "t":  440
+                          },
+                          {
+                              "placed":  40,
+                              "t":  460
+                          },
+                          {
+                              "placed":  46,
+                              "t":  480
+                          },
+                          {
+                              "placed":  48,
+                              "t":  500
+                          },
+                          {
+                              "placed":  49,
+                              "t":  520
+                          },
+                          {
+                              "placed":  50,
+                              "t":  540
+                          },
+                          {
+                              "placed":  53,
+                              "t":  560
+                          },
+                          {
+                              "placed":  56,
+                              "t":  580
+                          },
+                          {
+                              "placed":  56,
+                              "t":  600
+                          },
+                          {
+                              "placed":  57,
+                              "t":  620
+                          },
+                          {
+                              "placed":  59,
+                              "t":  640
+                          },
+                          {
+                              "placed":  60,
+                              "t":  660
+                          },
+                          {
+                              "placed":  62,
+                              "t":  680
+                          },
+                          {
+                              "placed":  63,
+                              "t":  700
+                          },
+                          {
+                              "placed":  64,
+                              "t":  720
+                          },
+                          {
+                              "placed":  65,
+                              "t":  740
+                          },
+                          {
+                              "placed":  66,
+                              "t":  760
+                          },
+                          {
+                              "placed":  68,
+                              "t":  780
+                          },
+                          {
+                              "placed":  70,
+                              "t":  800
+                          },
+                          {
+                              "placed":  71,
+                              "t":  820
+                          },
+                          {
+                              "placed":  72,
+                              "t":  840
+                          },
+                          {
+                              "placed":  74,
+                              "t":  860
+                          },
+                          {
+                              "placed":  75,
+                              "t":  880
+                          },
+                          {
+                              "placed":  76,
+                              "t":  900
+                          },
+                          {
+                              "placed":  77,
+                              "t":  920
+                          },
+                          {
+                              "placed":  78,
+                              "t":  940
+                          },
+                          {
+                              "placed":  80,
+                              "t":  960
+                          },
+                          {
+                              "placed":  80,
+                              "t":  980
+                          },
+                          {
+                              "placed":  80,
+                              "t":  1000
+                          },
+                          {
+                              "placed":  80,
+                              "t":  1020
+                          },
+                          {
+                              "placed":  81,
+                              "t":  1040
+                          },
+                          {
+                              "placed":  85,
+                              "t":  1060
+                          },
+                          {
+                              "placed":  85,
+                              "t":  1080
+                          },
+                          {
+                              "placed":  87,
+                              "t":  1100
+                          },
+                          {
+                              "placed":  89,
+                              "t":  1120
+                          },
+                          {
+                              "placed":  92,
+                              "t":  1140
+                          },
+                          {
+                              "placed":  96,
+                              "t":  1160
+                          },
+                          {
+                              "placed":  98,
+                              "t":  1180
+                          },
+                          {
+                              "placed":  99,
+                              "t":  1200
+                          },
+                          {
+                              "placed":  102,
+                              "t":  1220
+                          },
+                          {
+                              "placed":  105,
+                              "t":  1240
+                          },
+                          {
+                              "placed":  108,
+                              "t":  1260
+                          },
+                          {
+                              "placed":  109,
+                              "t":  1280
+                          },
+                          {
+                              "placed":  112,
+                              "t":  1300
+                          },
+                          {
+                              "placed":  115,
+                              "t":  1320
+                          },
+                          {
+                              "placed":  118,
+                              "t":  1340
+                          },
+                          {
+                              "placed":  119,
+                              "t":  1360
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1380
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1400
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1420
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1440
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1460
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1480
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1500
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1520
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1540
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1560
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1580
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1600
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1620
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1640
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1660
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1680
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1700
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1720
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1740
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1760
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1780
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1800
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1820
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1840
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1860
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1880
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1900
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1920
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1940
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1960
+                          },
+                          {
+                              "placed":  120,
+                              "t":  1980
+                          },
+                          {
+                              "placed":  120,
+                              "t":  2000
+                          },
+                          {
+                              "placed":  120,
+                              "t":  2020
+                          }
+                      ],
+    "last_sample_remaining":  0,
+    "exit_code":  1,
+    "layer_materials":  false,
+    "replans":  0,
+    "gate_sha256":  "91CA2C6AFE9D43D77E33785FD23E6B6D4F752FA2A4831137965D9B2C26A13E25",
+    "samples":  101,
+    "divergences":  0,
+    "time_scale":  1,
+    "no_layers":  false,
+    "checkpoint_placed":  null,
+    "divergence_families":  {
+
+                            },
+    "elapsed_seconds":  135,
+    "ticks_per_sec_achieved":  19.8,
+    "server_audit":  "120/120",
+    "fidelity_counters_meaningful":  false,
+    "scenarios":  {
+                      "ringbig":  "FROZEN"
+                  },
+    "result":  "FAIL",
+    "total_cells":  120,
+    "checkpoint_tick":  null,
+    "note":  "Ring cleanup with actual ongoing mining excluded from generic idle nudges; no fixture tools added",
+    "commit":  "49dcbb942f6a715d5d11356a5706ccc46e814aab"
+}

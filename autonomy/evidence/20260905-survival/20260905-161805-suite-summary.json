@@ -1,0 +1,95 @@
+{
+    "verdict_line":  "[16:18:39] [Render thread/INFO] (PrincepsBuilder) [BENCH] run=77bc4554 verdict=SUCCESS scenario=wall11x2 placed=22/22 remaining=0 ticks=200 blocksPerMin=132.0 walks=5 paidOff=5 (100%) stanceless=0 recalled=0 travelled=14.4 still=22% longestStill=30 turnPerTick=7.17 reversals=10% shake=0.0% rock=0.0% clicks=22 landed=22 wrong=0 broke=0 firsttry=100% divergences=0 replans=0",
+    "branch":  "codex/princeps-survival-bench",
+    "ticks":  200,
+    "tick_budget":  30000,
+    "discard_cells":  false,
+    "missing_protected":  [
+                              "tools/dryrun/run-dryrun.ps1",
+                              "run/schematics/etz-basalt.litematic"
+                          ],
+    "run_id":  "20260905-161805-suite",
+    "last_sample_ticks":  200,
+    "verdict":  "SUCCESS",
+    "reason":  "",
+    "ticks_per_sec_asked":  20,
+    "engine":  "v2",
+    "started":  "2026-09-05T16:18:05.5044637+02:00",
+    "time_faithful":  true,
+    "skip_layers":  false,
+    "archived_logs":  [
+                          "wall-20260905-161807-77bc4554.log"
+                      ],
+    "max_tick":  200,
+    "stage":  "suite",
+    "protected_ok":  true,
+    "placed":  22,
+    "top_down":  false,
+    "sample_series":  [
+                          {
+                              "placed":  2,
+                              "t":  20
+                          },
+                          {
+                              "placed":  3,
+                              "t":  40
+                          },
+                          {
+                              "placed":  5,
+                              "t":  60
+                          },
+                          {
+                              "placed":  7,
+                              "t":  80
+                          },
+                          {
+                              "placed":  8,
+                              "t":  100
+                          },
+                          {
+                              "placed":  10,
+                              "t":  120
+                          },
+                          {
+                              "placed":  13,
+                              "t":  140
+                          },
+                          {
+                              "placed":  19,
+                              "t":  160
+                          },
+                          {
+                              "placed":  20,
+                              "t":  180
+                          },
+                          {
+                              "placed":  22,
+                              "t":  200
+                          }
+                      ],
+    "last_sample_remaining":  0,
+    "exit_code":  0,
+    "layer_materials":  false,
+    "replans":  0,
+    "gate_sha256":  "91CA2C6AFE9D43D77E33785FD23E6B6D4F752FA2A4831137965D9B2C26A13E25",
+    "samples":  10,
+    "divergences":  0,
+    "time_scale":  1,
+    "no_layers":  false,
+    "checkpoint_placed":  null,
+    "divergence_families":  {
+
+                            },
+    "elapsed_seconds":  40,
+    "ticks_per_sec_achieved":  20,
+    "server_audit":  "22/22",
+    "fidelity_counters_meaningful":  false,
+    "scenarios":  {
+                      "wall":  "SUCCESS"
+                  },
+    "result":  "PASS",
+    "total_cells":  22,
+    "checkpoint_tick":  null,
+    "note":  "Wall regression after owned support cleanup, same source as cf5b9cb6; full region oracle follows",
+    "commit":  "49dcbb942f6a715d5d11356a5706ccc46e814aab"
+}

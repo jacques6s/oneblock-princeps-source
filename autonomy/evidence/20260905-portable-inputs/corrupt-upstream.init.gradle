@@ -1,0 +1,14 @@
+gradle.projectsEvaluated {
+    def expected = new File('C:/Users/jacqu/Desktop/Princeps-codex-ci-artifacts/gradle-user').canonicalFile
+    if (gradle.gradleUserHomeDir.canonicalFile != expected) {
+        throw new GradleException('Negative control may only mutate the isolated CI cache')
+    }
+    def target = new File(expected, 'caches/fabric-loom/26.1.2/minecraft-client.jar')
+    new RandomAccessFile(target, 'rw').withCloseable { file ->
+        file.seek(file.length() - 1)
+        int last = file.read()
+        file.seek(file.length() - 1)
+        file.write(last ^ 1)
+    }
+    println '[NEGATIVE-CONTROL] changed one upstream client byte after Loom configuration'
+}

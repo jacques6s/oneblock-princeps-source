@@ -1,0 +1,35 @@
+{
+    "branch":  "codex/princeps-survival-bench",
+    "tests_fresh":  true,
+    "tick_budget":  30000,
+    "discard_cells":  false,
+    "run_id":  "20260905-161419-tests",
+    "tests_skipped":  10,
+    "tests_suites":  83,
+    "tests_failed":  0,
+    "reason":  "",
+    "engine":  "v3",
+    "started":  "2026-09-05T16:14:20.0312967+02:00",
+    "skip_layers":  false,
+    "tests_failing":  [
+
+                      ],
+    "stage":  "tests",
+    "protected_ok":  true,
+    "top_down":  false,
+    "note":  "Survival mining is active work; preserve same-target break budget across temporary branch yield; log server removal acknowledgments",
+    "exit_code":  0,
+    "layer_materials":  false,
+    "gate_sha256":  "91CA2C6AFE9D43D77E33785FD23E6B6D4F752FA2A4831137965D9B2C26A13E25",
+    "time_scale":  3,
+    "no_layers":  false,
+    "elapsed_seconds":  25,
+    "missing_protected":  [
+                              "tools/dryrun/run-dryrun.ps1",
+                              "run/schematics/etz-basalt.litematic"
+                          ],
+    "scenarios":  "all",
+    "result":  "PASS",
+    "tests_total":  658,
+    "commit":  "49dcbb942f6a715d5d11356a5706ccc46e814aab"
+}

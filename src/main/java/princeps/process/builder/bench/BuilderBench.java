@@ -509,10 +509,8 @@ public final class BuilderBench extends Behavior implements Helper {
         // inventory could place a chest. And `clear` first is no better: it empties the inventory for the tick or
         // two the client needs to catch up, and the builder samples exactly there and pauses for missing material.
         // Replacing one slot at a time is atomic, idempotent and never leaves a gap in either direction.
-        // ONE stack per block type. The bench builds in creative, where placing does not consume the item, so a
-        // second stack of anything is a wasted slot -- and slots are the scarce resource: a real schematic has more
-        // block types than the 36 the inventory holds. Allocating by demand instead burned three slots on sandstone
-        // while a type that appears twice got none, and the build paused for a material that never fit.
+        // First reserve one stack for each material, so a common material cannot crowd out the palette.
+        // Then provision the remaining demand in the spare slots: Survival consumes every placement.
         //
         // Most-used types first, so if a schematic does exceed 36 types the ones that get dropped are the rarest --
         // the lower layers stay buildable, which is where the run has to get to anyway. What was dropped is named;
@@ -531,6 +529,23 @@ public final class BuilderBench extends Behavior implements Helper {
             int perStack = Math.max(1, new net.minecraft.world.item.ItemStack(e.getKey()).getMaxStackSize());
             sendCommand("item replace entity @s container." + slot + " with " + id + " " + perStack);
             slot++;
+        }
+        // Keep the existing scaffold reservation available when the palette leaves room for it.
+        int materialSlots = "false".equals(System.getProperty("princeps.bench.scaffold")) ? 36 : 35;
+        for (Map.Entry<net.minecraft.world.item.Item, Integer> e : byDemand) {
+            String id = net.minecraft.core.registries.BuiltInRegistries.ITEM.getKey(e.getKey()).toString();
+            int perStack = Math.max(1, new net.minecraft.world.item.ItemStack(e.getKey()).getMaxStackSize());
+            int remaining = e.getValue() - perStack;
+            while (remaining > 0 && slot < materialSlots) {
+                int count = Math.min(perStack, remaining);
+                sendCommand("item replace entity @s container." + slot + " with " + id + " " + count);
+                slot++;
+                remaining -= count;
+            }
+            if (remaining > 0) {
+                logMechanic(tag() + " insufficient inventory capacity: " + id + " x" + remaining
+                        + " still needed beyond the stocked stacks");
+            }
         }
         if (!dropped.isEmpty()) {
             logMechanic(tag() + " " + demand.size() + " block types for 36 slots; NOT stocked: "
@@ -969,17 +984,17 @@ public final class BuilderBench extends Behavior implements Helper {
         boolean paused = princeps.getBuilderProcess().isPaused();
         boolean active = princeps.getBuilderProcess().isActive();
 
-        // A BODY THAT HAS NOT MOVED FOR TEN SECONDS HAS ALREADY FAILED, so stop pretending otherwise and waiting
-        // out the timeout. Every builder stall measured on this bench looked identical from here: the same feet,
-        // the same look, minute after minute, and a verdict that arrived seven minutes after the answer did.
-        // Both are checked because either alone has a false positive -- a bot mining a slow block stands still
-        // while its head keeps turning, and a bot turning on the spot goes nowhere.
+        // A stationary body and look are idle only when the controller is not mining a concrete live target.
+        // Survival cobblestone without a pickaxe takes 200 ticks with a steady aim: run f7815303 removed both
+        // helpers (full server-region audit passed), yet this detector cancelled it during the final break.
+        // The fixed idle threshold, overall stall/timeout limits and material-aware engine deadline still apply.
         BetterBlockPos here = ctx.playerFeet();
         float yaw = ctx.player().getYRot();
         float pitch = ctx.player().getXRot();
         boolean moved = !here.equals(frozenAt);
         boolean looked = Math.abs(yaw - frozenYaw) > 0.5F || Math.abs(pitch - frozenPitch) > 0.5F;
-        if (moved || looked) {
+        boolean mining = princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock();
+        if (moved || looked || mining) {
             frozenAt = here;
             frozenYaw = yaw;
             frozenPitch = pitch;

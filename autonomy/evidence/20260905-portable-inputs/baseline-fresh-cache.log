@@ -1,0 +1,56 @@
+
+Welcome to Gradle 9.4.0!
+
+Here are the highlights of this release:
+ - Java 26 support
+ - Non-class-based JVM tests
+ - Enhanced console progress bar
+
+For more details see https://docs.gradle.org/9.4.0/release-notes.html
+
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/9.4.0/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Configure project :
+Fabric Loom: 1.15.5
+
+> Task :compileApiJava
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':compileApiJava'.
+> Dependency verification failed for configuration ':compileClasspath':
+    - On artifact minecraft-merged-deobf-26.1.2.jar (net.minecraft:minecraft-merged-deobf:26.1.2) in repository 'LoomGlobalMinecraft': expected a 'sha256' checksum of '039ebfdc071ce4071b9f0498377e3e76d0064bfaf275014c1732b257de1a1c6d' but was '5da52570eba1aa56bcad307b295aaa8b0fd03c53a38dd5de2bd3dbaf37bf8c7b'
+  
+  This can indicate that a dependency has been compromised. Please carefully verify the checksums.
+  
+  These files failed verification:
+    - GRADLE_USER_HOME\caches\fabric-loom\minecraftMaven\net\minecraft\minecraft-merged-deobf\26.1.2\minecraft-merged-deobf-26.1.2.jar
+  
+  GRADLE_USER_HOME = C:\Users\jacqu\Desktop\Princeps-codex-ci-artifacts\gradle-user
+  
+  These files failed verification:
+> Task :compileApiJava FAILED
+
+[Incubating] Problems report is available at: file:///C:/Users/jacqu/Desktop/Princeps-codex-ci/build/reports/problems/problems-report.html
+    - GRADLE_USER_HOME\caches\fabric-loom\minecraftMaven\net\minecraft\minecraft-merged-deobf\26.1.2\minecraft-merged-deobf-26.1.2.jar
+  
+  GRADLE_USER_HOME = C:\Users\jacqu\Desktop\Princeps-codex-ci-artifacts\gradle-user
+  
+  Open this report for more details: file:///C:/Users/jacqu/Desktop/Princeps-codex-ci/build/reports/dependency-verification/at-1788631355313/dependency-verification-report.html
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights from a Build Scan (powered by Develocity).
+> Get more help at https://help.gradle.org.
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 10.
+
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+BUILD FAILED in 4m 22s
+
+For more on this, please refer to https://docs.gradle.org/9.4.0/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+1 actionable task: 1 executed

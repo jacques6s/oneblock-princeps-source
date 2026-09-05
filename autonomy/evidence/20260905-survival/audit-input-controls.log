@@ -1,0 +1,5 @@
+unsafe-runid: exit=1, expected rejection=True
+inverted-bounds: exit=1, expected rejection=True
+invalid-height: exit=1, expected rejection=True
+oversized-volume: exit=1, expected rejection=True
+duplicate-canonical: exit=1, expected rejection=True

@@ -50,3 +50,6 @@ run/logs/build-trace-*.log
 
 # Per-worktree Gradle home used by the bench scripts; never part of a commit.
 .gradle-user/
+autonomy/runs/
+autonomy/gate.lock
+autonomy/.lock

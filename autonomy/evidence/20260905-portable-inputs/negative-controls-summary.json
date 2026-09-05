@@ -1,0 +1,14 @@
+[
+  {
+    "control": "generated",
+    "exit_code": 1,
+    "expected_failure": "Generated Minecraft content verification failed",
+    "no_compiler_task_started": true
+  },
+  {
+    "control": "upstream",
+    "exit_code": 1,
+    "expected_failure": "Minecraft upstream verification failed: minecraft-client.jar",
+    "no_compiler_task_started": true
+  }
+]

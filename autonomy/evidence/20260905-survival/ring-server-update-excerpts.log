@@ -1,0 +1,12 @@
+SOURCE run/bench-out/ringbig-20260905-161459-cf5b9cb6.log SHA256=63349C4DD5A2DE821043673C81362731A4226BF68A2C3EEEF0D58D8F05A0358A
+[16:16:10] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-OWNED server confirmed 65, -60, 67
+[16:16:15] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-OWNED server confirmed 66, -59, 67
+[16:16:42] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-RELEASE server confirmed 65, -60, 67 state=air
+[16:17:04] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-RELEASE server confirmed 66, -59, 67 state=air
+[16:17:08] [Render thread/INFO] (PrincepsBuilder) [BENCH] run=cf5b9cb6 verdict=SUCCESS scenario=ring11x3 placed=120/120 remaining=0 ticks=2120 blocksPerMin=67.9 walks=47 paidOff=27 (57%) stanceless=0 recalled=0 travelled=140.3 still=44% longestStill=262 turnPerTick=3.10 reversals=2% shake=0.0% rock=0.1% clicks=123 landed=120 wrong=0 broke=415 firsttry=98% divergences=0 replans=0
+SOURCE run/bench-out/ringbig-20260905-162019-d356561b.log SHA256=174D0363AE2D28CC00DD62F75C7026D48C1CD82D915F76873D319E106BBD36DF
+[16:21:30] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-OWNED server confirmed 65, -60, 67
+[16:21:35] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-OWNED server confirmed 66, -59, 67
+[16:22:02] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-RELEASE server confirmed 65, -60, 67 state=air
+[16:22:23] [Render thread/INFO] (PrincepsBuilder) SCAFFOLD-RELEASE server confirmed 66, -59, 67 state=air
+[16:22:27] [Render thread/INFO] (PrincepsBuilder) [BENCH] run=d356561b verdict=SUCCESS scenario=ring11x3 placed=120/120 remaining=0 ticks=2120 blocksPerMin=67.9 walks=48 paidOff=27 (56%) stanceless=0 recalled=0 travelled=140.4 still=44% longestStill=261 turnPerTick=3.08 reversals=2% shake=0.0% rock=0.2% clicks=123 landed=120 wrong=0 broke=417 firsttry=98% divergences=0 replans=0

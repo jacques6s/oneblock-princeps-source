@@ -118,6 +118,9 @@ public final class GameEventHandler implements IEventBus, Helper {
 
     @Override
     public void onBlockChange(BlockChangeEvent event) {
+        if (princeps.getBuilderProcess() instanceof princeps.process.BuilderProcess builder) {
+            event.getBlocks().forEach(change -> builder.observeScaffoldServerChange(change.first(), change.second()));
+        }
         if (Princeps.settings().repackOnAnyBlockChange.value) {
             final boolean keepingTrackOf = event.getBlocks().stream()
                     .map(Pair::second).map(BlockState::getBlock)
