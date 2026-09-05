@@ -1,0 +1,2 @@
+data get entity BenchBot playerGameType -> No entity was found
+data get entity BenchBot Inventory -> No entity was found

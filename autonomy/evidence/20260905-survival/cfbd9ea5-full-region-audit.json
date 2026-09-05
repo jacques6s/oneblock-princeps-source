@@ -1,0 +1,26 @@
+{
+    "server_response":  "execute if blocks 52 -60 52 88 -46 88 52 190 52 all -\u003e Test passed. Count: 20535",
+    "expected_bounds":  [
+                            52,
+                            190,
+                            52,
+                            88,
+                            204,
+                            88
+                        ],
+    "expected_y_offset":  250,
+    "target_cells":  81,
+    "volume_cells":  20535,
+    "manifest_sha256":  "AD070CDC8B0033C06F6B2AE7242722499C5994C3BE7F9F5715C1E09610223085",
+    "expected_air_cells":  20454,
+    "bounds":  [
+                   52,
+                   -60,
+                   52,
+                   88,
+                   -46,
+                   88
+               ],
+    "run_id":  "cfbd9ea5",
+    "all_target_and_air_cells_match":  true
+}

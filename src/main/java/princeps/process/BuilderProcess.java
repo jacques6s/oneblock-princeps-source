@@ -607,6 +607,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     // mit zwei Antworten ist der Fehler, den diese Datei schon dreimal bezahlt hat.
     /** Die eine lebende Geruestzelle (Weltkoordinate), oder {@code null}. Mehr als eine gibt es nie. */
     private BetterBlockPos scaffoldCell;
+    private final BuilderScaffoldLedger navigationScaffolds = new BuilderScaffoldLedger();
+    private boolean scaffoldCleanupActive;
+    private final Set<Long> scaffoldCleanupTargets = new HashSet<>();
     /** Die geparkte Zelle, die sie freimachen soll. */
     private BetterBlockPos scaffoldServes;
     /** Was dort stehen soll, solange die Ueberschreibung gilt. */
@@ -2201,6 +2204,34 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return scaffoldVetoTicks > 0 && scaffoldVetoLastTick >= buildTick - SCAFFOLD_VETO_EPISODE_GAP;
     }
 
+    public void recordNavigationScaffold(BlockPos pos, BlockState before, BlockState after) {
+        if (!isActive() || buildInRows || temporarySupportTargets.containsKey(positionKey(pos))) {
+            return;
+        }
+        if (navigationScaffolds.record(pos, before, after, templateNamesABlockAt(pos),
+                Princeps.settings().acceptableThrowawayItems.value.contains(after.getBlock().asItem()), buildTick)) {
+            logMechanic("SCAFFOLD-REQUEST " + pos.toShortString());
+        }
+    }
+
+    public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
+        boolean wasOwned = navigationScaffolds.contains(pos);
+        if (navigationScaffolds.serverChanged(pos, state)) {
+            logMechanic("SCAFFOLD-OWNED server confirmed " + pos.toShortString());
+        } else if (wasOwned && !navigationScaffolds.contains(pos)) {
+            logMechanic("SCAFFOLD-RELEASE server confirmed " + pos.toShortString()
+                    + " state=" + blockName(state));
+        }
+    }
+
+    private List<BetterBlockPos> remainingNavigationScaffolds(BuilderCalculationContext bcc) {
+        List<BetterBlockPos> remaining = new ArrayList<>();
+        for (BlockPos pos : navigationScaffolds.positions()) {
+            remaining.add(new BetterBlockPos(pos));
+        }
+        return remaining;
+    }
+
     private boolean isScaffoldLeftBehind(int x, int y, int z, BuilderCalculationContext bcc) {
         BlockState state = bcc.bsi.get0(x, y, z);
         if (state.isAir()) {
@@ -2214,6 +2245,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // could use it, producing hundreds of place/break cycles. A reserved helper is ordinary scaffold again the
             // instant its served target becomes correct; until then it is the click surface that breaks the deadlock.
             return false;
+        }
+        if (navigationScaffolds.owns(new BlockPos(x, y, z), state)) {
+            return true;
         }
         int lx = x - origin.getX();
         int ly = y - origin.getY();
@@ -5589,6 +5623,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // Inert means ALL of these at once. Any single one of them alone is ordinary: a committed target is work,
         // a live path is work, and a running calculation is about to become work.
         if (placementTargetLock.isActive()
+                || princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock()
                 || princeps.getPathingBehavior().isPathing()
                 || princeps.getPathingBehavior().getCurrent() != null) {
             return null;
@@ -8565,6 +8600,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // Runs BEFORE anything can return. Every previous stall guard sat further down onTick, behind a dozen
             // early returns, so the one situation they existed for -- a branch that returns the same command every
             // tick -- was precisely the situation they could not see. Placing this first is the whole design.
+            Set<BlockPos> unconfirmedScaffolds = navigationScaffolds.unconfirmedBefore(buildTick - 400);
+            if (!unconfirmedScaffolds.isEmpty()) {
+                abortBuild(Ending.PLACEMENT_FAILED, "Build stopped: navigation scaffold placement was not confirmed by the server",
+                        unconfirmedScaffolds.stream().map(BlockPos::toShortString).toList());
+            }
             enforcePlacementTargetDeadline();
             closeAnyContainerScreen();
             narrateIfNoCellHasCompleted();
@@ -8618,7 +8658,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (paused) {
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
-        if (Princeps.settings().buildInLayers.value) {
+        if (scaffoldCleanupActive && realSchematic != null) {
+            schematic = realSchematic;
+        }
+        if (Princeps.settings().buildInLayers.value && !scaffoldCleanupActive) {
             if (realSchematic == null) {
                 realSchematic = schematic;
             }
@@ -8731,7 +8774,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // erst weiter unten laeuft: gefragt wird nach der Zelle, zu der wir GERADE unterwegs sind. Genau ein
         // Kontext je Tick, und Planer wie Fahrt lesen denselben -- das ist die Bedingung, an der der erste Versuch
         // gescheitert ist (921 geplante Bruecken gegen 922 verweigerte, Bot 1920 Ticks bewegungslos).
-        Lane laneThisTick = laneForCurrentCell(electedCell);
+        Lane laneThisTick = scaffoldCleanupActive ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
         // Und dasselbe fuer die Ausfuehrungsseite. scaffoldIsLicensedAt -- das globale Praedikat, das eine laufende
         // Bewegung fragt, ob sie einen Wegwerfblock setzen darf -- haengt ab jetzt an DERSELBEN Entscheidung.
         // Vorher hing es an scaffoldPassAllowed, das ein einziges calcFailed fuer den Rest der Zelle oeffnete:
@@ -8935,6 +8978,17 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // der Vertrauensverlust, den der Ergebniskanal beenden soll. Beide Zweige sind ersatzlos entfallen: mit
             // P6a kann eine Ebene gar nicht mehr mit offenen Zellen verlassen werden, also gibt es nichts
             // nachzuholen.
+            if (navigationScaffolds.awaitingServer()) {
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            List<BetterBlockPos> remainingScaffolds = remainingNavigationScaffolds(scanContext);
+            if (!remainingScaffolds.isEmpty()) {
+                scaffoldCleanupActive = true;
+                remainingScaffolds.forEach(pos -> scaffoldCleanupTargets.add(pos.asLong()));
+                incorrectPositions = null;
+                logMechanic("SCAFFOLD-CLEANUP " + remainingScaffolds.size() + " owned navigation block(s)");
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
             Vec3i repeat = Princeps.settings().buildRepeat.value;
             int max = Princeps.settings().buildRepeatCount.value;
             numRepeats++;
@@ -8948,6 +9002,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             // build repeat time
             layer = 0;
+            scaffoldCleanupActive = false;
+            scaffoldCleanupTargets.clear();
             origin = new BlockPos(origin).offset(repeat);
             if (!Princeps.settings().buildRepeatSneaky.value) {
                 schematic.reset();
@@ -9035,13 +9091,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         } else {
             breakBranchIdleTicks = 0;
         }
-        if (breakBranchIdleTicks > BREAK_BRANCH_STARVATION_TICKS) {
+        if (breakBranchIdleTicks > BREAK_BRANCH_STARVATION_TICKS
+                && !princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock()) {
             logMechanic("The break branch has held the tick for " + breakBranchIdleTicks
                     + " ticks without a single world change, so nothing below it has run. Standing it down for "
                     + BREAK_BRANCH_YIELD_TICKS + " ticks to let the placement scan have a turn.");
             breakBranchIdleTicks = 0;
             breakBranchYieldUntilTick = buildTick + BREAK_BRANCH_YIELD_TICKS;
-            resetBreakProgressTracking();
         }
         if (toBreak.isPresent() && buildTick < breakBranchYieldUntilTick) {
             toBreak = Optional.empty();
@@ -9142,9 +9198,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
-        if (!toBreak.isPresent()) {
-            resetBreakProgressTracking();
-        }
+        // A temporary branch yield does not replenish the same target's material-aware break budget.
+        // breakMadeNoProgress resets it when a different target or block is actually observed.
         // WALKING, for the snake only. Nothing in reach means the head is one step further than the bot is
         // standing, so the goal is the slice it cleared last -- a cell that is guaranteed to exist and guaranteed
         // to be reachable, because the bot made it. This is what the per-cell approach could not offer: a goal
@@ -10282,6 +10337,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // empty, not per tick, and the bench's own "measured N client ticks/real second" line is the guard: if this
         // ever became hot, that number would fall below the ask.
         List<BetterBlockPos> candidates = new ArrayList<>();
+        if (scaffoldCleanupActive) {
+            candidates.addAll(remainingNavigationScaffolds(bcc));
+        }
         for (int y = 0; y < schematic.heightY(); y++) {
             for (int z = 0; z < schematic.lengthZ(); z++) {
                 for (int x = 0; x < schematic.widthX(); x++) {
@@ -12671,6 +12729,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  because a re-issued build does not always pass through onLostControl() first. Keep this the single source
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
+        navigationScaffolds.clear();
+        scaffoldCleanupActive = false;
+        scaffoldCleanupTargets.clear();
         // Die beiden Listen gehoeren zu EINEM Bauauftrag. Eine PARK-Liste, die einen Auftrag ueberlebt,
         // beschreibt eine Welt, die es nicht mehr gibt -- das ist der eine Fall, in dem 'persistent'
         // ausdruecklich nicht gilt.
@@ -13095,6 +13156,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
 
         private BlockState getSchematic(int x, int y, int z, BlockState current) {
+            BlockPos pos = new BlockPos(x, y, z);
+            if (scaffoldCleanupActive && scaffoldCleanupTargets.contains(pos.asLong())
+                    && (current.isAir() || navigationScaffolds.owns(pos, current))) {
+                return Blocks.AIR.defaultBlockState();
+            }
             if (schematic.inSchematic(x - originX, y - originY, z - originZ, current)) {
                 return schematic.desiredState(x - originX, y - originY, z - originZ, current, BuilderProcess.this.approxPlaceable);
             } else {

@@ -134,8 +134,19 @@ public final class BlockBreakHelper {
         if (ctx.player() != null && wasHitting) {
             ctx.playerController().setHittingBlock(false);
             ctx.playerController().resetBlockRemoving();
-            wasHitting = false;
         }
+        wasHitting = false;
+    }
+
+    /** The controller is continuing a real multi-tick break, rather than merely requesting a target. */
+    public boolean isBreakingBlock() {
+        if (!wasHitting || ctx.player() == null || ctx.minecraft().screen != null
+                || !(ctx.objectMouseOver() instanceof BlockHitResult hit)) {
+            return false;
+        }
+        BlockPos active = ((IPlayerControllerMP) ctx.minecraft().gameMode).getCurrentBlock();
+        return active != null && active.equals(hit.getBlockPos())
+                && !ctx.world().getBlockState(active).isAir();
     }
 
     /** Mark the next helper tick as a replayable V3 break tick (no sampled sight delay or cooldown variance). */

@@ -151,6 +151,12 @@ public abstract class MixinClientPlayNetHandler extends ClientCommonPacketListen
             at = @At("RETURN")
     )
     private void postHandleBlockChange(ClientboundBlockUpdatePacket packetIn, CallbackInfo ci) {
+        IPrinceps active = PrincepsAPI.getProvider().getPrincepsForConnection((ClientPacketListener) (Object) this);
+        if (active != null) {
+            active.getGameEventHandler().onBlockChange(new BlockChangeEvent(
+                    ChunkPos.containing(packetIn.getPos()),
+                    List.of(new Pair<>(packetIn.getPos(), packetIn.getBlockState()))));
+        }
         if (!Princeps.settings().repackOnAnyBlockChange.value) {
             return;
         }

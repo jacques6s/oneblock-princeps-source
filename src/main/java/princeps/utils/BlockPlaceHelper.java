@@ -176,7 +176,13 @@ public class BlockPlaceHelper {
                         + " cursor=" + String.format(java.util.Locale.ROOT, "%.4f,%.4f,%.4f",
                                 blockHit.getLocation().x, blockHit.getLocation().y, blockHit.getLocation().z));
             }
+            BlockPos placedAt = blockHit.getBlockPos().relative(blockHit.getDirection());
+            var beforePlacement = ctx.world().getBlockState(placedAt);
             if (ctx.playerController().processRightClickBlock(ctx.player(), ctx.world(), hand, (BlockHitResult) mouseOver) == InteractionResult.SUCCESS) {
+                if (usedItem instanceof net.minecraft.world.item.BlockItem
+                        && princeps.getBuilderProcess() instanceof princeps.process.BuilderProcess builder) {
+                    builder.recordNavigationScaffold(placedAt, beforePlacement, ctx.world().getBlockState(placedAt));
+                }
                 successfulBlockInteractions++;
                 // THE GROUND TRUTH OF THE WORLD-CHANGE CENSUS, and the only line in the codebase that is one.
                 // Every other placement record in this project is written where a caller DECIDED to place; this is
