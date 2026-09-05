@@ -1,23 +1,12 @@
 plugins {
-    id 'net.fabricmc.fabric-loom' version '1.15-SNAPSHOT'
+    id 'net.fabricmc.fabric-loom' version '1.15.5'
     id 'java'
 }
 
 group = project.maven_group
 
-def vers = ""
-try {
-    vers = 'git describe --always --tags --first-parent --dirty'.execute().text.trim()
-} catch (Exception e) {
-    println "Version detection failed: " + e
-}
-if (!vers.startsWith("v")) {
-    println "using version number: " + project.mod_version
-    version = project.mod_version
-} else {
-    version = vers.substring(1)
-    println "Detected version " + version
-}
+// Source archives have no Git checkout. Their version must match a checkout with any local tags.
+version = project.mod_version
 
 base {
     archivesName = project.archives_base_name
@@ -42,6 +31,10 @@ repositories {
         url = 'https://babbaj.github.io/maven/'
     }
     mavenCentral()
+}
+
+dependencyLocking {
+    lockAllConfigurations()
 }
 
 // Dev runs, tuned for the builder test bench (docs/BENCH.md).
@@ -306,4 +299,14 @@ tasks.register('apiJar', Jar) {
 
 tasks.withType(JavaCompile).configureEach {
     it.options.encoding = "UTF-8"
+    it.options.release = project.java_version.toInteger()
+}
+
+tasks.withType(AbstractArchiveTask).configureEach {
+    preserveFileTimestamps = false
+    reproducibleFileOrder = true
+}
+
+tasks.withType(Jar).configureEach {
+    from('LICENSE') { into 'META-INF' }
 }
