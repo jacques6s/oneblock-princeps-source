@@ -36,6 +36,7 @@ import princeps.pathing.movement.MovementState.MovementTarget;
 import princeps.pathing.precompute.Ternary;
 import princeps.utils.BlockStateInterface;
 import princeps.utils.ToolSet;
+import princeps.behavior.PathingBehavior;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.Holder;
@@ -184,8 +185,7 @@ public interface MovementHelper extends ActionCosts, Helper {
         return canWalkThrough(context, x, y, z, context.get(x, y, z));
     }
 
-    /** Doors and gates are special because generic pathing calls them passable on the promise that a movement will
-     *  operate them. Only {@code MovementTraverse} actually owns that actuator. */
+    /** Doors and gates are passable only where a movement owns the corresponding normal interaction. */
     public static boolean isPathingBarrier(BlockState state) {
         Block block = state.getBlock();
         return block instanceof DoorBlock || block instanceof FenceGateBlock;
@@ -411,6 +411,57 @@ public interface MovementHelper extends ActionCosts, Helper {
         }
 
         return isHorizontalBlockPassable(doorPos, state, playerPos, DoorBlock.OPEN);
+    }
+
+    /** The normal door interaction shared by flat and descending cardinal approaches. No world state is written.
+     * A requested rotation is not permission to click: the current ray must hit this door, within normal reach,
+     * and crouching must already have ended. Until then the grounded body waits instead of placing its held block.
+     * Returns true only when a blocking door owns this grounded movement tick. */
+    static boolean openDoorOnRoute(IPrinceps princeps, MovementState movement, BlockPos from, BlockPos[] passage) {
+        IPlayerContext ctx = princeps.getPlayerContext();
+        if (!ctx.player().onGround()) return false; // retain the normal airborne descent/landing controller
+        for (BlockPos pos : passage) {
+            BlockState block = ctx.world().getBlockState(pos);
+            if (!(block.getBlock() instanceof DoorBlock door)) continue;
+            // The approach is horizontal even when this door half is one/two cells below the route's source.
+            BlockPos approach = new BlockPos(from.getX(), pos.getY(), from.getZ());
+            if (Math.abs(approach.getX() - pos.getX()) + Math.abs(approach.getZ() - pos.getZ()) != 1
+                    || isHorizontalBlockPassable(pos, block, approach, DoorBlock.OPEN)) continue;
+            movement.setInput(Input.MOVE_FORWARD, false).setInput(Input.MOVE_BACK, false)
+                    .setInput(Input.MOVE_LEFT, false).setInput(Input.MOVE_RIGHT, false)
+                    .setInput(Input.SPRINT, false).setInput(Input.CLICK_RIGHT, false).setInput(Input.SNEAK, false);
+            // A forbidden route or a non-hand-operated door cannot be made passable by inventing an actuator.
+            var pathing = princeps.getPathingBehavior();
+            CalculationContext context = pathing instanceof PathingBehavior actual
+                    ? actual.secretInternalGetCalculationContext() : null;
+            if (!door.type().canOpenByHand() || context == null || !context.mayUsePathingBarriers()) {
+                movement.setStatus(MovementStatus.UNREACHABLE);
+                return true;
+            }
+            movement.setTarget(new MovementTarget(RotationUtils.calcRotationFromVec3d(ctx.playerHead(),
+                    VecUtils.calculateBlockCenter(ctx.world(), pos), ctx.playerRotations()), true));
+            if (!ctx.player().isCrouching() && !ctx.player().isSecondaryUseActive()
+                    && ctx.objectMouseOver() instanceof BlockHitResult hit
+                    && hit.getType() == HitResult.Type.BLOCK && sameDoorHalf(ctx, pos, block, hit.getBlockPos())
+                    && hit.getLocation().distanceToSqr(ctx.playerHead()) <= Math.pow(ctx.playerController().getBlockReachDistance(), 2)) {
+                BuildTrace.intendWorldChange("route-door", hit.getBlockPos().getX(), hit.getBlockPos().getY(),
+                        hit.getBlockPos().getZ(), "operating the blocking door to follow the route");
+                movement.setInput(Input.CLICK_RIGHT, true);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private static boolean sameDoorHalf(IPlayerContext ctx, BlockPos pos, BlockState state, BlockPos hit) {
+        if (pos.equals(hit)) return true;
+        int partnerY = pos.getY() + (state.getValue(DoorBlock.HALF) == net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER ? 1 : -1);
+        if (hit.getX() != pos.getX() || hit.getZ() != pos.getZ() || hit.getY() != partnerY) return false;
+        BlockState other = ctx.world().getBlockState(hit);
+        return other.is(state.getBlock()) && other.getValue(DoorBlock.HALF) != state.getValue(DoorBlock.HALF)
+                && other.getValue(DoorBlock.FACING) == state.getValue(DoorBlock.FACING)
+                && other.getValue(DoorBlock.OPEN) == state.getValue(DoorBlock.OPEN)
+                && other.getValue(DoorBlock.HINGE) == state.getValue(DoorBlock.HINGE);
     }
 
     static boolean isGatePassable(IPlayerContext ctx, BlockPos gatePos, BlockPos playerPos) {
