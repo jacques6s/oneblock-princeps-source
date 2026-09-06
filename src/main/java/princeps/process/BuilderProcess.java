@@ -3412,7 +3412,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private int effectiveAreaBreakSize() {
         ISchematic full = realSchematic == null ? schematic : realSchematic;
         return effectiveAreaBreakSize(Princeps.settings().areaBreakSize.value, excavating,
-                full == null ? 0 : full.widthX(), full == null ? 0 : full.lengthZ());
+                full == null ? 0 : full.widthX(), full == null ? 0 : full.heightY(), full == null ? 0 : full.lengthZ());
+    }
+
+    static int effectiveAreaBreakSize(int requested, boolean excavation, int width, int completeHeight, int length) {
+        // A one-high complete job has no in-volume horizontal Shard head. Ordinary clearing can work the open
+        // surface without inventing a head above the selection or cutting an outside ceiling. A short LAST band
+        // of a taller job retains its snake route because the already-cleared band provides headroom above it.
+        return ShallowExcavationPolicy.surfaceMode(excavation, completeHeight)
+                ? 1 : effectiveAreaBreakSize(requested, excavation, width, length);
     }
 
     static int effectiveAreaBreakSize(int requested, boolean excavation, int width, int length) {
@@ -4809,6 +4817,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
         return bestStep == null ? null : excavationLevelPathingCommand(feet, bestStep);
+    }
+
+    private boolean shallowExcavation() {
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        return full != null && ShallowExcavationPolicy.surfaceMode(excavating, full.heightY());
+    }
+
+    private BetterBlockPos shallowCoveredWork(BuilderCalculationContext bcc) {
+        if (!shallowExcavation() || incorrectPositions == null) return null;
+        for (BetterBlockPos cell : incorrectPositions) {
+            if (!snakeCellNeedsClear(cell, bcc)) continue;
+            BlockPos roof = cell.above();
+            if (ShallowExcavationPolicy.roofBlocksStanding(bcc.get(roof), ctx.world(), roof)) return cell;
+        }
+        return null;
     }
 
     private ExcavationRepairPolicy.Bounds excavationRepairBounds() {
@@ -8924,7 +8947,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 && !(princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory())
                 && snakeOrdinaryPickSlot(Blocks.STONE.defaultBlockState()) < 0) {
             abortBuild(Ending.MATERIALS_MISSING,
-                    "AutoDig needs an ordinary pickaxe for a selection narrower than three blocks",
+                    "AutoDig needs an ordinary pickaxe for this selection",
                     java.util.List.of("A 3x3 swing cannot stay inside this selection.",
                             "Put an ordinary pickaxe on the hotbar to continue."));
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
@@ -9978,6 +10001,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 resetNavigationProgressTracking();
             }
             boolean navigationProgress = navigationMadeProgress(feet, activeGoal, calcFailed);
+            // Reachable ordinary cuts have already had their turn above. A complete one-high selection under a
+            // fixed roof cannot manufacture another standing-height route by repeatedly releasing the same goal.
+            // Keep any accessible work, and end explicitly when the actual search failed without new world work.
+            boolean shallowRouteVerdictReady = calcFailed && !completedChanged && toBreak.isEmpty()
+                    && isSafeToCancel && (ctx.player().onGround() || ctx.player().isInWater())
+                    && !ctx.player().isUsingItem()
+                    && !(princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory());
+            BetterBlockPos covered = shallowRouteVerdictReady ? shallowCoveredWork(bcc) : null;
+            if (ShallowExcavationPolicy.stopAfterFailedRoute(shallowExcavation(), calcFailed,
+                    completedChanged, covered != null)) {
+                abortBuild(Ending.LAYER_UNBUILDABLE, "AutoDig cannot reach the remaining one-block-high area",
+                        java.util.List.of("A fixed roof blocks standing headroom above " + covered.toShortString() + ".",
+                                "No safe route was found. The remaining cells are unfinished and the fixed roof stays protected."));
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
 
             // THE SECOND TRIGGER, AND IT IS DELIBERATELY OUTSIDE THE BRANCH BELOW.
             //

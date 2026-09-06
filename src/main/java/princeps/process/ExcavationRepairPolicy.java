@@ -82,6 +82,9 @@ final class ExcavationRepairPolicy {
         if (sourceBand && bounds.inside(x, y, z) && BuilderProcess.snakeSourceReadyForPlug(state, excavation)) {
             return Kind.INTERNAL_SOURCE;
         }
+        // Filling AIR directly above a one-high surface would remove the only standing headroom. This is based on
+        // the complete selection height, never on the final one-high band of a taller excavation. Fluids still seal.
+        if (excavation && ShallowExcavationPolicy.keepRoofAir(bounds, x, y, z, state)) return null;
         if (bounds.shell(x, y, z) && BuilderProcess.snakeShellRequiresSeal(state, replaceable)) {
             return bounds.floor(x, y, z) ? Kind.BRIDGE
                     : state.getFluidState().isSource() ? Kind.SHELL_SOURCE : Kind.SHELL_GAP;
