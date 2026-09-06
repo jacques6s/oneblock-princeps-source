@@ -17,6 +17,7 @@ import org.junit.Test;
 import princeps.api.pathing.goals.Goal;
 import princeps.api.pathing.goals.GoalBlock;
 import princeps.api.pathing.goals.GoalComposite;
+import princeps.api.process.PathingCommand;
 import princeps.api.process.PathingCommandType;
 import princeps.api.schematic.FillSchematic;
 import princeps.api.utils.BetterBlockPos;
@@ -247,6 +248,80 @@ public class BuilderLaneEvidenceTest {
         }
     }
 
+    @Test public void actualPlatformFinisherCancelsWhenConsumedNegativeBWithdrawsTheOffer() throws Exception {
+        Fixture f = platformFixture();
+        set(f.builder, "laneAProof", f.question); set(f.builder, "laneEscalatedCell", TARGET);
+        set(f.builder, "laneProbeLane", BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        assertTrue(f.current(true));
+        f.answer(PathProbe.Outcome.NONE, true);
+        PathingCommand command = f.finishCommand(new QuietGoal(STANCE), f.goal);
+        assertEquals(PathingCommandType.CANCEL_AND_SET_GOAL, command.commandType);
+        assertNull("a withdrawn platform offer cannot escape with ordinary routing rules", command.goal);
+        assertNull(get(f.builder, "platformTraverseApproach"));
+        assertNull(get(f.builder, "electedCell")); assertNull(get(f.builder, "laneAProof"));
+        assertTrue(((Map<?, ?>) get(f.builder, "parkedCells")).containsKey(TARGET.asLong()));
+        assertEquals(1L, get(f.builder, "cellsParked"));
+    }
+
+    @Test public void actualPlatformFinisherKeepsTheMatchingOfferAndItsExactAContext() throws Exception {
+        Fixture f = platformFixture();
+        Object approach = get(f.builder, "platformTraverseApproach");
+        set(f.builder, "laneAProof", f.question); set(f.builder, "laneEscalatedCell", TARGET);
+        set(f.builder, "laneProbeLane", BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        f.answer(PathProbe.Outcome.COMPLETE, false);
+        PathingCommandContext command = f.finish(new QuietGoal(STANCE), f.goal);
+        assertEquals(true, get(f.builder, "laneBAnswered"));
+        assertSame(f.goal, command.goal); assertSame(f.context, command.desiredCalcContext);
+        assertSame(approach, get(command.desiredCalcContext, "platformApproach"));
+        assertEquals(BuilderProcess.Lane.A_NO_PLACING, get(command.desiredCalcContext, "lane"));
+        assertEquals(false, get(f.builder, "scaffoldPassAllowed"));
+        assertTrue(((Map<?, ?>) get(f.builder, "parkedCells")).isEmpty());
+    }
+
+    @Test public void clearingOrReplacingThePlatformSnapshotInvalidatesPendingAndAcceptedLaneEvidence() throws Exception {
+        Fixture f = platformFixture();
+        Object original = get(f.builder, "platformTraverseApproach");
+        assertTrue(f.current(true)); assertTrue(f.current(false));
+        set(f.builder, "platformTraverseApproach", null);
+        assertFalse(f.current(true)); assertFalse(f.current(false));
+        set(f.builder, "platformTraverseApproach", original);
+        assertTrue(f.current(true)); assertTrue(f.current(false));
+        Object replacement = suppliedPlatformApproach(f);
+        assertNotSame(original, replacement);
+        assertTrue("equal coordinates and goal still describe a different offer", original.equals(replacement));
+        set(f.builder, "platformTraverseApproach", replacement);
+        assertFalse(f.current(true)); assertFalse(f.current(false));
+    }
+
+    /** Supplies a retained approach/context snapshot, not a successful platform election or a path search.
+     * BuilderPlatformTraverseTest covers actual election. These tests execute the real Lane result consumer,
+     * question-identity check, target teardown and final route dispatch without creating another API provider. */
+    private static Fixture platformFixture() throws Exception {
+        Class<?> goalType = java.util.Arrays.stream(BuilderProcess.class.getDeclaredClasses())
+                .filter(type -> type.getSimpleName().equals("PlatformTraverseGoal")).findFirst().orElseThrow();
+        Constructor<?> goalConstructor = goalType.getDeclaredConstructor(BlockPos.class); goalConstructor.setAccessible(true);
+        Goal goal = (Goal) goalConstructor.newInstance(TARGET.above());
+        Fixture base = fixture(Blocks.AIR.defaultBlockState(), Blocks.SMOOTH_STONE.defaultBlockState(), goal);
+        base.feet[0] = TARGET.west().above();
+        base.world.states.put(base.feet[0].below().asLong(), Blocks.SMOOTH_STONE.defaultBlockState());
+        set(base.context, "lane", BuilderProcess.Lane.A_NO_PLACING);
+        Object approach = suppliedPlatformApproach(base);
+        set(base.builder, "platformTraverseApproach", approach); set(base.context, "platformApproach", approach);
+        Constructor<?> questionConstructor = QUESTION.getDeclaredConstructors()[0]; questionConstructor.setAccessible(true);
+        Object question = questionConstructor.newInstance(TARGET, goal, goal, base.feet[0], base.context,
+                Blocks.AIR.defaultBlockState(), false, 0L, null, null);
+        set(base.builder, "laneQuestion", question);
+        return new Fixture(base.builder, base.context, base.world, base.feet, goal, base.probe, question);
+    }
+
+    private static Object suppliedPlatformApproach(Fixture f) throws Exception {
+        Class<?> type = java.util.Arrays.stream(BuilderProcess.class.getDeclaredClasses())
+                .filter(candidate -> candidate.getSimpleName().equals("PlatformTraverseApproach")).findFirst().orElseThrow();
+        Constructor<?> constructor = type.getDeclaredConstructors()[0]; constructor.setAccessible(true);
+        return constructor.newInstance(f.world, f.builder, get(f.builder, "schematic"), BlockPos.ZERO,
+                f.feet[0], TARGET, Blocks.SMOOTH_STONE.defaultBlockState(), Blocks.SMOOTH_STONE.defaultBlockState(), f.goal);
+    }
+
     private static Fixture recoveryFixture(BuilderProcess.Lane lane) throws Exception {
         Fixture f = fixture(Blocks.AIR.defaultBlockState(), Blocks.SMOOTH_STONE.defaultBlockState(), new GoalBlock(STANCE));
         set(f.context, "lane", lane);
@@ -296,7 +371,10 @@ public class BuilderLaneEvidenceTest {
                     context, feet[0], false);
         }
         PathingCommandContext finish(Goal routeGoal, Goal workGoal) throws Exception {
-            return (PathingCommandContext) invoke(builder, "finishBuilderRoute",
+            return (PathingCommandContext) finishCommand(routeGoal, workGoal);
+        }
+        PathingCommand finishCommand(Goal routeGoal, Goal workGoal) throws Exception {
+            return (PathingCommand) invoke(builder, "finishBuilderRoute",
                     new Class<?>[]{Goal.class, Goal.class, PathingCommandType.class, BuilderProcess.BuilderCalculationContext.class},
                     routeGoal, workGoal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, context);
         }

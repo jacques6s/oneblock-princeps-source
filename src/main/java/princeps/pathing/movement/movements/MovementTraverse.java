@@ -360,54 +360,7 @@ public class MovementTraverse extends Movement {
                     break;
             }
             if (feet.equals(dest)) {
-                // If we are in the block that we are trying to get to, we are sneaking over air and we need to place a block beneath us against the one we just walked off of
-                // Out.log(from + " " + to + " " + faceX + "," + faceY + "," + faceZ + " " + whereAmI);
-                double faceX = (dest.getX() + src.getX() + 1.0D) * 0.5D;
-                double faceY = (dest.getY() + src.getY() - 1.0D) * 0.5D;
-                double faceZ = (dest.getZ() + src.getZ() + 1.0D) * 0.5D;
-                // faceX, faceY, faceZ is the middle of the face between from and to
-                BlockPos goalLook = src.below(); // this is the block we were just standing on, and the one we want to place against
-
-                Rotation backToFace = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), new Vec3(faceX, faceY, faceZ), ctx.playerRotations());
-                float pitch = backToFace.getPitch();
-                double dist2 = Math.max(Math.abs(ctx.player().position().x - faceX), Math.abs(ctx.player().position().z - faceZ));
-                if (dist2 < 0.29) { // see issue #208
-                    float yaw = RotationUtils.calcRotationFromVec3d(VecUtils.getBlockPosCenter(dest), ctx.playerHead(), ctx.playerRotations()).getYaw();
-                    state.setTarget(MovementState.MovementTarget.forPlacement(new Rotation(yaw, pitch)));
-                } else {
-                    state.setTarget(MovementState.MovementTarget.forPlacement(backToFace));
-                }
-                // The old exact aim could edge backwards and acquire the support face in the same tick. A curved
-                // placement aim first faces backwards while fully supported; otherwise its multi-tick turn and edge
-                // motion race. Once acquired, latch the motion so tiny geometry changes cannot chatter MOVE_BACK.
-                backplaceAimReady = backplaceMotionReady(backplaceAimReady,
-                        ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f));
-                if (backplaceAimReady) {
-                    state.setInput(Input.MOVE_BACK, true);
-                }
-                HitResult liveHit = ctx.objectMouseOver();
-                boolean exactBackplaceFace = liveHit != null && liveHit.getType() == HitResult.Type.BLOCK
-                        && ((BlockHitResult) liveHit).getBlockPos().equals(goalLook)
-                        && backplaceFaceReachesTarget(goalLook, ((BlockHitResult) liveHit).getDirection(), dest.below());
-                if (exactBackplaceFace) {
-                    if (!armExcavationBridgeClick()) return state;
-                    // The sneak backplace. It never passes attemptToPlaceABlock, so it carries neither the template
-                    // guard nor the scaffold licence -- the same shape of leak MovementPillar had, and the reason
-                    // the census is declared at the button rather than at the decision.
-                    BuildTrace.intendWorldChange("traverse-backplace", dest.below().getX(), dest.below().getY(),
-                            dest.below().getZ(), "sneak backplace from " + goalLook.getX() + "," + goalLook.getY()
-                                    + "," + goalLook.getZ());
-                    return state.setInput(Input.CLICK_RIGHT, true); // wait to right click until we are able to place
-                }
-                // Out.log("Trying to look at " + goalLook + ", actually looking at" + Princeps.whatAreYouLookingAt());
-                // Tremor-tolerant (see above): CLICK_LEFT just breaks the crosshair block, so sub-degree closeness
-                // to the intended aim is functionally identical to the old exact check.
-                if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)
-                        && liveHit != null && liveHit.getType() == HitResult.Type.BLOCK
-                        && !((BlockHitResult) liveHit).getBlockPos().equals(goalLook)) {
-                    state.setInput(Input.CLICK_LEFT, true);
-                }
-                return state;
+                return updateBackplace(state);
             }
             MovementHelper.moveTowardsWithSlightRotation(ctx, state, dest);
             return state;
@@ -433,6 +386,63 @@ public class MovementTraverse extends Movement {
     static boolean excavationBridgeStillOwned(PlacementLicence planned, PlacementLicence current, BlockPos target) {
         // A matching coordinate on a later route is not the original step's permission to replay its click.
         return planned != null && planned == current && planned.isExcavationBridge(target);
+    }
+
+    /** The actual RUNNING sneak-backplace actor, after the ordinary material/route checks above. */
+    MovementState updateBackplace(MovementState state) {
+        state.setInput(Input.SNEAK, true).setInput(Input.CLICK_RIGHT, false).setInput(Input.CLICK_LEFT, false)
+                .setInput(Input.MOVE_BACK, false);
+        // Vanilla chooses item-on-block versus support-block use from the actual shift input, not the pose.
+        if (!ctx.player().onGround() || !ctx.player().isCrouching() || !ctx.player().isSecondaryUseActive()) return state;
+        // If we are in the block that we are trying to get to, we are sneaking over air and we need to place a block beneath us against the one we just walked off of
+        // Out.log(from + " " + to + " " + faceX + "," + faceY + "," + faceZ + " " + whereAmI);
+        double faceX = (dest.getX() + src.getX() + 1.0D) * 0.5D;
+        double faceY = (dest.getY() + src.getY() - 1.0D) * 0.5D;
+        double faceZ = (dest.getZ() + src.getZ() + 1.0D) * 0.5D;
+        // faceX, faceY, faceZ is the middle of the face between from and to
+        BlockPos goalLook = src.below(); // this is the block we were just standing on, and the one we want to place against
+
+        Rotation backToFace = RotationUtils.calcRotationFromVec3d(ctx.playerHead(), new Vec3(faceX, faceY, faceZ), ctx.playerRotations());
+        float pitch = backToFace.getPitch();
+        double dist2 = Math.max(Math.abs(ctx.player().position().x - faceX), Math.abs(ctx.player().position().z - faceZ));
+        if (dist2 < 0.29) { // see issue #208
+            float yaw = RotationUtils.calcRotationFromVec3d(VecUtils.getBlockPosCenter(dest), ctx.playerHead(), ctx.playerRotations()).getYaw();
+            state.setTarget(MovementState.MovementTarget.forPlacement(new Rotation(yaw, pitch)));
+        } else {
+            state.setTarget(MovementState.MovementTarget.forPlacement(backToFace));
+        }
+        // The old exact aim could edge backwards and acquire the support face in the same tick. A curved
+        // placement aim first faces backwards while fully supported; otherwise its multi-tick turn and edge
+        // motion race. Once acquired, latch the motion so tiny geometry changes cannot chatter MOVE_BACK.
+        backplaceAimReady = backplaceMotionReady(backplaceAimReady,
+                ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f));
+        if (backplaceAimReady) {
+            state.setInput(Input.MOVE_BACK, true);
+        }
+        HitResult liveHit = ctx.objectMouseOver();
+        boolean exactBackplaceFace = liveHit != null && liveHit.getType() == HitResult.Type.BLOCK
+                && ((BlockHitResult) liveHit).getBlockPos().equals(goalLook)
+                && ctx.playerHead().distanceTo(liveHit.getLocation()) <= ctx.playerController().getBlockReachDistance()
+                && backplaceFaceReachesTarget(goalLook, ((BlockHitResult) liveHit).getDirection(), dest.below());
+        if (exactBackplaceFace) {
+            if (!armExcavationBridgeClick()) return state;
+            // The sneak backplace. It never passes attemptToPlaceABlock, so it carries neither the template
+            // guard nor the scaffold licence -- the same shape of leak MovementPillar had, and the reason
+            // the census is declared at the button rather than at the decision.
+            BuildTrace.intendWorldChange("traverse-backplace", dest.below().getX(), dest.below().getY(),
+                    dest.below().getZ(), "sneak backplace from " + goalLook.getX() + "," + goalLook.getY()
+                            + "," + goalLook.getZ());
+            return state.setInput(Input.CLICK_RIGHT, true); // wait to right click until we are able to place
+        }
+        // Out.log("Trying to look at " + goalLook + ", actually looking at" + Princeps.whatAreYouLookingAt());
+        // Tremor-tolerant (see above): CLICK_LEFT just breaks the crosshair block, so sub-degree closeness
+        // to the intended aim is functionally identical to the old exact check.
+        if (ctx.playerRotations().isCloseTo(state.getTarget().rotation, 0.75f, 0.55f)
+                && liveHit != null && liveHit.getType() == HitResult.Type.BLOCK
+                && !((BlockHitResult) liveHit).getBlockPos().equals(goalLook)) {
+            state.setInput(Input.CLICK_LEFT, true);
+        }
+        return state;
     }
 
     static boolean backplaceMotionReady(boolean alreadyReady, boolean aimAligned) {

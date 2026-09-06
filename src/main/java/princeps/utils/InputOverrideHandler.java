@@ -30,6 +30,7 @@ import princeps.process.BuilderProcess;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.core.BlockPos;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -64,11 +65,14 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
         this.blockPlaceHelper = new BlockPlaceHelper(princeps);
     }
 
-    boolean allowsMining(net.minecraft.core.BlockPos target) {
+    /** Predicate consumed by the real break helper immediately before its controller calls. */
+    boolean allowsMining(BlockPos target) {
         var controlling = princeps.getPathingControlManager().mostRecentInControl().orElse(null);
         observeMiningOwner(controlling);
         var executing = princeps.getPathingBehavior().getCurrent();
         if (executing != null && !executing.allowsModelRemoval(target, controlling, blockBreakHelper::isBreakingBlock)) return false;
+        // An unsafe edge route retains its no-mining contract after pause or owner transfer.
+        if (BuilderProcess.platformRouteForbidsMining(executing)) return false;
         return supportMiningOwner == null || supportMiningOwner.allowsSupportRemoval(target);
     }
 

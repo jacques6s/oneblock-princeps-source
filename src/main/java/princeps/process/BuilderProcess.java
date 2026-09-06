@@ -48,6 +48,7 @@ import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementOption;
 import princeps.pathing.movement.movements.MovementDownward;
+import princeps.pathing.movement.movements.MovementTraverse;
 import princeps.pathing.path.PathExecutor;
 import princeps.process.builder.BlockItemPlacementHelper;
 import princeps.process.builder.ActionJournal;
@@ -1301,6 +1302,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** Ticks spent waiting for the aim to settle on the current placement, so the wait can never be unbounded. */
     private int aimSettleWaitTicks;
     private BetterBlockPos plannedPlacementStance;
+    /** One existing platform, one permanent target; retained while the sneak step crosses the cell boundary. */
+    private PlatformTraverseApproach platformTraverseApproach;
+
+    private record PlatformTraverseApproach(Object world, Object player, ISchematic model, Vec3i origin,
+                                             BetterBlockPos from, BetterBlockPos target,
+                                             BlockState support, BlockState wanted, Goal goal) { }
+    /** Travels with the actual immutable path, even while a newer command is cancelling that path. */
+    private static final class PlatformTraverseGoal extends GoalBlock {
+        private PlatformTraverseGoal(BlockPos destination) { super(destination); }
+    }
     private int placementCenteringTicks;
     private int placementCenterSettleTicks;
     private Placement pendingPlacementRequest;
@@ -1974,6 +1985,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     public void pause() {
         if (!paused && scaffoldMaterialTarget != null) scaffoldMaterialPausedAt = buildTick;
         paused = true;
+        platformTraverseApproach = null;
         supportRepair = null;
         progressWatch.pause();
     }
@@ -2333,11 +2345,18 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     /** Shared with the navigation cost policy, applied to the real crosshair immediately before mining. */
     public boolean allowsSupportRemoval(BlockPos target) {
+        if (platformRouteForbidsMining(princeps.getPathingBehavior().getCurrent())) return false;
         if (!isActive() || paused || excavating) { supportRepair = null; return true; }
+        if (platformTraverseApproach != null) return false; // same no-break contract as the one-step route
         boolean continuing = supportRepair != null && supportRepair.tick() != buildTick
                 && princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock();
         return allowsSupportRemoval(target, BuilderSupportDependencies.currentWorld(supportModelForDependencies(), origin,
                 approxPlaceable == null ? Collections.emptyList() : approxPlaceable, ctx.world()), continuing);
+    }
+
+    /** An unsafe-to-cancel edge route can outlive its owner; its no-mining contract lasts until that route ends. */
+    public static boolean platformRouteForbidsMining(PathExecutor executing) {
+        return executing != null && executing.getPath().getGoal() instanceof PlatformTraverseGoal;
     }
 
     boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks) {
@@ -2351,6 +2370,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private boolean allowsSupportRemoval(BlockPos target, BuilderSupportDependencies policy, boolean controllerContinuingSameBlock) {
+        if (platformTraverseApproach != null) return false;
         ISchematic full = supportModelForDependencies();
         SupportRepair repair = supportRepair;
         BlockState repairing = selectedSupportRepairState(target, full, ctx.world(), ctx.player(), controllerContinuingSameBlock);
@@ -9299,6 +9319,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         laneAProof = null;
         laneEscalatedCell = null;
         laneBAnswered = false;
+        platformTraverseApproach = null;
         electedCell = null;
         electedGoal = null;
         electedBreak = false;
@@ -9309,6 +9330,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     Goal acceptElectedVerdict(CellUrteil verdict) {
         if (verdict instanceof CellUrteil.Setzen setzen) electedGoal = setzen.ziel();
         else if (verdict instanceof CellUrteil.Parken) clearElectedTarget();
+        // Keep the chosen cell through a material wait, but never reuse an edge action whose proof was withdrawn.
+        if (electedGoal instanceof PlatformTraverseGoal && platformTraverseApproach == null) return null;
         return electedGoal;
     }
 
@@ -9724,6 +9747,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         scaffoldPassAllowed = laneThisTick == Lane.B_HELPERS_ALLOWED;
         BuilderCalculationContext scanContext = new BuilderCalculationContext(laneThisTick);
         if (cleanupEscape != null) return driveCleanupEscape(isSafeToCancel, scanContext);
+        if (platformTraverseApproach != null) {
+            platformTraverseGoal(platformTraverseApproach.target, scanContext, true);
+            if (scanContext.platformApproach != platformTraverseApproach) {
+                scanContext = new BuilderCalculationContext(laneThisTick);
+            }
+        }
         // GANZ FRUEH IM TICK, nicht am Ende. Zwei Fragen haengen daran und beide muessen JEDEN Tick beantwortet
         // werden: hat die Geruestzelle ihren Zweck erfuellt (dann faellt ihr Soll auf Luft zurueck und der
         // vorhandene Abbau raeumt sie weg), und ist sie gescheitert (dann wird sie aufgegeben)?
@@ -10954,10 +10983,22 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * the selected placement stance can be reached. The actual router still receives its full navigation goal. */
     private PathingCommand finishBuilderRoute(Goal routeGoal, Goal workGoal, PathingCommandType type,
                                              BuilderCalculationContext context) {
+        PlatformTraverseApproach platform = platformTraverseApproach;
+        boolean platformStep = platform != null && platform.target.equals(electedCell);
+        if (platformStep) {
+            routeGoal = platformTraverseApproach.goal;
+            workGoal = platformTraverseApproach.goal;
+        }
         driveLanesInShadow(workGoal);
-        Lane lane = laneForCurrentCell(electedCell);
+        // A consumed negative answer can withdraw this exact offer and clear its selected work.
+        // Never retain the marked goal while silently replacing its no-mining context with ordinary rules.
+        if (platformStep && (platformTraverseApproach != platform || !platform.target.equals(electedCell))) {
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        Lane lane = platformStep ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
         // Consuming A=NONE can change permissions in this very tick. Never dispatch the old A snapshot for B.
-        BuilderCalculationContext routeContext = context.lane == lane ? context : new BuilderCalculationContext(lane);
+        BuilderCalculationContext routeContext = context.lane == lane && context.platformApproach == platformTraverseApproach
+                ? context : new BuilderCalculationContext(lane);
         scaffoldPassAllowed = lane == Lane.B_HELPERS_ALLOWED;
         return new PathingCommandContext(routeGoal, type, routeContext);
     }
@@ -11698,6 +11739,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (question == null || !question.cell.equals(electedCell) || !Objects.equals(question.goal, goal)
                 || !Objects.equals(question.targetGoal, electedGoal) || question.cleanup != scaffoldCleanupActive
                 || !Objects.equals(question.scaffold, scaffoldCell) || !Objects.equals(question.scaffoldState, scaffoldWanted)
+                || question.context.platformApproach != platformTraverseApproach
                 || question.context.schematic != schematic || question.context.rowMode != buildInRows
                 || buildInRows && (question.context.rowBandStart != rowActiveBandStart
                     || question.context.rowFrontier != rowActiveFrontier)
@@ -13735,6 +13777,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return null;
         }
 
+        Goal platformGoal = platformTraverseGoal(target, bcc, true);
+        if (platformGoal != null) {
+            return finishBuilderRoute(platformGoal, platformGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+        }
+
         BetterBlockPos feet = ctx.playerFeet();
         if (!ctx.player().onGround() || !princeps.getPathingBehavior().isSafeToCancel()) {
             placementCenterSettleTicks = 0;
@@ -14005,6 +14052,82 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     /**
+     * Keep a current, permanent full-cube platform by letting the normal one-step Traverse fill the adjacent
+     * template cube beneath its destination. Unlike a standing-cell oracle this action deliberately crosses
+     * the edge before the block exists. Retain the original support until the target changes; re-deriving it
+     * from playerFeet while sneaking would replace it with the still-empty target and abandon a valid action.
+     */
+    Goal platformTraverseGoal(BlockPos pos, BuilderCalculationContext bcc, boolean remember) {
+        if (electedCell != null && !electedCell.equals(pos)) return null;
+        if (buildInRows || excavating || paused || schematic == null || origin == null
+                || incorrectPositions == null || !incorrectPositions.contains(new BetterBlockPos(pos))) {
+            if (remember) platformTraverseApproach = null;
+            return null;
+        }
+        BlockState current = bcc.bsi.get0(pos);
+        BlockState wanted = bcc.getSchematic(pos.getX(), pos.getY(), pos.getZ(), current);
+        ISchematic full = supportModelForDependencies();
+        PlatformTraverseApproach previous = platformTraverseApproach;
+        // A new action starts its own one-step route, never a NEXT segment of an older ordinary path whose
+        // immutable goal/licences would survive splicing. Continue only this exact already-marked action.
+        PathExecutor executing = princeps.getPathingBehavior().getCurrent();
+        if (executing != null && (previous == null || executing.getPath().getGoal() != previous.goal)) {
+            if (remember) platformTraverseApproach = null;
+            return null;
+        }
+        if (previous != null && (!previous.target.equals(pos) || previous.world != ctx.world()
+                || previous.player != ctx.player() || previous.model != full || !previous.origin.equals(origin)
+                || !previous.wanted.equals(wanted))) {
+            if (remember) platformTraverseApproach = null;
+            return null;
+        }
+        BetterBlockPos from = previous == null ? ctx.playerFeet() : previous.from;
+        BetterBlockPos target = new BetterBlockPos(pos);
+        BlockPos supportPos = from.below();
+        if (wanted == null || wanted.isAir() || !current.isAir() || !wanted.getFluidState().isEmpty()
+                || !full.inSchematic(pos.getX() - origin.getX(), pos.getY() - origin.getY(), pos.getZ() - origin.getZ(), current)
+                || !wanted.equals(full.desiredState(pos.getX() - origin.getX(), pos.getY() - origin.getY(),
+                        pos.getZ() - origin.getZ(), current, bcc.placeable))
+                || wanted.getBlock() instanceof FallingBlock || placementStateIsGeometrySensitive(wanted)
+                || !wanted.isCollisionShapeFullBlock(ctx.world(), pos)
+                || from.y != pos.getY() + 1
+                || Math.abs(from.x - pos.getX()) + Math.abs(from.z - pos.getZ()) != 1
+                || !bcc.bsi.worldContainsLoadedChunk(from.x, from.z)
+                || !bcc.bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())
+                || !ctx.player().onGround() || Math.abs(ctx.player().position().y - from.y) > 0.01
+                || !(ctx.playerFeet().equals(from) || ctx.playerFeet().equals(target.above()))
+                || hotbarStackThatPlaces(wanted) == null
+                || !wanted.canSurvive(ctx.world(), pos) || isReservedStanceSpace(pos.getX(), pos.getY(), pos.getZ(), bcc)) {
+            if (remember && previous != null) platformTraverseApproach = null;
+            return null;
+        }
+        BlockState support = bcc.bsi.get0(supportPos);
+        int lx = supportPos.getX() - origin.getX(), ly = supportPos.getY() - origin.getY(), lz = supportPos.getZ() - origin.getZ();
+        if (!full.inSchematic(lx, ly, lz, support)
+                || !support.equals(full.desiredState(lx, ly, lz, support, bcc.placeable))
+                || support.isAir() || !support.getFluidState().isEmpty() || support.getBlock() instanceof FallingBlock
+                || !support.isCollisionShapeFullBlock(ctx.world(), supportPos)
+                || (previous != null && !support.equals(previous.support))
+                || !bcc.bsi.get0(from).isAir() || !bcc.bsi.get0(from.above()).isAir()
+                || !bcc.bsi.get0(target.above()).isAir() || !bcc.bsi.get0(target.above(2)).isAir()
+                || !ctx.world().getBlockState(supportPos).equals(support)
+                || !ctx.world().getBlockState(pos).isAir()) {
+            if (remember && previous != null) platformTraverseApproach = null;
+            return null;
+        }
+        double cost = MovementTraverse.cost(bcc, from.x, from.y, from.z, target.x, target.z);
+        if (!Double.isFinite(cost) || cost >= COST_INF) {
+            if (remember && previous != null) platformTraverseApproach = null;
+            return null;
+        }
+        if (previous != null) return previous.goal;
+        Goal goal = new PlatformTraverseGoal(target.above());
+        if (remember) platformTraverseApproach = new PlatformTraverseApproach(ctx.world(), ctx.player(), full,
+                new Vec3i(origin.getX(), origin.getY(), origin.getZ()), from, target, support, wanted, goal);
+        return goal;
+    }
+
+    /**
      * Dieselbe Untersuchung wie {@link #placementGoal}, aber sie sagt, WAS sie festgestellt hat.
      *
      * <p>Seiteneffekte und Reihenfolge sind woertlich die alten: dieselben Verdikt-Notizen, derselbe
@@ -14043,6 +14166,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return new CellUrteil.Parken(ParkReason.NO_FACE,
                     "kein Halt fuer " + blockName(wanted) + " (canSurvive=false)");
         }
+        Goal platformGoal = platformTraverseGoal(pos, bcc, darfArbeiten);
+        if (platformGoal != null) return new CellUrteil.Setzen(platformGoal);
         // For a block whose facing is decided by WHERE the player stands (doors, repeaters, comparators, observers...)
         // route the bot to a standing cell from which the EXACT desired orientation is actually placeable, instead of
         // "any adjacent" — which can strand it on a side from which the wanted facing is impossible (the door the
@@ -14857,6 +14982,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         private final boolean rowSweepAlongX;
         private final int rowBandStart;
         private final int rowFrontier;
+        private final PlatformTraverseApproach platformApproach;
 
         public BuilderCalculationContext() {
             this(Lane.LEGACY, null);
@@ -14875,6 +15001,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             this.lane = lane;
             this.ordinaryExcavationMode = ordinaryExcavation();
             this.fluidPlugSnapshot = excavating ? excavationFluidPlugs.snapshot() : new ExcavationFluidPlugs();
+            this.platformApproach = platformTraverseApproach;
             this.excavationRouteStart = lane == Lane.EXCAVATION_PATH ? ctx.playerFeet() : null;
             this.excavationRouteWaypoint = lane == Lane.EXCAVATION_PATH ? excavationRouteWaypoint : null;
             this.rowMode = buildInRows;
@@ -14971,6 +15098,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         @Override
         public boolean isPathPositionAllowed(int x, int y, int z) {
+            if (platformApproach != null) {
+                BetterBlockPos from = platformApproach.from, target = platformApproach.target;
+                return y == from.y && ((x == from.x && z == from.z) || (x == target.x && z == target.z));
+            }
             if (lane != Lane.EXCAVATION_PATH) {
                 return true;
             }
@@ -15102,6 +15233,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         @Override
         public double costOfPlacingAt(int x, int y, int z, BlockState current) {
+            if (platformApproach != null && !platformApproach.target.equals(new BlockPos(x, y, z))) return COST_INF;
             if (isPossiblyProtected(x, y, z) || !worldBorder.canPlaceAt(x, z)) { // make calculation fail properly if we can't build
                 return COST_INF;
             }
@@ -15202,6 +15334,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         @Override
         public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
+            if (platformApproach != null) return COST_INF;
             if ((!allowBreak && !allowBreakAnyway.contains(current.getBlock())) || isPossiblyProtected(x, y, z)) {
                 return COST_INF;
             }
