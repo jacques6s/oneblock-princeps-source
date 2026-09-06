@@ -2836,6 +2836,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return (height + Math.max(1, layerHeight) - 1) / Math.max(1, layerHeight);
     }
 
+    private int effectiveLayerHeight() {
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        return effectiveLayerHeight(Princeps.settings().layerHeight.value, excavating,
+                Princeps.settings().layerOrder.value, effectiveAreaBreakSize(), full == null ? 0 : full.heightY());
+    }
+
+    /** Ordinary excavation needs room for feet and head inside its active band, even without an area tool. */
+    static int effectiveLayerHeight(int requested, boolean excavation, boolean topDown, int areaSize, int height) {
+        int configured = Math.max(1, requested);
+        // A complete one-high selection remains a surface: its existing open headroom may be used, but a fixed
+        // outside roof may not be mined. The last short band of a taller job has the cleared preceding band above.
+        return excavation && topDown && areaSize == 1 && height >= 2 ? Math.max(2, configured) : configured;
+    }
+
     /** The band of the layer currently being worked, in LOCAL schematic y. Recomputed once per tick, in onTick. */
     private int bandMinYLocal;
     private int bandMaxYLocal = -1;
@@ -9196,7 +9210,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 int top = Math.min(realSchematic.heightY() - 1, areaBandTopCache - origin.getY());
                 band = new LayerBand(Math.max(0, top - (areaSize - 1)), top);
             } else {
-                band = layerBand(realSchematic.heightY(), Princeps.settings().layerHeight.value,
+                band = layerBand(realSchematic.heightY(), effectiveLayerHeight(),
                         layer, topDownLayers);
             }
             bandMinYLocal = band.lo();
@@ -9470,7 +9484,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return finishAbortedBuild() ? null
                         : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
-            if (Princeps.settings().buildInLayers.value && layer * Math.max(1, Princeps.settings().layerHeight.value)
+            if (Princeps.settings().buildInLayers.value && layer * effectiveLayerHeight()
                     < stopAtHeight) {
                 // Counted and named before climbing. The owner does not want helper blocks left in the build, and
                 // opportunistic removal (see toBreakNearPlayer) only reaches what the bot happens to walk past -- so
