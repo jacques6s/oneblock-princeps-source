@@ -3580,12 +3580,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 || bandTop == Integer.MIN_VALUE || ctx.player() == null) {
             return null;
         }
-        if (autoDigLookProfile == null) {
-            autoDigLookProfile = AutoDigLookProfile.apply(Princeps.settings());
-            logMechanic("AutoDig look profile pinned: curved break/place aims, aimHold=false, deterministic steering");
-        } else {
-            autoDigLookProfile.enforce();
-        }
+        // Excavation applies this before the single-block/Shard split. Preserve the existing construction-side
+        // area-tool behaviour here without making ordinary construction acquire the excavation profile.
+        if (!excavating) enforceAutoDigLookProfile();
         int minX = origin.getX();
         int maxX = minX + full.widthX() - 1;
         int minZ = origin.getZ();
@@ -4223,6 +4220,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         snakeCleanupWork.choose(snakeHead, snakeBandTop, target, bcc.get(target));
         double reach = ctx.playerController().getBlockReachDistance();
         return snakeCleanupWork.rotation(ctx.player().getEyePosition(1.0F), ctx.playerRotations(), reach,
+                raw -> RayTraceUtils.rayTraceTowards(ctx.player(), raw, reach, false),
                 raw -> RayTraceUtils.rayTraceTowards(ctx.player(),
                         princeps.getLookBehavior().getAimProcessor().peekRotationExact(raw), reach, false),
                 () -> RotationUtils.reachableForWork(ctx, target, reach, false));
@@ -5453,9 +5451,17 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (!excavating) return Optional.empty();
         double reach = ctx.playerController().getBlockReachDistance();
         return ExcavationMiningLook.retain(true, ctx.playerRotations(), target, requiredFace, areaTool,
-                rotation -> RayTraceUtils.rayTraceTowards(ctx.player(),
-                        princeps.getLookBehavior().getAimProcessor().peekRotationExact(rotation), reach, false),
+                rotation -> RayTraceUtils.rayTraceTowards(ctx.player(), rotation, reach, false),
                 face -> snakeAreaCutAllowed(target, face));
+    }
+
+    private void enforceAutoDigLookProfile() {
+        if (autoDigLookProfile == null) {
+            autoDigLookProfile = AutoDigLookProfile.apply(Princeps.settings(), excavating);
+            logMechanic("AutoDig look profile pinned: curved break/place aims, aimHold=false, deterministic steering");
+        } else {
+            autoDigLookProfile.enforce();
+        }
     }
 
     private boolean snakeAreaFootprintInsideSelection(BlockPos target, Direction face) {
@@ -9083,6 +9089,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (recursions == 0) {
             buildTick++;
             if (excavating) {
+                if (!paused) enforceAutoDigLookProfile();
                 var survival = princeps.getSurvivalBehavior();
                 excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
                         survival != null && survival.isConsuming());

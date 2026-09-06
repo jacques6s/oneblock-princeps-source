@@ -44,6 +44,29 @@ public class AutoDigLookProfileTest {
     }
 
     @Test
+    public void constructionAreaToolsKeepTheirPriorWalkingBandAndRestoreItAfterwards() throws Exception {
+        Settings settings = hostileSettings();
+        AutoDigLookProfile profile = AutoDigLookProfile.apply(settings, false);
+        Method nudge = LookBehavior.class.getDeclaredMethod("nudgePitchToBand",
+                float.class, float.class, float.class, float.class);
+        nudge.setAccessible(true);
+        for (int reassert = 0; reassert < 2; reassert++) {
+            assertEquals(6.0D, settings.humanizedWalkPitchMin.value, 0.0D);
+            assertEquals(12.0D, settings.humanizedWalkPitchMax.value, 0.0D);
+            assertEquals(6.0F, ((Float) nudge.invoke(null, 1.65F,
+                    settings.humanizedWalkPitchMin.value.floatValue(),
+                    settings.humanizedWalkPitchMax.value.floatValue(),
+                    settings.humanizedWalkPitchNudgeStep.value.floatValue())).floatValue(), 0.0F);
+            settings.humanizedWalkPitchMin.value = -90.0D;
+            settings.humanizedWalkPitchMax.value = 90.0D;
+            profile.enforce();
+        }
+        profile.restore();
+        assertEquals(44.0D, settings.humanizedWalkPitchMin.value, 0.0D);
+        assertEquals(65.0D, settings.humanizedWalkPitchMax.value, 0.0D);
+    }
+
+    @Test
     public void actualWalkingNudgePreservesEveryValidPitchIncludingTheRecordedSolidRunAngles() throws Exception {
         Settings settings = hostileSettings();
         AutoDigLookProfile profile = AutoDigLookProfile.apply(settings);

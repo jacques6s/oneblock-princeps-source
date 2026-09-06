@@ -37,6 +37,19 @@ public class SnakeCleanupWorkTest {
     }
 
     @Test
+    public void aPredictedCleanupHitCannotStandInForAValidCurrentRay() {
+        SnakeCleanupWork work = selected(Blocks.STONE.defaultBlockState());
+        VoxelShape shape = net.minecraft.world.phys.shapes.Shapes.block();
+        Vec3 eye = new Vec3(2.5, 65.65, 0.5);
+        Rotation actual = new Rotation(0, 0);
+        Rotation predicted = RotationUtils.calcRotationFromVec3d(eye, new Vec3(0.5, 65.5, 0.5), actual);
+        assertFalse(BuilderProcess.snakeMiningHitMatches(ray(shape, eye, actual), TARGET, null));
+        assertTrue(BuilderProcess.snakeMiningHitMatches(ray(shape, eye, predicted), TARGET, null));
+        assertTrue(work.rotation(eye, actual, REACH, raw -> ray(shape, eye, raw),
+                raw -> ray(shape, eye, predicted), Optional::empty).isEmpty());
+    }
+
+    @Test
     public void anotherValidCurrentHitOnTheChosenBlockDoesNotReturnToTheRememberedPoint() {
         SnakeCleanupWork work = selected(Blocks.STONE.defaultBlockState());
         VoxelShape shape = net.minecraft.world.phys.shapes.Shapes.block();

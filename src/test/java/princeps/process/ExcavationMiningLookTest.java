@@ -72,6 +72,17 @@ public class ExcavationMiningLookTest {
     }
 
     @Test
+    public void aDifferentPredictedAngleHittingTheBlockDoesNotMakeTheActualViewUsable() {
+        Vec3 eye = new Vec3(68.5, -48.38, 67.77);
+        Rotation current = new Rotation(0, 30);
+        Rotation predicted = new Rotation(0, 1.65F);
+        assertTrue(BuilderProcess.snakeMiningHitMatches(ray(eye, predicted, TARGET), TARGET, Direction.NORTH));
+        assertFalse(BuilderProcess.snakeMiningHitMatches(ray(eye, current, TARGET), TARGET, Direction.NORTH));
+        assertTrue("a look processor prediction is not evidence that the current head already hits",
+                retain(current, Direction.NORTH, true, eye).isEmpty());
+    }
+
+    @Test
     public void ordinaryMiningMayKeepAnyActuallyHitFaceWithoutBorrowingAreaPermission() {
         Rotation current = new Rotation(0, 1.65F);
         Vec3 eye = new Vec3(68.5, -48.38, 67.77);
