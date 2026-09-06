@@ -24,8 +24,8 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build with Gradle
-        run: chmod +x gradlew && ./gradlew jar -Porg.gradle.dependency.verification.console=verbose
+      - name: Test and build with Gradle
+        run: chmod +x gradlew && ./gradlew test jar apiJar -Porg.gradle.dependency.verification.console=verbose
 
       - name: Upload verification reports
         if: always()
@@ -35,6 +35,8 @@ jobs:
           path: |
             build/reports/dependency-verification/
             build/reports/minecraft-input-verification.json
+            build/test-results/test/
+            build/reports/tests/test/
           if-no-files-found: ignore
 
       - name: Get version from tag

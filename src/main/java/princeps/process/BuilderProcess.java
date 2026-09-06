@@ -904,6 +904,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         BuildTrace.cell(buildTick, "PARK", pos.x, pos.y, pos.z, "reason=" + reason);
     }
 
+    /** The active window has run dry; release its parks for the existing recalculation path. */
+    private void releaseParkedCellsForRetry() {
+        for (long key : parkedCells.keySet()) {
+            forgetCellVerdict(key);
+        }
+        parkedCells.clear();
+    }
+
+    /** A released cell must not keep a negative memo or a cached failed stance from its old park. */
+    private void forgetCellVerdict(long key) {
+        cellVerdicts.remove(key);
+        orientedGoalCache.remove(key);
+    }
+
     /**
      * Der Waechter. Laeuft nach JEDER erfolgreichen Platzierung und weckt die geparkten Nachbarn der Zelle, die
      * sich gerade veraendert hat -- in beide Richtungen, denn "weggefallen" zaehlt genauso wie "neu entstanden".
@@ -937,6 +951,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     continue;
                 }
                 it.remove();
+                forgetCellVerdict(positionKey(parked.pos));
                 activeCells.add(parked.pos);
                 released++;
                 cellsWokenByWatchman++;
@@ -955,10 +970,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 continue;
             }
             long now = clickableFaceMask(nx, ny, nz);
-            if (now == parked.faceMaskWhenParked) {
-                continue;   // der Nachbar hat sich geaendert, die Flaechenlage dieser Zelle aber nicht
+            if (now == parked.faceMaskWhenParked && parked.reason != ParkReason.NO_FACE) {
+                continue;   // the geometry verdict still has the same face set
             }
+            // Missing support can become usable without changing the coarse face mask
+            // (for example a non-supporting neighbour replaced by a supporting block).
             parkedCells.remove(key);
+            forgetCellVerdict(key);
             // Einfach zurueck in die Menge. Wo sie landet, entscheidet der Abstand bei der naechsten Auswahl --
             // siehe activeCells. Kein Vordraengeln, keine Sonderbehandlung.
             activeCells.add(parked.pos);
@@ -982,7 +1000,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     parkedCells.remove(key);
                     // The face mask may be identical even though a new floor/stance appeared. Without removing the
                     // paired memo, searchForPlacables immediately skips the just-woken cell as the old verdict.
-                    cellVerdicts.remove(key);
+                    forgetCellVerdict(key);
                     activeCells.add(parked.pos);
                     cellsWokenByWatchman++;
                     BuildTrace.cell(buildTick, "WAKE-ROW-STANCE", parked.pos.x, parked.pos.y, parked.pos.z,
@@ -9391,7 +9409,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 lastParkSweepTick = buildTick;
                 logMechanic("Released " + parkedCells.size() + " parked cell(s): the active set is empty, so no"
                         + " finished cell can wake them and the window cannot step down past them");
-                parkedCells.clear();
+                releaseParkedCellsForRetry();
                 return onTick(calcFailed, isSafeToCancel, recursions + 1);
             }
             // P0 IST BEANTWORTET: die AKTIV-Menge dieser Ebene ist leer. Alles, was noch offen ist, ist geparkt --
@@ -12610,6 +12628,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return null;
         }
 
+        // A missing stack prevents a placement probe; it does not reject a stance. Keep the target and its
+        // recovery state while normal inventory handling supplies the item, without advancing route failures.
+        if (hotbarStackThatPlaces(desired) == null) {
+            return null;
+        }
+
         BetterBlockPos feet = ctx.playerFeet();
         if (!ctx.player().onGround() || !princeps.getPathingBehavior().isSafeToCancel()) {
             placementCenterSettleTicks = 0;
@@ -12895,6 +12919,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             //
             // Grund A: die Welt bietet nicht, woran der Block haengen koennte. Ein Nachbar aendert das, und genau
             // darauf horcht der Waechter -- deshalb ist das ein Park und keine Wiedervorlage.
+            if (darfArbeiten) {
+                recordCellVerdict(pos.getX(), pos.getY(), pos.getZ(), VERDICT_NO_FACE);
+            }
             return new CellUrteil.Parken(ParkReason.NO_FACE,
                     "kein Halt fuer " + blockName(wanted) + " (canSurvive=false)");
         }
@@ -12943,6 +12970,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // where the bot happened to be standing -- the "roughly" being removed.
         long key = positionKey(pos);
         Optional<Goal> cached = orientedGoalCache.get(key);
+        // placementStancesFor also returns empty when no hotbar item can simulate this placement. That is not
+        // geometric evidence: parking it would suppress material demand and survive a refill of the hotbar.
+        // Keep already proven goals/facts, but do not search, spend budget, or cache a negative without the item.
+        if (cached == null && (wanted == null || hotbarStackThatPlaces(wanted) == null)) {
+            return new CellUrteil.Unbekannt("kein passendes Material in der Schnellleiste fuer die Standplatzpruefung");
+        }
         if (cached == null
                 && darfArbeiten
                 && stanceSearchNanos < STANCE_SEARCH_BUDGET_NANOS
@@ -13928,8 +13961,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // Still allowed: filling a cell the template names with the block it is waiting for, when the executor
             // will really do it. That is free progress, not scaffolding, and the two must not be conflated -- the
             // exemption mirrors the one at the executor site exactly.
+            // AIR in placeable represents an empty/non-block inventory slot. Matching that sentinel to template
+            // AIR cannot authorize a helper: lane A's executor still carries PlacementLicence.NONE.
             if (!scaffoldLicensed
-                    && !(sch != null && containsBlockState(placeable, sch) && !placementStateIsGeometrySensitive(sch)
+                    && !(sch != null && !sch.isAir() && containsBlockState(placeable, sch) && !placementStateIsGeometrySensitive(sch)
                         && rowTemplatePlacementIsLicensedAt(x, y, z))) {
                 return COST_INF;
             }
