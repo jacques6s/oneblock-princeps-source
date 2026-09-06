@@ -38,6 +38,22 @@ import static org.junit.Assert.assertTrue;
  */
 public class PlacementLicenceTest {
 
+    @Test
+    public void excavationBridgePurposeBelongsOnlyToItsImmutableExactCell() {
+        BlockPos floor = new BlockPos(10, -61, 30);
+        PlacementLicence bridge = PlacementLicence.excavationBridge(floor.asLong());
+        assertTrue(bridge.permitsPlacement(floor));
+        assertTrue(bridge.isExcavationBridge(floor));
+        assertFalse(bridge.permitsPlacement(floor.east()));
+        assertFalse(bridge.isExcavationBridge(floor.east()));
+        assertFalse(bridge.isUnrestricted());
+        assertSame(PlacementLicence.NONE, PlacementLicence.excavationBridge(Long.MIN_VALUE));
+        for (PlacementLicence ordinary : new PlacementLicence[] {PlacementLicence.UNRESTRICTED,
+                PlacementLicence.NONE, PlacementLicence.where(at -> at == floor.asLong(), "next AutoDig floor cell")}) {
+            assertFalse("text/position permissions alone must not declare repair purpose", ordinary.isExcavationBridge(floor));
+        }
+    }
+
     /** A modest build volume, in the style of a real one: origin at 100,-60,100, eight blocks on a side. */
     private static final int OX = 100;
     private static final int OY = -60;

@@ -2241,6 +2241,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return excavation && explicitRepair && !insideSelection;
     }
 
+    private boolean insideSnakeVolume(int x, int y, int z) {
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        return full != null && origin != null
+                && x >= origin.getX() && x < origin.getX() + full.widthX()
+                && y >= origin.getY() && y < origin.getY() + full.heightY()
+                && z >= origin.getZ() && z < origin.getZ() + full.lengthZ();
+    }
+
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
         boolean wasOwned = navigationScaffolds.contains(pos);
         if (navigationScaffolds.serverChanged(pos, state)) {
@@ -13434,8 +13442,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 case EXCAVATION_PATH: {
                     final long only = this.excavationBridgeKey;
-                    return PlacementLicence.where(packed -> packed == only && only != Long.MIN_VALUE,
-                            "next AutoDig floor cell");
+                    return PlacementLicence.excavationBridge(only);
                 }
                 default:
                     return PlacementLicence.UNRESTRICTED;
