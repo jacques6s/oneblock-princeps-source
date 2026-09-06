@@ -54,7 +54,10 @@ there is no force-cancel or teleport permission during that movement. READY
 requires current/next/inProgress all empty, no late acknowledgement debt, no
 active Survival consumption, released use/attack keys, loaded collision-free
 grounded body, negligible horizontal motion and two stable position samples.
-The existing 10-second quiescence budget expires into a retained FAILED pause.
+The 10-second initial quiescence budget expires into a retained FAILED pause.
+After the first READY, unsettled arrival is verified again without reusing that
+initial deadline; the client's unchanged 30-second transaction budget covers
+server warmup and arrival. No new budget is granted when READY recurs.
 No movement reach, cost, cancellation safety or build-stall deadline is relaxed.
 
 The actual selected Home owner keeps `PlayerMovementInput` with its cleared
@@ -74,7 +77,7 @@ period without increasing the confirmed-action revision.
 
 ## Offline verification and limits
 
-`BuilderHomeRecoveryTest` has 18 cases. They execute real Builder admission,
+`BuilderHomeRecoveryTest` has 19 cases. They execute real Builder admission,
 hold, Resume, PathingControlManager.preTick, InputOverrideHandler.onTick,
 SurvivalBehavior.onTick, safe segment cancellation, scaffold-ledger ACK and the
 confirmed-action callback. Stored movement cancellation safety, world loading,
@@ -97,6 +100,14 @@ continuation caller list still named five sites. It now includes the new sixth
 Home continuation, with an actual Home-command context-identity assertion. Its
 other 932 results and failed XML/log remain separate from the final full build;
 no production change was needed for this test-contract update.
+
+The following full run passed 933 tests (929 PASS, four known TraceReplay skips)
+and is preserved under `prelanding-full`. An independent client/engine review
+then found the initial-deadline reuse during delayed arrival. A real t=15s
+unsettled arrival after early READY reproduced exactly one assertion failure in
+19 Home cases; the other 18 passed. The added per-request first-quiescence flag
+separates these phases without changing either deadline. Final evidence follows
+this correction, rather than presenting the earlier full result as its proof.
 
 Evidence is under `build/home-recovery-evidence`. Final full-suite totals,
 source/archive pins, runtime/API hashes and the 187-class API comparison are

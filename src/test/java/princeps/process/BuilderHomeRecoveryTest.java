@@ -210,6 +210,20 @@ public class BuilderHomeRecoveryTest {
         assertTrue(f.b().isPaused()); assertSame(f.route.base().full, get(f.b(), "realSchematic"));
     }
 
+    @Test public void alreadyQuiescentHomeMaySettleAfterServerWarmupWithoutReusingTheInitialDeadline() throws Exception {
+        F f = fixture(); f.enable(); assertTrue(f.begin()); f.ready();
+        // The client permits server warmup inside its separate 30-second command/landing transaction.
+        long afterWarmup = 15_000_000_100L;
+        set(f.player, "deltaMovement", new Vec3(.03, -.0784, 0));
+        f.b().advanceHomeRecovery(afterWarmup);
+        assertEquals("QUIESCING", f.b().homeRecoveryState());
+        set(f.player, "deltaMovement", new Vec3(0, -.0784, 0));
+        f.b().advanceHomeRecovery(afterWarmup + 1);
+        f.b().advanceHomeRecovery(afterWarmup + 2);
+        assertEquals("READY", f.b().homeRecoveryState());
+        assertTrue(f.b().resumeAfterHomeRecovery(f.b().homeRecoveryRequestId()));
+    }
+
     @Test public void exhaustedUnplacedCleanupCanSuspendWithoutDiscardingLedgerOrAttemptedOwners() throws Exception {
         F f = fixture(); f.enable(); Object episode = f.episode("BLOCKED", false);
         set(episode, "blockedReason", "finite helper candidates exhausted");

@@ -2000,6 +2000,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         final Vec3i buildOrigin = new Vec3i(origin.getX(), origin.getY(), origin.getZ());
         final long deadline;
         String state = "QUIESCING";
+        boolean initiallyQuiesced;
         Vec3 restingPosition;
         int restingTicks;
         HomeRecovery(long now) { deadline = now + HOME_QUIESCE_NANOS; }
@@ -2104,7 +2105,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (hold == null) return null;
         progressHold = true;
         if (!hold.current()) { hold.state = "FAILED"; return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL); }
-        if (now >= hold.deadline && !"READY".equals(hold.state)) hold.state = "FAILED";
+        if (!hold.initiallyQuiesced && now >= hold.deadline) hold.state = "FAILED";
         var pathing = princeps.getPathingBehavior();
         if (!pathing.cancelSegmentIfSafe()) {
             return continueCurrentRoute(pathing.getGoal(), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
@@ -2125,7 +2126,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             hold.restingTicks = hold.restingPosition != null && hold.restingPosition.distanceToSqr(position) < 0.000001
                     ? hold.restingTicks + 1 : 1;
             hold.restingPosition = position;
-            if (hold.restingTicks >= 2) hold.state = "READY";
+            if (hold.restingTicks >= 2) {
+                hold.initiallyQuiesced = true;
+                hold.state = "READY";
+            }
         }
         return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
     }
