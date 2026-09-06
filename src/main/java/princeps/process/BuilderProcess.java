@@ -7872,12 +7872,24 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc) {
-        return possibleToPlace(toPlace, x, y, z, bcc, null, null);
+        return possibleToPlace(toPlace, x, y, z, bcc, null, null, null);
     }
 
     private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
                                                 ExcavationRepairAim.Face requiredFace,
                                                 java.util.function.Predicate<Placement> faceFilter) {
+        return possibleToPlace(toPlace, x, y, z, bcc, requiredFace, faceFilter, null);
+    }
+
+    /** Optional failure counts from the actual click derivation, not a second geometry approximation. */
+    private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z,
+                                               BuilderCalculationContext bcc, int[] rejected) {
+        return possibleToPlace(toPlace, x, y, z, bcc, null, null, rejected);
+    }
+
+    private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
+                                                ExcavationRepairAim.Face requiredFace,
+                                                java.util.function.Predicate<Placement> faceFilter, int[] rejected) {
         BlockStateInterface bsi = bcc.bsi;
         for (Direction against : supportDirectionsFor(toPlace)) {
             BetterBlockPos placeAgainstPos = new BetterBlockPos(x, y, z).relative(against);
@@ -7885,16 +7897,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     || against.getOpposite() != requiredFace.side())) continue;
             BlockState placeAgainstState = bsi.get0(placeAgainstPos);
             if (MovementHelper.isReplaceable(placeAgainstPos.x, placeAgainstPos.y, placeAgainstPos.z, placeAgainstState, bsi)) {
+                if (rejected != null) rejected[0]++;
                 continue;
             }
             if (!toPlace.canSurvive(ctx.world(), new BetterBlockPos(x, y, z))) {
+                if (rejected != null) rejected[1]++;
                 continue;
             }
             if (!placementPlausible(new BetterBlockPos(x, y, z), toPlace)) {
+                if (rejected != null) rejected[2]++;
                 continue;
             }
             VoxelShape shape = placeAgainstState.getShape(ctx.world(), placeAgainstPos);
             if (shape.isEmpty()) {
+                if (rejected != null) rejected[3]++;
                 continue;
             }
             AABB aabb = shape.bounds();
@@ -7910,6 +7926,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 positionKey(ctx.playerFeet()), new BetterBlockPos(x, y, z), toPlace);
                         if (faceFilter == null || faceFilter.test(option)) return Optional.of(option);
                     }
+                    if (rejected != null) rejected[5]++;
+                } else {
+                    if (rejected != null) rejected[4]++;
                 }
             }
         }
@@ -10750,6 +10769,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         final ISchematic model = realSchematic == null ? schematic : realSchematic;
         final BlockPos buildOrigin = new BlockPos(origin);
         final BetterBlockPos start = ctx.playerFeet();
+        BetterBlockPos proofStart = start;
         final BuilderCalculationContext initialRules;
         final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
         final PathProbe probe = new PathProbe("cleanup-one-helper");
@@ -10766,6 +10786,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         BetterBlockPos queryStart;
         CleanupEscapeContext queryContext;
         boolean prefixProved, presentProved, removedProved, placed;
+        int placementCenteringTicks, placementSettleTicks;
+        boolean placementAimReported;
+        boolean placementMaterialWaitReported;
         boolean worldInvalidated;
         Placement placementRequest;
         CleanupEscapeContext realRouteContext;
@@ -10979,7 +11002,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private boolean askCleanup(CleanupEscape e, BetterBlockPos start, Goal goal, CleanupEscapeContext context) {
-        if (!e.identityCurrent() || !ctx.playerFeet().equals(e.start) || !e.verifyWorld()) {
+        if (!e.identityCurrent() || !ctx.playerFeet().equals(e.proofStart) || !e.verifyWorld()) {
             e.block("proof identity/start/world changed"); return false;
         }
         e.queryStart = start;
@@ -11050,8 +11073,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             e.stance = e.stances.removeFirst();
             e.prefixProved = e.presentProved = e.removedProved = false;
+            e.placementCenteringTicks = e.placementSettleTicks = 0;
+            e.placementAimReported = false;
+            e.placementMaterialWaitReported = false;
             CleanupEscapeContext context = new CleanupEscapeContext(e.bounds, null, null, null, null);
-            if (askCleanup(e, e.start, new GoalBlock(e.stance), context)) e.stage = CleanupStage.PREFIX_PROOF;
+            if (askCleanup(e, e.proofStart, new GoalBlock(e.stance), context)) e.stage = CleanupStage.PREFIX_PROOF;
             return cleanupHold();
         }
 
@@ -11059,7 +11085,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 || e.stage == CleanupStage.REMOVED_PROOF) {
             PathProbe.Result answer = e.probe.poll();
             if (answer == null) return cleanupHold();
-            if (!ctx.playerFeet().equals(e.start) || !e.verifyWorld()) {
+            if (!ctx.playerFeet().equals(e.proofStart) || !e.verifyWorld()) {
                 e.block("start/world changed while proving an escape leg"); return cleanupHold();
             }
             if (!cleanupCompleteDryPath(answer, e.queryStart, e.queryGoal, e.queryContext.maxFallHeightNoWater)) {
@@ -11084,23 +11110,53 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 e.removedProved = true;
                 e.floor = answer.path.getDest();
                 e.stage = CleanupStage.WALK_PREFIX;
+                BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-PROVED", e.owner.x, e.owner.y, e.owner.z,
+                        "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                + " permanentFloor=" + e.floor.toShortString() + " independent PREFIX/PRESENT/REMOVED complete");
             }
             return cleanupHold();
         }
 
         if (e.stage == CleanupStage.WALK_PREFIX) {
-            if (!ctx.playerFeet().equals(e.stance) || !ctx.player().onGround()) return cleanupRoute(e, e.stance, false);
-            if (!e.verifyWorld()) { e.block("world changed before actual placement"); return cleanupHold(); }
-            e.stage = CleanupStage.PLACE;
+            PathingCommand approach = driveCleanupPlacementApproach(e);
+            if (approach != null) return approach;
         }
         if (e.stage == CleanupStage.PLACE) {
+            if (!centeredInPlacementStance(e.stance)) {
+                e.stage = CleanupStage.WALK_PREFIX;
+                return driveCleanupPlacementApproach(e);
+            }
             if (!e.prefixProved || !e.presentProved || !e.removedProved || !cleanupMayOccupy(e.helper, ordinary)
                     || !ctx.player().onGround() || !ctx.playerFeet().equals(e.stance)) {
                 e.block("placement prerequisites no longer hold"); return cleanupHold();
             }
             if (!e.worldCurrent()) { e.block("world changed during aim"); return cleanupHold(); }
-            Optional<Placement> placement = possibleToPlace(e.material, e.helper.x, e.helper.y, e.helper.z, ordinary);
-            if (placement.isPresent()) cleanupPlacementClick(e, placement.get(), ordinary);
+            if (hotbarStackThatPlaces(e.material) == null) {
+                if (!e.placementMaterialWaitReported) {
+                    e.placementMaterialWaitReported = true;
+                    BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-MATERIAL", e.owner.x, e.owner.y, e.owner.z,
+                            "helper=" + e.helper.toShortString() + " material=" + blockName(e.material)
+                                    + " waiting for normal hotbar supply; stance not rejected");
+                }
+                princeps.getInventoryBehavior().throwaway(true, stack -> !stack.isEmpty()
+                        && stack.getItem() == e.material.getBlock().asItem());
+                return cleanupHold(); // missing material is not evidence against the stance
+            }
+            int[] rejected = new int[6];
+            Optional<Placement> placement = possibleToPlace(e.material, e.helper.x, e.helper.y, e.helper.z, ordinary, rejected);
+            if (placement.isPresent()) {
+                if (!e.placementAimReported) {
+                    e.placementAimReported = true;
+                    BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-AIM", e.owner.x, e.owner.y, e.owner.z,
+                            "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                    + " pose=" + ctx.player().position() + " live placement derived; no server ACK yet");
+                }
+                cleanupPlacementClick(e, placement.get(), ordinary);
+            } else {
+                rejectCleanupPlacementStance(e, "centered live derivation failed: noSolid=" + rejected[0]
+                        + " cannotSurvive=" + rejected[1] + " obstructed=" + rejected[2] + " emptyShape=" + rejected[3]
+                        + " rayMiss=" + rejected[4] + " itemStateRejected=" + rejected[5]);
+            }
             return cleanupHold();
         }
         if (e.stage == CleanupStage.WAIT_PLACE) {
@@ -11155,6 +11211,46 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return cleanupHold();
         }
         return cleanupHold();
+    }
+
+    private PathingCommand driveCleanupPlacementApproach(CleanupEscape e) {
+        if (!ctx.playerFeet().equals(e.stance) || !ctx.player().onGround()) {
+            e.placementSettleTicks = 0;
+            return cleanupRoute(e, e.stance, false);
+        }
+        if (!e.verifyWorld()) { e.block("world changed before actual placement"); return cleanupHold(); }
+        // GoalBlock arrives anywhere in the cell; the placement oracle proved its crouched CENTER.
+        // Reuse the ordinary actor's bounded centering and one input-free settling tick before deriving a click.
+        if (!centeredInPlacementStance(e.stance) || princeps.getPathingBehavior().getCurrent() != null) {
+            e.placementSettleTicks = 0;
+            if (++e.placementCenteringTicks >= STANCE_CENTERING_TICKS) {
+                rejectCleanupPlacementStance(e, "could not settle at the proved placement center");
+                return cleanupHold();
+            }
+            if (princeps.getPathingBehavior().getCurrent() != null) return cleanupHold();
+            if (e.placementCenteringTicks == 1) {
+                BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-CENTER", e.owner.x, e.owner.y, e.owner.z,
+                        "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                + " pose=" + ctx.player().position());
+            }
+            return centerInPlacementStance(e.stance);
+        }
+        if (e.placementSettleTicks++ == 0) return settleInPlacementStance();
+        e.stage = CleanupStage.PLACE;
+        return null;
+    }
+
+    /** Consume this concrete stance once. Re-prove alternatives from the actual body, under the same deadline. */
+    private void rejectCleanupPlacementStance(CleanupEscape e, String why) {
+        if (e.placed || e.placementRequest != null) { e.block("cannot reject a stance with outstanding helper debt"); return; }
+        e.probe.cancel();
+        BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-STANCE-REJECT", e.owner.x, e.owner.y, e.owner.z,
+                "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                        + " pose=" + ctx.player().position() + " " + why);
+        e.proofStart = ctx.playerFeet();
+        e.prefixProved = e.presentProved = e.removedProved = false;
+        e.realRouteContext = null;
+        e.stage = CleanupStage.CANDIDATE;
     }
 
     /** The real Downward phase: an already removed helper may be entered, but never mined a second time. */
