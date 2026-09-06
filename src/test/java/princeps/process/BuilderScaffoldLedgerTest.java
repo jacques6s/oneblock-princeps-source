@@ -72,4 +72,29 @@ public class BuilderScaffoldLedgerTest {
         assertTrue(ledger.awaitingServer());
         assertFalse(ledger.contains(OUTSIDE));
     }
+
+    @Test
+    public void excavationRoofSealCannotBecomeACompletionCleanupGoal() {
+        BuilderScaffoldLedger ledger = new BuilderScaffoldLedger();
+        boolean retained = BuilderProcess.retainExcavationIntegrity(true, true, false);
+        assertTrue(retained);
+        assertFalse(ledger.record(OUTSIDE, Blocks.AIR.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
+                retained, true, 10));
+        ledger.serverChanged(OUTSIDE, Blocks.COBBLESTONE.defaultBlockState());
+        assertFalse(ledger.awaitingServer());
+        assertTrue(ledger.positions().isEmpty());
+    }
+
+    @Test
+    public void internalExcavationPlugsAndOrdinaryBuilderScaffoldsStillOweCleanup() {
+        for (boolean[] purpose : new boolean[][]{{true, true, true}, {true, false, false}, {false, true, false}, {false, false, false}}) {
+            BuilderScaffoldLedger ledger = new BuilderScaffoldLedger();
+            boolean retained = BuilderProcess.retainExcavationIntegrity(purpose[0], purpose[1], purpose[2]);
+            assertFalse(retained);
+            assertTrue(ledger.record(OUTSIDE, Blocks.AIR.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
+                    retained, true, 10));
+            assertTrue(ledger.serverChanged(OUTSIDE, Blocks.COBBLESTONE.defaultBlockState()));
+            assertTrue(ledger.positions().contains(OUTSIDE));
+        }
+    }
 }

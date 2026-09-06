@@ -2208,13 +2208,27 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     public void recordNavigationScaffold(BlockPos pos, BlockState before, BlockState after) {
+        recordNavigationScaffold(pos, before, after, false);
+    }
+
+    public void recordNavigationScaffold(BlockPos pos, BlockState before, BlockState after,
+                                         boolean excavationIntegrity) {
         if (!isActive() || buildInRows || temporarySupportTargets.containsKey(positionKey(pos))) {
             return;
         }
-        if (navigationScaffolds.record(pos, before, after, templateNamesABlockAt(pos),
+        // Exterior seals/supports must survive completion. Treating the roof seal as disposable navigation
+        // scaffold made a completed excavation tunnel up its outside wall just to reopen its own roof.
+        // Internal plugs still owe removal; ordinary navigation scaffolds retain their existing lifecycle.
+        boolean retainedRepair = retainExcavationIntegrity(excavating, excavationIntegrity,
+                insideSnakeVolume(pos.getX(), pos.getY(), pos.getZ()));
+        if (navigationScaffolds.record(pos, before, after, templateNamesABlockAt(pos) || retainedRepair,
                 Princeps.settings().acceptableThrowawayItems.value.contains(after.getBlock().asItem()), buildTick)) {
             logMechanic("SCAFFOLD-REQUEST " + pos.toShortString());
         }
+    }
+
+    static boolean retainExcavationIntegrity(boolean excavation, boolean explicitRepair, boolean insideSelection) {
+        return excavation && explicitRepair && !insideSelection;
     }
 
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
@@ -4829,7 +4843,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         BlockPlaceHelper helper = princeps.getInputOverrideHandler().getBlockPlaceHelper();
         if (aligned && liveRayWouldPlaceDesired(placement, bcc) && !helper.isThrottled()) {
             Item expected = placement.desired.getBlock().asItem();
-            helper.expectMainHandPlacement(placement.placeAgainst, placement.side, placement.target,
+            helper.expectExcavationIntegrityPlacement(placement.placeAgainst, placement.side, placement.target,
                     placement.hotbarSelection, expected, () -> liveRayWouldPlaceDesired(placement, bcc));
             String kind = repair.kind() == SnakeRepairKind.INTERNAL_SOURCE ? "autodig-source"
                     : repair.kind() == SnakeRepairKind.BRIDGE ? "autodig-bridge" : "autodig-shell";
