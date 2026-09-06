@@ -220,6 +220,10 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
     }
 
     private boolean inControl() {
+        // A quiescent owned Home hold must not hand WASD back to KeyboardInput while the client relocates it.
+        if (princeps.getPathingControlManager().mostRecentInControl().orElse(null)
+                instanceof princeps.process.BuilderProcess builder
+                && builder.homeRecoveryHoldsUse()) return true;
         for (Input input : new Input[]{Input.MOVE_FORWARD, Input.MOVE_BACK, Input.MOVE_LEFT, Input.MOVE_RIGHT, Input.SNEAK, Input.JUMP}) {
             if (isInputForcedDown(input)) {
                 return true;

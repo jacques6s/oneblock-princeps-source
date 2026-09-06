@@ -1962,6 +1962,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     public void resume() {
+        // A token-owned hold may only be resumed through its validated relocation boundary.
+        if (homeRecovery != null) return;
         if (paused && scaffoldMaterialPausedAt != null) {
             if (scaffoldMaterialTarget != null) scaffoldMaterialWaitStarted += Math.max(0, buildTick - scaffoldMaterialPausedAt);
             scaffoldMaterialPausedAt = null;
@@ -1979,6 +1981,199 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     @Override
     public boolean isPaused() {
         return paused;
+    }
+
+    // Optional concrete capability; it deliberately adds nothing to the shared release API.
+    private boolean homeRecoveryEnabled;
+    private long homeRecoverySequence;
+    private long homeRecoveryAttemptRevision = Long.MIN_VALUE;
+    private HomeRecovery homeRecovery;
+    private Goal homeFailedRoute;
+    private BetterBlockPos homeFailedTarget;
+    private long homeFailedRevision = Long.MIN_VALUE;
+    private static final long HOME_QUIESCE_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+
+    private final class HomeRecovery {
+        final long id = ++homeRecoverySequence;
+        final Object world = ctx.world(), player = ctx.player();
+        final ISchematic model = supportModelForDependencies();
+        final Vec3i buildOrigin = new Vec3i(origin.getX(), origin.getY(), origin.getZ());
+        final long deadline;
+        String state = "QUIESCING";
+        Vec3 restingPosition;
+        int restingTicks;
+        HomeRecovery(long now) { deadline = now + HOME_QUIESCE_NANOS; }
+        boolean current() {
+            return isActive() && !excavating && !buildInRows && world == ctx.world() && player == ctx.player()
+                    && model == supportModelForDependencies() && buildOrigin.equals(origin);
+        }
+    }
+
+    public void setHomeRecoveryEnabled(boolean enabled) {
+        homeRecoveryEnabled = enabled;
+        if (!enabled && homeRecovery != null) failHomeRecovery(homeRecovery.id);
+    }
+
+    public String homeRecoveryState() {
+        HomeRecovery hold = homeRecovery;
+        if (hold != null && (!hold.current() || !homeRecoveryOwnsPlayer())) hold.state = "FAILED";
+        return hold == null ? (homeRecoveryEnabled ? "IDLE" : "DISABLED") : hold.state;
+    }
+
+    public long homeRecoveryRequestId() { return homeRecovery == null ? 0 : homeRecovery.id; }
+
+    public void failHomeRecovery(long id) {
+        HomeRecovery hold = homeRecovery;
+        if (hold == null || hold.id != id) return;
+        hold.state = "FAILED";
+        if (hold.current()) pause(); // no teardown, no release of the attempt budget
+    }
+
+    /** Exact current-owner boundary also used by SurvivalBehavior; never suppress another process's use. */
+    public boolean homeRecoveryHoldsUse() {
+        return homeRecovery != null && homeRecovery.current() && homeRecoveryOwnsPlayer();
+    }
+
+    private boolean homeRecoveryOwnsPlayer() {
+        return princeps.getPathingControlManager().mostRecentInControl().orElse(null) == this;
+    }
+
+    private boolean homeRecoveryHasAcknowledgement() {
+        return pendingPlacementRequest != null || lastPlacedCell != null || navigationScaffolds.awaitingServer()
+                || cleanupEscapeDebt != null && !cleanupEscapeDebt.discharged();
+    }
+
+    private boolean exhaustedUnplacedCleanup() {
+        return cleanupEscape != null && cleanupEscape.stage == CleanupStage.BLOCKED && !cleanupEscape.placed
+                && "finite helper candidates exhausted".equals(cleanupEscape.blockedReason)
+                && !cleanupEscape.probe.isRunning();
+    }
+
+    /** Invoked only by this process's real STOP decision, before its ordinary terminal teardown. */
+    boolean beginHomeRecovery(BuilderProgressWatch.Phase phase, long now) {
+        if (!homeRecoveryEnabled || homeRecovery != null || paused || !isActive() || excavating || buildInRows
+                || phase != BuilderProgressWatch.Phase.WORK || homeRecoveryHasAcknowledgement()
+                || scaffoldMaterialTarget != null
+                || homeRecoveryAttemptRevision == confirmedProgressRevision || ctx.world() == null || ctx.player() == null
+                || !ctx.world().hasChunkAt(ctx.playerFeet())) return false;
+        boolean exhausted = exhaustedUnplacedCleanup();
+        if (cleanupEscape != null && !exhausted) return false;
+        Goal actualGoal = princeps.getPathingBehavior().getGoal();
+        BetterBlockPos actualTarget = committedPlaceTarget != null ? committedPlaceTarget : electedCell;
+        boolean failedRoute = homeFailedRoute != null && homeFailedRevision == confirmedProgressRevision
+                && Objects.equals(homeFailedRoute, actualGoal) && Objects.equals(homeFailedTarget, actualTarget);
+        boolean negativeLane = laneAProof != null && laneQuestionCurrent(laneAProof, electedGoal, true);
+        if (!exhausted && !failedRoute && !negativeLane) return false;
+        if (actualTarget != null && !ctx.world().hasChunkAt(actualTarget)) return false;
+        if (exhausted) {
+            cleanupEscape.probe.cancel();
+            cleanupEscape = null; // only a terminal, unplaced episode; retain attempted owners and every debt/ledger
+        }
+        homeRecoveryAttemptRevision = confirmedProgressRevision;
+        homeRecovery = new HomeRecovery(now);
+        pause();
+        discardLaneQuestion();
+        laneAProof = null;
+        laneEscalatedCell = null;
+        laneBAnswered = false;
+        supportRepair = null;
+        BuildTrace.cell(buildTick, "HOME-QUIESCING", origin.getX(), origin.getY(), origin.getZ(),
+                "id=" + homeRecovery.id + " confirmedWorldChanges=" + confirmedProgressRevision);
+        return true;
+    }
+
+    private boolean homeRouteEmpty() {
+        var pathing = princeps.getPathingBehavior();
+        return pathing.getCurrent() == null && pathing.getNext() == null && pathing.getInProgress().isEmpty();
+    }
+
+    private boolean homeBodyAtRest() {
+        var player = ctx.player();
+        BetterBlockPos feet = ctx.playerFeet();
+        return ctx.world().hasChunkAt(feet) && ctx.world().hasChunkAt(feet.below())
+                && ctx.world().hasChunkAt(feet.above()) && player.onGround() && !player.isUsingItem()
+                && !player.isInWater() && !player.isInLava() && !player.isPassenger() && !player.isFallFlying()
+                && player.getDeltaMovement().horizontalDistanceSqr() < 0.000001
+                && Math.abs(player.getDeltaMovement().y) < 0.1
+                && ctx.world().noCollision(player);
+    }
+
+    /** Actual owned tick: an unsafe movement may finish, but READY never exposes that unfinished movement. */
+    PathingCommand advanceHomeRecovery(long now) {
+        HomeRecovery hold = homeRecovery;
+        if (hold == null) return null;
+        progressHold = true;
+        if (!hold.current()) { hold.state = "FAILED"; return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL); }
+        if (now >= hold.deadline && !"READY".equals(hold.state)) hold.state = "FAILED";
+        var pathing = princeps.getPathingBehavior();
+        if (!pathing.cancelSegmentIfSafe()) {
+            return continueCurrentRoute(pathing.getGoal(), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        }
+        var input = princeps.getInputOverrideHandler();
+        input.clearAllKeys();
+        input.getBlockBreakHelper().stopBreakingBlock();
+        input.getBlockPlaceHelper().clearExpectedPlacement();
+        // Survival runs later under the actual selected owner. READY requires that teardown to have completed.
+        if (!homeRouteEmpty() || homeRecoveryHasAcknowledgement()
+                || princeps.getSurvivalBehavior().isConsuming() || !homeBodyAtRest()
+                || ctx.minecraft().options.keyUse.isDown() || ctx.minecraft().options.keyAttack.isDown()) {
+            hold.restingTicks = 0;
+            hold.restingPosition = null;
+            if ("READY".equals(hold.state)) hold.state = "QUIESCING";
+        } else if (!"FAILED".equals(hold.state)) {
+            Vec3 position = ctx.player().position();
+            hold.restingTicks = hold.restingPosition != null && hold.restingPosition.distanceToSqr(position) < 0.000001
+                    ? hold.restingTicks + 1 : 1;
+            hold.restingPosition = position;
+            if (hold.restingTicks >= 2) hold.state = "READY";
+        }
+        return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+    }
+
+    public boolean resumeAfterHomeRecovery(long id) {
+        HomeRecovery hold = homeRecovery;
+        if (hold == null || hold.id != id || !homeRecoveryEnabled || !"READY".equals(homeRecoveryState())
+                || !hold.current() || !homeRecoveryOwnsPlayer() || !homeRouteEmpty() || !homeBodyAtRest()
+                || princeps.getSurvivalBehavior().isConsuming() || homeRecoveryHasAcknowledgement()
+                || ctx.minecraft().options.keyUse.isDown() || ctx.minecraft().options.keyAttack.isDown()) return false;
+        // Client has established the server-confirmed landing. Invalidate executable permissions, not the build.
+        releasePlacementTarget();
+        discardLaneQuestion();
+        laneAProof = null;
+        laneEscalatedCell = null;
+        laneBAnswered = false;
+        electedGoal = null;
+        orientedGoalCache.clear();
+        // A negative route search was about the departure position. Local support/stance facts still apply.
+        var parks = parkedCells.entrySet().iterator();
+        while (parks.hasNext()) {
+            var entry = parks.next();
+            if (entry.getValue().reason != ParkReason.UNREACHABLE) continue;
+            BetterBlockPos pos = entry.getValue().pos;
+            forgetCellVerdict(entry.getKey());
+            parks.remove();
+            activeCells.add(pos);
+            if (incorrectPositions != null) incorrectPositions.add(pos);
+        }
+        supportRepair = null;
+        progressActions.clear();
+        resetNavigationProgressTracking();
+        progressExecutor = null;
+        progressRoute = null;
+        progressRouteTarget = null;
+        progressRoutePositions = List.of();
+        progressRoutePosition = -1;
+        homeFailedRoute = null;
+        homeFailedTarget = null;
+        // One explicit relocation grace period. It grants no confirmed world revision and cannot rearm Home.
+        progressWatch.reset();
+        homeRecoveryAttemptRevision = confirmedProgressRevision;
+        homeRecovery = null;
+        resume();
+        progressHold = false;
+        BuildTrace.cell(buildTick, "HOME-RESUMED", origin.getX(), origin.getY(), origin.getZ(),
+                "id=" + id + " fresh route required; confirmedWorldChanges=" + confirmedProgressRevision);
+        return true;
     }
 
     @Override
@@ -2122,6 +2317,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** A temporary process can take control without onLostControl; its mining is not this repair's continuation. */
     public void revokeSupportRepair() {
         supportRepair = null;
+        if (homeRecovery != null) failHomeRecovery(homeRecovery.id);
     }
 
     /** Called only after the ordinary direct repair branch has selected and aimed a break-and-replace action. */
@@ -9206,6 +9402,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             logMechanic("Builder progress: " + detail);
             if (decision == BuilderProgressWatch.Decision.STOP) {
                 progressHold = true;
+                if (beginHomeRecovery(phase, System.nanoTime())) return advanceHomeRecovery(System.nanoTime());
                 abortBuild(phase == BuilderProgressWatch.Phase.WAIT_MATERIAL ? Ending.MATERIALS_MISSING : Ending.PLACEMENT_FAILED,
                         "Build stopped: no confirmed world action or route progress for 60 active seconds",
                         java.util.List.of(detail, "All unresolved cells are retained; no automatic restart was requested."));
@@ -9369,6 +9566,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (finishAbortedBuild()) {
             return null;
         }
+        if (recursions == 0 && homeRecovery != null) {
+            buildTick++;
+            return advanceHomeRecovery(System.nanoTime());
+        }
         if (recursions == 0) {
             buildTick++;
             var survival = princeps.getSurvivalBehavior();
@@ -9383,6 +9584,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 if (!paused) enforceAutoDigLookProfile();
                 excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
                         survival != null && survival.isConsuming());
+            }
+            if (calcFailed) {
+                homeFailedRoute = princeps.getPathingBehavior().getGoal();
+                homeFailedTarget = committedPlaceTarget != null ? committedPlaceTarget : electedCell;
+                homeFailedRevision = confirmedProgressRevision;
             }
             observePendingPlacementRequest();
             // Runs BEFORE anything can return. Every previous stall guard sat further down onTick, behind a dozen
@@ -14269,6 +14475,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         resetBreakBranchTracking();
+        homeRecoveryEnabled = false;
+        homeRecovery = null;
+        homeRecoveryAttemptRevision = Long.MIN_VALUE;
+        homeFailedRoute = null;
+        homeFailedTarget = null;
+        homeFailedRevision = Long.MIN_VALUE;
         scaffoldMaterialTarget = null;
         scaffoldMaterialPausedAt = null;
         scaffoldMaterialAttemptTick = Long.MIN_VALUE;
