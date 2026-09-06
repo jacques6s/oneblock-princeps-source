@@ -3343,9 +3343,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** How long the break branch stands down once it has proven it is achieving nothing. */
     private static final int BREAK_BRANCH_YIELD_TICKS = 100;
 
-    private int breakBranchIdleTicks;
-    private long breakBranchLastWorldChanges = -1L;
-    private long breakBranchYieldUntilTick = Long.MIN_VALUE;
+    private final BreakBranchProgress breakBranchProgress =
+            new BreakBranchProgress(BREAK_BRANCH_STARVATION_TICKS, BREAK_BRANCH_YIELD_TICKS);
+    private final BreakTargetObservation breakTargetObservation = new BreakTargetObservation();
 
     /** Doing absolutely nothing for this long is a livelock, not thinking. Five seconds. */
     private static final int STALL_NUDGE_AFTER_TICKS = 100;
@@ -6168,6 +6168,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     /** Called wherever a cell is observed to satisfy the schematic — the watchdog's only source of truth. */
     private void noteCellCompleted() {
+        breakBranchProgress.observedProgress();
         consecutivePathFailures = 0;
         lastCellCompletedTick = buildTick;
         // A cell became correct, so whatever the refusal was holding up is over. This is the one clock a stuck builder
@@ -9111,9 +9112,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         if (recursions == 0) {
             buildTick++;
+            var survival = princeps.getSurvivalBehavior();
+            breakBranchProgress.beginTick(paused, survival != null && survival.ownsInventory(),
+                    survival != null && survival.isConsuming());
+            var currentWorld = ctx.world();
+            if (currentWorld != null && breakTargetObservation.observe(currentWorld,
+                    currentWorld::hasChunkAt, currentWorld::getBlockState)) {
+                breakBranchProgress.observedProgress();
+            }
             if (excavating) {
                 if (!paused) enforceAutoDigLookProfile();
-                var survival = princeps.getSurvivalBehavior();
                 excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
                         survival != null && survival.isConsuming());
             }
@@ -9593,7 +9601,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 ordinaryExcavation() || (excavating && snakeCleanupActive && !snakeCleanupWithAreaTool), snakeEntering);
         if (buildTick % 40 == 0) { logMechanic("PROBE B2 tick=" + buildTick + " toBreak=" + toBreak.isPresent()
                 + " safeToCancel=" + isSafeToCancel + " onGround=" + ctx.player().onGround()
-                + " yieldUntil=" + breakBranchYieldUntilTick + " idle=" + breakBranchIdleTicks); }
+                + " breakActiveTick=" + breakBranchProgress.activeTick()
+                + " yieldRemaining=" + breakBranchProgress.yieldRemaining()
+                + " nonProgress=" + breakBranchProgress.nonProgressTicks()); }
         PathExecutor plugRoute = princeps.getPathingBehavior().getCurrent();
         var excavationSurvival = princeps.getSurvivalBehavior();
         boolean excavationHandsBorrowed = excavationSurvival != null
@@ -9625,50 +9635,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     pos -> bcc.bsi.get0(pos.getX(), pos.getY(), pos.getZ()));
             if (wetApproach != null) return wetApproach;
         }
-        // THE BOUND THAT COUNTS THE BRANCH, because the one that counts the CELL cannot fire here.
-        //
-        // breakMadeNoProgress zeroes breakNoProgressTicks whenever the target or its block differs from last tick,
-        // and toBreakNearPlayer re-runs its whole dx/dy/dz scan from scratch every tick and returns the first
-        // match. So a branch that keeps choosing a DIFFERENT cell resets the deadline forever: measured
-        // 2026-08-18, 1800 stalled ticks against a BREAK_STALL_MIN_TICKS of 120 produced neither the deferral
-        // below nor its message. The cell-level bound is not wrong, it is just blind to this shape.
-        //
-        // This one asks the only question that matters to the rest of the tick: has the break branch been taking
-        // the tick, over and over, while nothing in the world changed? Everything below it -- the placement scan,
-        // the target election, the censuses -- is starved for as long as that is true, which is precisely how a
-        // picture at 91% sat inert for ninety seconds. Once tripped, the branch yields for a while and the
-        // placement scan gets its turn.
-        // MINING IS NOT IDLING, and the first version of this counter could not tell them apart. It stood the
-        // branch down after 120 ticks of "no world change" -- but a block only becomes a world change when it
-        // POPS, and a block being mined with the wrong tool takes far longer than that. Measured 2026-08-18
-        // 19:17: this fired twelve times in four minutes on a run whose reserved tool slot held shears while the
-        // work in front of it was terracotta and deepslate. The guard was interrupting the very break it was
-        // supposed to be rescuing, every six seconds, so the block never came out.
-        //
-        // A forced left click is the engine actually holding the mouse down on a block. Keys are cleared at the
-        // top of every tick, so that flag can only have been set by this tick: it is the exact test for "is it
-        // mining right now", and those ticks are not idle however long they last.
-        if (toBreak.isPresent() && isSafeToCancel && miningPostureReady) {
-            boolean actuallyMining = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT);
-            if (BuildTrace.worldChanges() != breakBranchLastWorldChanges || actuallyMining) {
-                breakBranchLastWorldChanges = BuildTrace.worldChanges();
-                breakBranchIdleTicks = 0;
-            } else {
-                breakBranchIdleTicks++;
-            }
-        } else {
-            breakBranchIdleTicks = 0;
-        }
-        if (breakBranchIdleTicks > BREAK_BRANCH_STARVATION_TICKS
-                && !princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock()) {
-            logMechanic("The break branch has held the tick for " + breakBranchIdleTicks
-                    + " ticks without a single world change, so nothing below it has run. Standing it down for "
-                    + BREAK_BRANCH_YIELD_TICKS + " ticks to let the placement scan have a turn.");
-            breakBranchIdleTicks = 0;
-            breakBranchYieldUntilTick = buildTick + BREAK_BRANCH_YIELD_TICKS;
-        }
-        if (toBreak.isPresent() && buildTick < breakBranchYieldUntilTick) {
+        // The branch guard covers changing targets that the per-cell deadline cannot. Its evidence is actual
+        // observed block progress or increasing controller damage, never a cleared CLICK_LEFT request or the
+        // placement-only WORLD census. Its own yield and borrowed hands cannot age another starvation interval.
+        boolean claimsBreakBranch = toBreak.isPresent() && isSafeToCancel && miningPostureReady;
+        BetterBlockPos breakCandidate = toBreak.isPresent() ? toBreak.get().getA() : null;
+        float controllerDamage = claimsBreakBranch
+                ? princeps.getInputOverrideHandler().getBlockBreakHelper().breakingProgressAt(breakCandidate)
+                : Float.NaN;
+        if (breakBranchProgress.shouldYield(claimsBreakBranch, breakCandidate, controllerDamage)) {
             toBreak = Optional.empty();
+        }
+        if (breakBranchProgress.startedYield()) {
+            logMechanic("The break branch spent " + (BREAK_BRANCH_STARVATION_TICKS + 1)
+                    + " active ticks without observed block progress or increasing controller damage. Yielding for "
+                    + BREAK_BRANCH_YIELD_TICKS + " active ticks so placement/recovery can run.");
         }
         if (toBreak.isPresent() && isSafeToCancel && miningPostureReady) {
             // we'd like to pause to break this block
@@ -9687,6 +9668,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // Breaking is a build action too, and until now it left no record at all -- which is why "the bot kept
             // tearing pistons out again" could be watched on screen and not found in any file.
             blocksBroken++;
+            breakTargetObservation.claim(ctx.world(), pos, breakState);
             BuildTrace.cell(buildTick, "BREAK", pos.x, pos.y, pos.z, "had=" + blockName(breakState));
             boolean snakeOwnedTarget = snakeHead != null
                     && (pos.equals(snakeHead) || pos.equals(snakeCleanupTarget));
@@ -13334,11 +13316,18 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         resetPlacementTracking();
     }
 
+    /** Shared by new-job and teardown reset, including replacement of a paused job. */
+    void resetBreakBranchTracking() {
+        breakBranchProgress.clear();
+        breakTargetObservation.clear();
+    }
+
     /** Clears per-build placement/recovery/deferral tracking. Called from BOTH lifecycle
      *  entry points — {@link #onLostControl()} (teardown) and {@link #build(String, ISchematic, Vec3i)} (new job) —
      *  because a re-issued build does not always pass through onLostControl() first. Keep this the single source
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
+        resetBreakBranchTracking();
         navigationScaffolds.clear();
         excavationFluidPlugs.clear();
         excavationActiveClock.clear();

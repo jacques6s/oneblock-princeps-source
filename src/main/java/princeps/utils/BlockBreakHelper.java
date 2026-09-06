@@ -149,6 +149,16 @@ public final class BlockBreakHelper {
                 && !ctx.world().getBlockState(active).isAir();
     }
 
+    /** Actual controller damage for this selected target; the caller must compare consecutive samples. */
+    public float breakingProgressAt(BlockPos target) {
+        if (target == null || !isBreakingBlock() || ctx.objectMouseOver().getType() != HitResult.Type.BLOCK
+                || !ctx.world().hasChunkAt(target)) {
+            return Float.NaN;
+        }
+        IPlayerControllerMP controller = (IPlayerControllerMP) ctx.minecraft().gameMode;
+        return target.equals(controller.getCurrentBlock()) ? controller.getDestroyProgress() : Float.NaN;
+    }
+
     /** Mark the next helper tick as a replayable V3 break tick (no sampled sight delay or cooldown variance). */
     public void requestDeterministicBreak() {
         this.deterministicThisTick = true;
