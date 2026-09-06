@@ -1,6 +1,8 @@
 package princeps.process;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.world.level.block.LiquidBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import princeps.api.utils.BetterBlockPos;
 
@@ -48,6 +50,30 @@ final class ExcavationRepairPolicy {
 
     static boolean navigationMayMine(boolean ordinaryExcavation, BlockState desired) {
         return !ordinaryExcavation || (desired != null && desired.isAir());
+    }
+
+    static boolean ordinaryBreakAllowed(boolean ordinaryExcavation, boolean activeAirCell, boolean areaToolHeld) {
+        return !ordinaryExcavation || (activeAirCell && !areaToolHeld);
+    }
+
+    /** One already-clear cardinal step through water. Mining, vertical entry and dry travel keep their own paths. */
+    static BetterBlockPos ordinaryWetStep(Bounds bounds, BetterBlockPos feet, BlockPos work,
+                                          Function<BlockPos, BlockState> read) {
+        if (!bounds.ordinary() || !bounds.inside(feet.x, feet.y, feet.z)
+                || feet.y < bounds.bandFloor() || feet.y > bounds.bandTop()
+                || !bounds.inside(work.getX(), work.getY(), work.getZ())
+                || work.getY() < bounds.bandFloor() || work.getY() > bounds.bandTop()) return null;
+        BetterBlockPos approach = bounds.approach(feet, work);
+        if (approach == null || approach.equals(feet)) return null;
+        BetterBlockPos step = BuilderProcess.nextSnakeWaypoint(feet, approach);
+        boolean water = false;
+        for (BlockPos body : new BlockPos[] {feet, feet.above(), step, step.above()}) {
+            BlockState state = read.apply(body);
+            if (state.isAir()) continue;
+            if (!(state.getBlock() instanceof LiquidBlock) || !state.getFluidState().is(FluidTags.WATER)) return null;
+            water = true;
+        }
+        return water ? step : null;
     }
 
     static Kind repair(Bounds bounds, int x, int y, int z, BlockState state, boolean replaceable,

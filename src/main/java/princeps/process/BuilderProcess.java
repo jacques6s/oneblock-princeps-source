@@ -4774,6 +4774,43 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return excavating && effectiveAreaBreakSize() == 1;
     }
 
+    /** Last-moment guard shared by builder and navigation inputs; no ordinary cut may execute with the Shard. */
+    public boolean ordinaryExcavationBreakAllowed(BlockPos target) {
+        if (!isActive() || !ordinaryExcavation()) return true;
+        if (paused || abortPending != Ending.RUNNING || !insideSnakeVolume(target.getX(), target.getY(), target.getZ())) {
+            return false;
+        }
+        BlockState state = ctx.world().getBlockState(target);
+        int x = target.getX() - origin.getX(), y = target.getY() - origin.getY(), z = target.getZ() - origin.getZ();
+        BlockState desired = schematic.inSchematic(x, y, z, state)
+                ? schematic.desiredState(x, y, z, state, approxPlaceable) : null;
+        return ExcavationRepairPolicy.ordinaryBreakAllowed(true, desired != null && desired.isAir(),
+                snakeIsAreaTool(ctx.player().getMainHandItem()));
+    }
+
+    private PathingCommand ordinaryWetApproachCommand(BuilderCalculationContext bcc, boolean safeToCancel) {
+        if (!ordinaryExcavation() || !safeToCancel || incorrectPositions == null
+                || !(ctx.player().onGround() || ctx.player().isInWater())) return null;
+        ExcavationRepairPolicy.Bounds bounds = excavationRepairBounds();
+        if (bounds == null) return null;
+        BetterBlockPos feet = ctx.playerFeet();
+        BetterBlockPos bestStep = null;
+        double bestDistance = Double.POSITIVE_INFINITY;
+        for (BetterBlockPos work : incorrectPositions) {
+            BlockState state = bcc.bsi.get0(work);
+            BlockState desired = bcc.getSchematic(work.x, work.y, work.z, state);
+            if (desired == null || !desired.isAir() || state.isAir() || isCellParked(work.x, work.y, work.z)
+                    || (snakeTreatAsFluid(state, true) && !snakeSourceReadyForPlug(state, true))) continue;
+            BetterBlockPos step = ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work,
+                    pos -> bcc.bsi.get0(pos.getX(), pos.getY(), pos.getZ()));
+            if (step != null && work.distSqr(feet) < bestDistance) {
+                bestStep = step;
+                bestDistance = work.distSqr(feet);
+            }
+        }
+        return bestStep == null ? null : excavationLevelPathingCommand(feet, bestStep);
+    }
+
     private ExcavationRepairPolicy.Bounds excavationRepairBounds() {
         ISchematic full = realSchematic == null ? schematic : realSchematic;
         boolean ordinary = ordinaryExcavation();
@@ -9288,7 +9325,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (buildTick % 40 == 0) { logMechanic("PROBE B tick=" + buildTick + " reached the break call"); }
         Optional<Tuple<BetterBlockPos, Rotation>> toBreak = toBreakNearPlayer(bcc);
         boolean miningPostureReady = snakeMiningPostureReady(ctx.player().onGround(), ctx.player().isInWater(),
-                excavating && snakeCleanupActive && !snakeCleanupWithAreaTool, snakeEntering);
+                ordinaryExcavation() || (excavating && snakeCleanupActive && !snakeCleanupWithAreaTool), snakeEntering);
         if (buildTick % 40 == 0) { logMechanic("PROBE B2 tick=" + buildTick + " toBreak=" + toBreak.isPresent()
                 + " safeToCancel=" + isSafeToCancel + " onGround=" + ctx.player().onGround()
                 + " yieldUntil=" + breakBranchYieldUntilTick + " idle=" + breakBranchIdleTicks); }
@@ -9380,7 +9417,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 toolReady = snakeToolReady(breakState, singleBlockSwing);
             } else {
                 MovementHelper.switchToBestToolFor(ctx, breakState);
-                toolReady = true;
+                toolReady = !ordinaryExcavation() || !snakeIsAreaTool(ctx.player().getMainHandItem());
             }
             if (ctx.player().isCrouching() && !snakeOwnsTheStance()) {
                 // really horrible bug where a block is visible for breaking while sneaking but not otherwise
@@ -9396,7 +9433,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     || (snakeCleanupWithAreaTool && pos.equals(snakeCleanupTarget)));
             boolean breakAimReady = exactSnakeFace
                     ? snakeLiveHitMatches(pos)
-                    : excavating && snakeOwnedTarget ? snakeMiningHitMatches(ctx.objectMouseOver(), pos, null)
+                    : excavating && (snakeOwnedTarget || ordinaryExcavation()) ? snakeMiningHitMatches(ctx.objectMouseOver(), pos, null)
                     : ctx.isLookingAt(pos) || ctx.playerRotations().isReallyCloseTo(rot);
             // DIAGNOSTIC (added while investigating the horizontal-head stall).
             if (snakeOwnedTarget) {
@@ -10157,6 +10194,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
 
+        PathingCommand wetApproach = ordinaryWetApproachCommand(bcc, isSafeToCancel);
+        if (wetApproach != null) return wetApproach;
         Goal goal = assemble(bcc, approxPlaceable.subList(0, 9));
         if (goal == null) {
             goal = assemble(bcc, approxPlaceable, true); // we're far away, so assume that we have our whole inventory to recalculate placeable properly

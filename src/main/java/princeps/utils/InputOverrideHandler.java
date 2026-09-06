@@ -26,8 +26,10 @@ import princeps.api.utils.input.Input;
 import princeps.behavior.Behavior;
 import princeps.behavior.SurvivalBehavior;
 import princeps.pathing.movement.MovementHelper;
+import princeps.process.BuilderProcess;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
+import net.minecraft.world.phys.BlockHitResult;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -170,7 +172,17 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
         // The two are made mutually exclusive here so it can never happen, regardless of tick ordering.
         final SurvivalBehavior survival = princeps.getSurvivalBehavior();
         final boolean consuming = survival != null && survival.isConsuming();
-        blockBreakHelper.tick(isInputForcedDown(Input.CLICK_LEFT) && !consuming);
+        boolean requestedBreak = isInputForcedDown(Input.CLICK_LEFT) && !consuming;
+        // Direct builder clicks and navigation's obstacle/stuck clicks share this actuator. Recheck the held
+        // item and current AIR mask here so a later hotbar change or stale route cannot widen a one-block cut.
+        if (requestedBreak && princeps.getBuilderProcess() instanceof BuilderProcess builder
+                && ctx.objectMouseOver() instanceof BlockHitResult hit
+                && !builder.ordinaryExcavationBreakAllowed(hit.getBlockPos())) {
+            requestedBreak = false;
+            setInputForceState(Input.CLICK_LEFT, false);
+            blockBreakHelper.stopBreakingBlock();
+        }
+        blockBreakHelper.tick(requestedBreak);
         blockPlaceHelper.tick(isInputForcedDown(Input.CLICK_RIGHT) && !consuming);
 
         // Keep the character on the bot-owned input (which reads only forced inputs, never the keyboard)
