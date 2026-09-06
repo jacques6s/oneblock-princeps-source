@@ -5372,10 +5372,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /**
      * Selects the tool that belongs to the snake's current action and waits one tick after a slot change.
      *
-     * <p>Full slices require the named Shard pickaxe. A non-centre leftover prefers any other pickaxe on the hotbar,
-     * because the special tool would centre a second 3x3 footprint on that edge cell. If no ordinary pickaxe exists,
-     * the requested fallback is the Shard itself. Waiting after the change makes the selected-slot packet precede the
-     * mining input instead of relying on client event order.
+     * <p>Full slices require the named Shard pickaxe. An excavation leftover selects the fastest ordinary mining
+     * tool; construction retains its ordinary-pickaxe choice. The ordinary selector excludes the Shard, whose
+     * footprint needs the separate wide-action policy. Waiting after a change makes the selected-slot packet
+     * precede the mining input instead of relying on client event order.
      */
     private boolean snakeToolReady(BlockState targetState, boolean cleanup) {
         // AN EAT OR A REPAIR OWNS THE HANDS, AND THIS MUST NOT ARGUE WITH IT.
@@ -5397,9 +5397,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (wanted < 0 && cleanup && excavating
                 && (snakeEntering || snakeSingleBlockFallback || snakeRequiresOrdinaryTool)) {
             abortBuild(Ending.MATERIALS_MISSING,
-                    "AutoDig needs an ordinary pickaxe for this single-block cut",
+                    "AutoDig needs an ordinary mining tool for this single-block cut",
                     java.util.List.of("This cut needs an individual block target and an ordinary mining tool.",
-                            "Put an ordinary pickaxe on the hotbar to continue."));
+                            "Put an ordinary pickaxe, axe, shovel, or hoe on the hotbar to continue."));
             return false;
         }
         if (wanted < 0 && cleanup) {
@@ -5471,6 +5471,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private int snakeOrdinaryPickSlot(BlockState targetState) {
+        if (excavating) {
+            return ordinaryMiningToolSlot(ctx.player().getInventory().getNonEquipmentItems(), targetState,
+                    Princeps.settings().itemSaver.value, Princeps.settings().itemSaverThreshold.value);
+        }
         int best = -1;
         double bestSpeed = Double.NEGATIVE_INFINITY;
         for (int slot = 0; slot < 9; slot++) {
@@ -5478,6 +5482,29 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (stack.isEmpty() || !stack.is(ItemTags.PICKAXES) || snakeIsAreaTool(stack)) {
                 continue;
             }
+            double speed = ToolSet.calculateSpeedVsBlock(stack, targetState);
+            if (speed > bestSpeed) {
+                best = slot;
+                bestSpeed = speed;
+            }
+        }
+        return best;
+    }
+
+    /** The single-block excavation action needs the fastest eligible ordinary tool, not always a pickaxe. */
+    static int ordinaryMiningToolSlot(List<ItemStack> inventory, BlockState targetState,
+                                     boolean itemSaver, int itemSaverThreshold) {
+        int best = -1;
+        double bestSpeed = Double.NEGATIVE_INFINITY;
+        for (int slot = 0; slot < Math.min(9, inventory.size()); slot++) {
+            ItemStack stack = inventory.get(slot);
+            if (stack.isEmpty() || AreaTool.is(stack)
+                    || !(stack.is(ItemTags.PICKAXES) || stack.is(ItemTags.AXES)
+                        || stack.is(ItemTags.SHOVELS) || stack.is(ItemTags.HOES))) continue;
+            // Match the ordinary navigation chooser's wear rule. Inventory ownership and the slot-packet wait
+            // are still enforced by snakeToolReady; this selector never changes the held item itself.
+            if (itemSaver && stack.getMaxDamage() > 1
+                    && stack.getDamageValue() + itemSaverThreshold >= stack.getMaxDamage()) continue;
             double speed = ToolSet.calculateSpeedVsBlock(stack, targetState);
             if (speed > bestSpeed) {
                 best = slot;
