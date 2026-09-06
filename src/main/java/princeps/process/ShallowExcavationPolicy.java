@@ -30,7 +30,7 @@ final class ShallowExcavationPolicy {
 
     /** A failed search is a safe blocked result, not permission to excavate a fixed roof outside the job. */
     static boolean stopAfterFailedRoute(boolean shallow, boolean failed, boolean completedThisTick,
-                                         boolean coveredWorkRemains) {
-        return shallow && failed && !completedThisTick && coveredWorkRemains;
+                                         boolean coveredWorkRemains, boolean wetApproachAvailable) {
+        return shallow && failed && !completedThisTick && coveredWorkRemains && !wetApproachAvailable;
     }
 }

@@ -10017,6 +10017,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return recovery;
         }
 
+        // A failed generic search is not a verdict on the separately licensed, already-clear water step.
+        // Derive that existing approach once before judging a one-high remainder, then execute this same command.
+        boolean shallowSurface = shallowExcavation();
+        PathingCommand wetApproach = shallowSurface ? ordinaryWetApproachCommand(bcc, isSafeToCancel) : null;
+
         // Reaching here means no build action fired. Navigation toward an unsatisfied goal is legitimate progress:
         // never punish a distant glass cell merely because the walk lasts longer than six seconds.
         if (recursions == 0 && incorrectPositions != null && !incorrectPositions.isEmpty()) {
@@ -10036,8 +10041,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     && !ctx.player().isUsingItem()
                     && !(princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory());
             BetterBlockPos covered = shallowRouteVerdictReady ? shallowCoveredWork(bcc) : null;
-            if (ShallowExcavationPolicy.stopAfterFailedRoute(shallowExcavation(), calcFailed,
-                    completedChanged, covered != null)) {
+            if (ShallowExcavationPolicy.stopAfterFailedRoute(shallowSurface, calcFailed,
+                    completedChanged, covered != null, wetApproach != null)) {
                 abortBuild(Ending.LAYER_UNBUILDABLE, "AutoDig cannot reach the remaining one-block-high area",
                         java.util.List.of("A fixed roof blocks standing headroom above " + covered.toShortString() + ".",
                                 "No safe route was found. The remaining cells are unfinished and the fixed roof stays protected."));
@@ -10259,7 +10264,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
 
-        PathingCommand wetApproach = ordinaryWetApproachCommand(bcc, isSafeToCancel);
+        if (!shallowSurface) wetApproach = ordinaryWetApproachCommand(bcc, isSafeToCancel);
         if (wetApproach != null) return wetApproach;
         Goal goal = assemble(bcc, approxPlaceable.subList(0, 9));
         if (goal == null) {
