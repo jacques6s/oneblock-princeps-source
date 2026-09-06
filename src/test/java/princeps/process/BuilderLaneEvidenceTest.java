@@ -16,10 +16,15 @@ import org.junit.BeforeClass;
 import org.junit.Test;
 import princeps.api.pathing.goals.Goal;
 import princeps.api.pathing.goals.GoalBlock;
+import princeps.api.pathing.goals.GoalComposite;
+import princeps.api.process.PathingCommandType;
 import princeps.api.schematic.FillSchematic;
 import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.IPlayerContext;
 import princeps.pathing.calc.PathProbe;
+import princeps.process.builder.BuilderProgressWatch;
+import princeps.process.builder.PlacementTargetLock;
+import princeps.utils.PathingCommandContext;
 import sun.misc.Unsafe;
 
 import java.lang.reflect.Constructor;
@@ -39,6 +44,7 @@ import static org.junit.Assert.*;
 public class BuilderLaneEvidenceTest {
     private static Unsafe allocator;
     private static final BetterBlockPos TARGET = new BetterBlockPos(2, 2, 2);
+    private static final BetterBlockPos STANCE = TARGET.east();
     private static final Class<?> QUESTION = java.util.Arrays.stream(BuilderProcess.class.getDeclaredClasses())
             .filter(type -> type.getSimpleName().equals("LaneQuestion")).findFirst().orElseThrow();
 
@@ -145,6 +151,132 @@ public class BuilderLaneEvidenceTest {
         assertTrue(get(f.builder, "laneEscalatedCell") == null); assertTrue(get(f.builder, "electedCell") == null);
     }
 
+    @Test public void actualPlannedRecoveryReturnConsumesFreshNegativeAInsteadOfStarvingTheLaneDriver() throws Exception {
+        Fixture f = recoveryFixture(BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        f.answer(PathProbe.Outcome.NONE, true);
+        PathingCommandContext command = f.recover();
+        assertTrue("the actual early recovery return must consume the completed A question",
+                f.question == get(f.builder, "laneAProof"));
+        assertEquals(BuilderProcess.Lane.B_HELPERS_ALLOWED, get(command.desiredCalcContext, "lane"));
+        assertTrue(new GoalBlock(STANCE).equals(command.goal));
+        assertEquals(1, get(get(f.builder, "placementTargetLock"), "routeTicks"));
+    }
+
+    @Test public void actualPlannedRecoveryReturnConsumesCompleteBAndRetainsTheAcceptedLaneAfterOwnLanding() throws Exception {
+        Fixture f = recoveryFixture(BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        set(f.builder, "laneAProof", f.question); set(f.builder, "laneEscalatedCell", TARGET);
+        set(f.builder, "laneProbeLane", BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        f.answer(PathProbe.Outcome.COMPLETE, false);
+        PathingCommandContext command = f.recover();
+        assertEquals(true, get(f.builder, "laneBAnswered"));
+        set(f.builder, "confirmedProgressRevision", 1L);
+        f.world.states.put(TARGET.west(2).asLong(), Blocks.DIRT.defaultBlockState());
+        command = f.recover();
+        assertTrue(f.question == get(f.builder, "laneAProof"));
+        assertEquals(BuilderProcess.Lane.B_HELPERS_ALLOWED, get(command.desiredCalcContext, "lane"));
+    }
+
+    @Test public void actualPlannedRecoveryReturnRejectsProofForADifferentStance() throws Exception {
+        Fixture f = recoveryFixture(BuilderProcess.Lane.A_NO_PLACING);
+        set(f.builder, "laneAProof", f.question); set(f.builder, "laneEscalatedCell", TARGET);
+        planRecovery(f, STANCE.east());
+        PathingCommandContext command = f.recover();
+        assertTrue(get(f.builder, "laneAProof") == null);
+        assertTrue(get(f.builder, "laneEscalatedCell") == null);
+        assertTrue(new GoalBlock(STANCE.east()).equals(command.goal));
+        assertEquals(BuilderProcess.Lane.A_NO_PLACING, get(command.desiredCalcContext, "lane"));
+    }
+
+    @Test public void actualPlannedRecoveryReturnRejectsStaleWorldNegativeAndPreservesUnknown() throws Exception {
+        for (boolean changedWorld : new boolean[]{false, true}) {
+            Fixture f = recoveryFixture(BuilderProcess.Lane.A_NO_PLACING);
+            f.answer(changedWorld ? PathProbe.Outcome.NONE : PathProbe.Outcome.ERROR, changedWorld);
+            if (changedWorld) set(f.builder, "confirmedProgressRevision", 1L);
+            PathingCommandContext command = f.recover();
+            assertTrue("the recovery route must service or discard the pending completion", get(f.builder, "laneQuestion") == null);
+            assertTrue(get(f.builder, "laneAProof") == null);
+            assertTrue(get(f.builder, "laneEscalatedCell") == null);
+            assertEquals(BuilderProcess.Lane.A_NO_PLACING, get(command.desiredCalcContext, "lane"));
+            assertTrue(((Map<?, ?>) get(f.builder, "parkedCells")).isEmpty());
+        }
+    }
+
+    @Test public void negativeACompleteBOwnHelperLandingAndExpandedCleanupStillReachTheActualRecoveryReturn() throws Exception {
+        Fixture f = recoveryFixture(BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        Goal initialRoute = new BuilderProcess.JankyGoalComposite(f.goal, new GoalComposite());
+        f.answer(PathProbe.Outcome.NONE, true);
+        finishRetainingWorkProof(f, initialRoute);
+        assertTrue(f.question == get(f.builder, "laneAProof"));
+
+        // The real driver starts its worker in the client. Deliver that worker's completion at the same request
+        // boundary here; do not replace the driver, target lock, goal equality or scaffold ledger with test logic.
+        set(f.builder, "laneQuestion", f.question); set(f.builder, "laneProbeLane", BuilderProcess.Lane.B_HELPERS_ALLOWED);
+        f.answer(PathProbe.Outcome.COMPLETE, false);
+        finishRetainingWorkProof(f, initialRoute);
+        assertEquals(true, get(f.builder, "laneBAnswered"));
+
+        BetterBlockPos helper = TARGET.west(2).below();
+        BuilderScaffoldLedger ledger = (BuilderScaffoldLedger) get(f.builder, "navigationScaffolds");
+        assertTrue(ledger.record(helper, Blocks.AIR.defaultBlockState(), Blocks.DIRT.defaultBlockState(), false, true, 1));
+        f.world.states.put(helper.asLong(), Blocks.DIRT.defaultBlockState());
+        assertTrue(ledger.serverChanged(helper, Blocks.DIRT.defaultBlockState()));
+        set(f.builder, "confirmedProgressRevision", 1L);
+        Goal expandedRoute = new BuilderProcess.JankyGoalComposite(f.goal,
+                new GoalComposite(new BuilderProcess.GoalBreak(helper)));
+        assertFalse(initialRoute.equals(expandedRoute));
+        PathingCommandContext routed = finishRetainingWorkProof(f, expandedRoute);
+        assertTrue(expandedRoute == routed.goal);
+        assertTrue(f.question == get(f.builder, "laneAProof"));
+        assertEquals(BuilderProcess.Lane.B_HELPERS_ALLOWED, get(routed.desiredCalcContext, "lane"));
+        PathingCommandContext recovery = f.recover();
+        assertTrue(new GoalBlock(STANCE).equals(recovery.goal));
+        assertTrue(f.question == get(f.builder, "laneAProof"));
+        assertEquals(BuilderProcess.Lane.B_HELPERS_ALLOWED, get(recovery.desiredCalcContext, "lane"));
+        assertEquals(1, get(get(f.builder, "placementTargetLock"), "routeTicks"));
+    }
+
+    @Test public void sameFallbackCannotTransferAnAcceptedLaneToDifferentWorkOrModel() throws Exception {
+        for (boolean changeModel : new boolean[]{false, true}) {
+            Fixture f = recoveryFixture(BuilderProcess.Lane.A_NO_PLACING);
+            set(f.builder, "laneAProof", f.question); set(f.builder, "laneEscalatedCell", TARGET);
+            if (changeModel) set(f.builder, "schematic", new FillSchematic(8, 8, 8, Blocks.STONE.defaultBlockState()));
+            else set(f.builder, "electedCell", TARGET.north());
+            f.recover();
+            assertTrue(get(f.builder, "laneAProof") == null);
+            assertTrue(get(f.builder, "laneEscalatedCell") == null);
+        }
+    }
+
+    private static Fixture recoveryFixture(BuilderProcess.Lane lane) throws Exception {
+        Fixture f = fixture(Blocks.AIR.defaultBlockState(), Blocks.SMOOTH_STONE.defaultBlockState(), new GoalBlock(STANCE));
+        set(f.context, "lane", lane);
+        set(f.builder, "committedPlaceTarget", TARGET);
+        set(f.builder, "progressWatch", new BuilderProgressWatch(1L, 2L, 0.1));
+        PlacementTargetLock<Object> lock = (PlacementTargetLock<Object>) get(f.builder, "placementTargetLock");
+        assertTrue(lock.acquire(TARGET.asLong(), new Object())); lock.startRecovery();
+        planRecovery(f, STANCE);
+        return f;
+    }
+
+    private static PathingCommandContext finishRetainingWorkProof(Fixture f, Goal routeGoal) throws Exception {
+        try {
+            return f.finish(routeGoal, f.goal);
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            // A wrongly revoked B proof tries to construct a fresh live A context. Assert the causal contract
+            // before allowing that headless constructor boundary to obscure a failure; unrelated exceptions rethrow.
+            assertTrue("the selected work proof must survive a route-only fallback change",
+                    f.question == get(f.builder, "laneAProof"));
+            throw failure;
+        }
+    }
+
+    private static void planRecovery(Fixture f, BetterBlockPos stance) throws Exception {
+        PlacementTargetLock<Object> lock = (PlacementTargetLock<Object>) get(f.builder, "placementTargetLock");
+        set(f.builder, "plannedPlacementStance", stance);
+        long dx = f.feet[0].x - stance.x, dy = f.feet[0].y - stance.y, dz = f.feet[0].z - stance.z;
+        lock.planStance(stance.asLong(), dx * dx + dy * dy + dz * dz);
+    }
+
     private record Fixture(BuilderProcess builder, BuilderProcess.BuilderCalculationContext context,
                            TestLevel world, BetterBlockPos[] feet, Goal goal, PathProbe probe, Object question) {
         boolean current(boolean pending) throws Exception {
@@ -158,13 +290,26 @@ public class BuilderLaneEvidenceTest {
             ((AtomicReference<PathProbe.Result>) get(probe, "finished")).set(constructor.newInstance(outcome, null, 1L, exhausted));
         }
         void drive() throws Exception { invoke(builder, "driveLanesInShadow", new Class<?>[]{Goal.class}, goal); }
+        PathingCommandContext recover() throws Exception {
+            return (PathingCommandContext) invoke(builder, "placementRecoveryForPlannedStance",
+                    new Class<?>[]{BuilderProcess.BuilderCalculationContext.class, BetterBlockPos.class, boolean.class},
+                    context, feet[0], false);
+        }
+        PathingCommandContext finish(Goal routeGoal, Goal workGoal) throws Exception {
+            return (PathingCommandContext) invoke(builder, "finishBuilderRoute",
+                    new Class<?>[]{Goal.class, Goal.class, PathingCommandType.class, BuilderProcess.BuilderCalculationContext.class},
+                    routeGoal, workGoal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, context);
+        }
     }
 
     private static Fixture fixture() throws Exception {
+        return fixture(Blocks.DIRT.defaultBlockState(), Blocks.AIR.defaultBlockState(), new QuietGoal(TARGET));
+    }
+    private static Fixture fixture(BlockState current, BlockState desired, Goal goal) throws Exception {
         BuilderProcess builder = allocate(BuilderProcess.class);
         set(builder, "princeps", allocate(princeps.Princeps.class));
         TestLevel world = allocate(TestLevel.class); world.states = new HashMap<>();
-        world.states.put(TARGET.asLong(), Blocks.DIRT.defaultBlockState());
+        world.states.put(TARGET.asLong(), current);
         BetterBlockPos[] feet = {TARGET.above(3)};
         IPlayerContext player = (IPlayerContext) Proxy.newProxyInstance(IPlayerContext.class.getClassLoader(),
                 new Class<?>[]{IPlayerContext.class}, (proxy, method, args) -> switch (method.getName()) {
@@ -173,10 +318,10 @@ public class BuilderLaneEvidenceTest {
                     default -> throw new AssertionError("unexpected live dependency " + method.getName());
                 });
         set(builder, "ctx", player);
-        var model = new FillSchematic(8, 8, 8, Blocks.AIR.defaultBlockState());
-        List<BlockState> inventory = Collections.nCopies(9, Blocks.AIR.defaultBlockState());
+        var model = new FillSchematic(8, 8, 8, desired);
+        List<BlockState> inventory = Collections.nCopies(9, desired);
         set(builder, "schematic", model); set(builder, "origin", BlockPos.ZERO); set(builder, "approxPlaceable", inventory);
-        set(builder, "electedCell", TARGET); Goal goal = new QuietGoal(TARGET);
+        set(builder, "electedCell", TARGET);
         set(builder, "electedGoal", goal); set(builder, "parkedCells", new LinkedHashMap<>());
         set(builder, "activeCells", new java.util.HashSet<>(List.of(TARGET)));
         set(builder, "placementTargetLock", new princeps.process.builder.PlacementTargetLock<>(20, 20, 60));
@@ -187,7 +332,7 @@ public class BuilderLaneEvidenceTest {
         set(context, "this$0", builder); set(context, "world", world); set(context, "schematic", model);
         set(context, "placeable", inventory);
         Constructor<?> constructor = QUESTION.getDeclaredConstructors()[0]; constructor.setAccessible(true);
-        Object question = constructor.newInstance(TARGET, goal, goal, feet[0], context, Blocks.DIRT.defaultBlockState(), false, 0L, null, null);
+        Object question = constructor.newInstance(TARGET, goal, goal, feet[0], context, current, false, 0L, null, null);
         set(builder, "laneQuestion", question);
         return new Fixture(builder, context, world, feet, goal, probe, question);
     }

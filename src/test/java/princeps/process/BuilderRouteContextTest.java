@@ -165,8 +165,9 @@ public class BuilderRouteContextTest {
                 }
             }
         }
-        assertEquals(Set.of("observeBuilderProgress", "holdStillWithoutTearingUpTheRoute", "onTick"), callers);
-        assertEquals(3, calls);
+        assertEquals(Set.of("observeBuilderProgress", "holdStillWithoutTearingUpTheRoute", "onTick",
+                "placementRecoveryCommand"), callers);
+        assertEquals(4, calls);
     }
 
     private static Fixture fixture(BuilderProcess.Lane lane) throws Exception {

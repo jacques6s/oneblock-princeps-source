@@ -10698,32 +10698,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
         }
-        driveLanesInShadow(goal);
-        // DIE BAHN DIESES TICKS KANN SICH EINE ZEILE VORHER GEAENDERT HABEN, und dann darf nicht der alte
-        // Kontext hinausgehen. laneThisTick wird ganz oben im Tick aus dem damaligen Stand gelesen; die
-        // Eskalation faellt erst hier unten. Wer dazwischen nichts tut, schickt dem Router den Bahn-A-Kontext
-        // fuer eine Zelle, die seit einer Zeile unter Bahn B faehrt.
-        //
-        // DAS WAR DIE ZWEITE HAELFTE DES STILLSTANDS, und ohne sie war die erste wirkungslos: der Abbruch der
-        // laufenden Suche macht inProgress frei, und der Befehl aus DEMSELBEN Tick laeuft mit dem alten Kontext
-        // sofort wieder hinein. Im naechsten Tick steht die neue Suche schon, also greift die richtige Bahn erst,
-        // wenn diese abgelaufen ist -- volle failureTimeoutMS, bei den 60 tps des Bench 120 Ticks. Genau die
-        // 121 Ticks, die 43-mal je Lauf gemessen wurden, und sie ueberlebten den volatile-Fix unveraendert.
-        //
-        // Warum eine Bahn-A-Suche so lange braucht und die Sonde nicht: beide kommen zum selben Nein, aber die
-        // Sonde bricht bei 5000 Knoten ab (108 ms), waehrend die echte Suche kein Knotenbudget hat und bis zum
-        // Zeitablauf sucht -- gemessen 260423 Knoten fuer ein Ziel zwei Bloecke entfernt, das ohne Hilfsblock
-        // schlicht nicht erreichbar ist.
-        // Eigene Variable statt einer Zuweisung an bcc: das Feld wird weiter oben von einem Lambda gelesen und
-        // muss effektiv final bleiben. Betroffen ist ohnehin nur, was an den Router hinausgeht.
-        BuilderCalculationContext contextForTheRouter = bcc;
-        Lane laneNow = laneForCurrentCell(electedCell);
-        if (laneNow != laneThisTick) {
-            contextForTheRouter = new BuilderCalculationContext(laneNow);
-            scaffoldPassAllowed = laneNow == Lane.B_HELPERS_ALLOWED;
-        }
-        return new PathingCommandContext(goal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH,
-                contextForTheRouter);
+        return finishBuilderRoute(goal, electedGoal == null ? goal : electedGoal,
+                PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, bcc);
+    }
+
+    /** All new builder routes service the same target-bound probe, including early recovery returns.
+     * The work question excludes opportunistic cleanup fallbacks: reaching another helper is not a proof that
+     * the selected placement stance can be reached. The actual router still receives its full navigation goal. */
+    private PathingCommand finishBuilderRoute(Goal routeGoal, Goal workGoal, PathingCommandType type,
+                                             BuilderCalculationContext context) {
+        driveLanesInShadow(workGoal);
+        Lane lane = laneForCurrentCell(electedCell);
+        // Consuming A=NONE can change permissions in this very tick. Never dispatch the old A snapshot for B.
+        BuilderCalculationContext routeContext = context.lane == lane ? context : new BuilderCalculationContext(lane);
+        scaffoldPassAllowed = lane == Lane.B_HELPERS_ALLOWED;
+        return new PathingCommandContext(routeGoal, type, routeContext);
     }
 
     // ==========================================================================================================
@@ -10932,11 +10921,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 default -> 3;
             };
             laneOutcomes[base + slot]++;
-            BuildTrace.cell(buildTick, "LANE", answered.cell.x, answered.cell.y, answered.cell.z,
-                    (answeredLane == Lane.A_NO_PLACING ? "A" : "B") + "=" + answer.outcome
-                            + " positions=" + answer.positions + " ms=" + answer.millis
-                            + " negativeEvidence=" + answer.failedToReachGoal()
-                            + " probegoal=" + String.valueOf(answered.goal).replace(' ', '_'));
+            if (BuildTrace.isActive()) {
+                BuildTrace.cell(buildTick, "LANE", answered.cell.x, answered.cell.y, answered.cell.z,
+                        (answeredLane == Lane.A_NO_PLACING ? "A" : "B") + "=" + answer.outcome
+                                + " positions=" + answer.positions + " ms=" + answer.millis
+                                + " negativeEvidence=" + answer.failedToReachGoal()
+                                + " probegoal=" + String.valueOf(answered.goal).replace(' ', '_'));
+            }
             laneQuestion = null;
             laneProbeCell = null;
             if (answeredLane == Lane.A_NO_PLACING && answer.failedToReachGoal()) {
@@ -12916,7 +12907,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             placementCenterSettleTicks = 0;
             Goal hold = plannedPlacementStance == null
                     ? princeps.getPathingBehavior().getGoal() : new GoalBlock(plannedPlacementStance);
-            return new PathingCommandContext(hold, PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+            return continueCurrentRoute(hold, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
         }
         boolean horizontallyAdjacent = feet.y == target.y
                 && Math.abs(feet.x - target.x) + Math.abs(feet.z - target.z) == 1;
@@ -12950,6 +12941,73 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             placementTargetLock.planStance(positionKey(plannedPlacementStance), 0L);
             return centerInPlacementStance(plannedPlacementStance);
         }
+        PathingCommand plannedRoute = placementRecoveryForPlannedStance(bcc, feet, calcFailed);
+        if (plannedRoute != null) return plannedRoute;
+
+        List<BetterBlockPos> alternatives = placementStancesFor(target.x, target.y, target.z, desired, bcc,
+                1, true, placementTargetLock::mayTryStance);
+        if (alternatives.isEmpty()) {
+            // ...unless the reason is the bot's own body. Then "no stance works" is not a fact about the cell, and
+            // charging it a deferral is charging it for where the bot happened to stand. See the long note in
+            // searchForPlacables: on a one-block-thick structure the bot walks THROUGH the cells it must build, so this
+            // fires routinely, and six such deferrals retire a cell that was never unbuildable at all.
+            // A40, REVERTED: "if the bot is standing in the target, return without deferring -- stepping off is all it
+            // needs." It is not all it needs, and the reason is written down four hundred lines below in the note at
+            // the allowSameLevel fallback: with the cell NOT deferred it stays the nearest work, assemble keeps it in
+            // the goal, GoalAdjacent counts a cell the bot is standing on as reached, so nothing paths, the body never
+            // leaves, and the placement stays impossible. That is a fixpoint, and it is the one that froze run
+            // 20260802-232954 for 11070 ticks on 70,-59,122 with the eye provably inside the target.
+            //
+            // The deferral was doing load-bearing work here: taking the cell out of the running is what lets the goal
+            // move the bot somewhere else, which is what gets it off the cell. Measured, facings: 96/96 -> 57/96.
+            //
+            // The right fix is the one the owner named -- STEP OFF the cell and then evaluate -- which needs an actual
+            // move, not the absence of a penalty. Until that exists, the penalty is the cheaper of two evils.
+            // Six neighbour lookups decide how patient to be, and they cost nothing next to the stance search that
+            // just failed. An earlier version asked this by running that whole search a SECOND time without the
+            // already-tried filter, which answered a different and less useful question at many times the price.
+            // Counted here because walksStarted CANNOT see this. That counter sits below this early return, so it is
+            // only ever incremented once a stance has been chosen -- which means walk efficiency reports zero cost for
+            // exactly the failure mode that dominates a large schematic: a cell with nothing to click, walked to and
+            // then abandoned. Judging this builder by walks=/paidOff= alone was reading a metric blind to its own
+            // biggest expense.
+            stancelessAbandons++;
+            // THE VERDICT NOTE. The full search has just come back empty, so this is the moment the answer is known:
+            // note it against the face set that produced it, and the cell steps out of the running until a neighbour
+            // changes -- not until a timer runs down. Two kinds, because they need different follow-ups: with no face
+            // at all nothing can help but a new neighbour, while "faces exist and none of them works" is what the
+            // helper-block phase later has to solve.
+            recordCellVerdict(target.x, target.y, target.z,
+                    clickableFaceMask(target.x, target.y, target.z) == 0L
+                            ? VERDICT_NO_FACE : VERDICT_NO_STANCE);
+            String why = "all currently valid placement stances were exhausted -- "
+                    + stanceRejectionSummary(target.x, target.y, target.z, desired, bcc);
+            if (supportCouldStillArriveThisLayer(target, bcc)) {
+                deferCell(target, why, bcc);
+            } else {
+                deferCellStructural(target, "nothing in this layer can ever support it -- " + why, bcc);
+            }
+            return null;
+        }
+        plannedPlacementStance = alternatives.get(0);
+        placementCenteringTicks = 0;
+        placementCenterSettleTicks = 0;
+        long dx = feet.x - plannedPlacementStance.x;
+        long dy = feet.y - plannedPlacementStance.y;
+        long dz = feet.z - plannedPlacementStance.z;
+        placementTargetLock.planStance(positionKey(plannedPlacementStance),
+                dx * dx + dy * dy + dz * dz);
+        // A walk begins here: a concrete stance has been chosen and the bot is about to travel to it.
+        walksStarted++;
+        walkTargetKey = targetKey;
+        Goal stanceGoal = new GoalBlock(plannedPlacementStance);
+        return finishBuilderRoute(stanceGoal, stanceGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+    }
+
+    /** Continues the chosen recovery stance after the caller's material, ownership and safe-body checks. */
+    private PathingCommand placementRecoveryForPlannedStance(BuilderCalculationContext bcc,
+                                                            BetterBlockPos feet, boolean calcFailed) {
+        BetterBlockPos target = committedPlaceTarget;
         if (placementTargetLock.hasPlannedStance()) {
             if (plannedPlacementStance == null
                     || placementTargetLock.plannedStanceKey() != positionKey(plannedPlacementStance)) {
@@ -13011,7 +13069,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     PlacementTargetLock.RouteDecision decision =
                             placementTargetLock.routeTick(distanceSquared, distanceSquared == 0, progressWatch.advancedLastSample());
                     if (decision == PlacementTargetLock.RouteDecision.KEEP_MOVING) {
-                        return new PathingCommandContext(new GoalBlock(plannedPlacementStance),
+                        Goal stanceGoal = new GoalBlock(plannedPlacementStance);
+                        return finishBuilderRoute(stanceGoal, stanceGoal,
                                 PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
                     }
                     if (decision == PlacementTargetLock.RouteDecision.ARRIVED) {
@@ -13035,64 +13094,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
 
-        List<BetterBlockPos> alternatives = placementStancesFor(target.x, target.y, target.z, desired, bcc,
-                1, true, placementTargetLock::mayTryStance);
-        if (alternatives.isEmpty()) {
-            // ...unless the reason is the bot's own body. Then "no stance works" is not a fact about the cell, and
-            // charging it a deferral is charging it for where the bot happened to stand. See the long note in
-            // searchForPlacables: on a one-block-thick structure the bot walks THROUGH the cells it must build, so this
-            // fires routinely, and six such deferrals retire a cell that was never unbuildable at all.
-            // A40, REVERTED: "if the bot is standing in the target, return without deferring -- stepping off is all it
-            // needs." It is not all it needs, and the reason is written down four hundred lines below in the note at
-            // the allowSameLevel fallback: with the cell NOT deferred it stays the nearest work, assemble keeps it in
-            // the goal, GoalAdjacent counts a cell the bot is standing on as reached, so nothing paths, the body never
-            // leaves, and the placement stays impossible. That is a fixpoint, and it is the one that froze run
-            // 20260802-232954 for 11070 ticks on 70,-59,122 with the eye provably inside the target.
-            //
-            // The deferral was doing load-bearing work here: taking the cell out of the running is what lets the goal
-            // move the bot somewhere else, which is what gets it off the cell. Measured, facings: 96/96 -> 57/96.
-            //
-            // The right fix is the one the owner named -- STEP OFF the cell and then evaluate -- which needs an actual
-            // move, not the absence of a penalty. Until that exists, the penalty is the cheaper of two evils.
-            // Six neighbour lookups decide how patient to be, and they cost nothing next to the stance search that
-            // just failed. An earlier version asked this by running that whole search a SECOND time without the
-            // already-tried filter, which answered a different and less useful question at many times the price.
-            // Counted here because walksStarted CANNOT see this. That counter sits below this early return, so it is
-            // only ever incremented once a stance has been chosen -- which means walk efficiency reports zero cost for
-            // exactly the failure mode that dominates a large schematic: a cell with nothing to click, walked to and
-            // then abandoned. Judging this builder by walks=/paidOff= alone was reading a metric blind to its own
-            // biggest expense.
-            stancelessAbandons++;
-            // THE VERDICT NOTE. The full search has just come back empty, so this is the moment the answer is known:
-            // note it against the face set that produced it, and the cell steps out of the running until a neighbour
-            // changes -- not until a timer runs down. Two kinds, because they need different follow-ups: with no face
-            // at all nothing can help but a new neighbour, while "faces exist and none of them works" is what the
-            // helper-block phase later has to solve.
-            recordCellVerdict(target.x, target.y, target.z,
-                    clickableFaceMask(target.x, target.y, target.z) == 0L
-                            ? VERDICT_NO_FACE : VERDICT_NO_STANCE);
-            String why = "all currently valid placement stances were exhausted -- "
-                    + stanceRejectionSummary(target.x, target.y, target.z, desired, bcc);
-            if (supportCouldStillArriveThisLayer(target, bcc)) {
-                deferCell(target, why, bcc);
-            } else {
-                deferCellStructural(target, "nothing in this layer can ever support it -- " + why, bcc);
-            }
-            return null;
-        }
-        plannedPlacementStance = alternatives.get(0);
-        placementCenteringTicks = 0;
-        placementCenterSettleTicks = 0;
-        long dx = feet.x - plannedPlacementStance.x;
-        long dy = feet.y - plannedPlacementStance.y;
-        long dz = feet.z - plannedPlacementStance.z;
-        placementTargetLock.planStance(positionKey(plannedPlacementStance),
-                dx * dx + dy * dy + dz * dz);
-        // A walk begins here: a concrete stance has been chosen and the bot is about to travel to it.
-        walksStarted++;
-        walkTargetKey = targetKey;
-        return new PathingCommandContext(new GoalBlock(plannedPlacementStance),
-                PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+        return null;
     }
 
     /**
