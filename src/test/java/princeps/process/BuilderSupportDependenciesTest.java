@@ -94,12 +94,12 @@ public class BuilderSupportDependenciesTest {
         assertEquals(COST_INF, sign.cost(anchor), 0);
     }
 
-    @Test public void unrelatedStoneAndWrongNeighbourIdentityRetainNormalMiningCost() throws Exception {
+    @Test public void unrelatedStoneRemainsMineableButFutureDesiredNeighbourNeedsItsFoundation() throws Exception {
         Fixture f = fixture(door(false)); BlockPos unrelated = TARGET.east();
         f.world.states.put(unrelated.asLong(), Blocks.STONE.defaultBlockState());
         assertEquals(1, f.cost(unrelated), 0);
         f.world.states.put(TARGET.asLong(), Blocks.OAK_DOOR.defaultBlockState());
-        assertEquals(1, f.cost(FLOOR), 0);
+        assertEquals(COST_INF, f.cost(FLOOR), 0);
     }
 
     @Test public void alreadyUnsupportedTargetDoesNotInventANewDependency() throws Exception {
@@ -194,7 +194,7 @@ public class BuilderSupportDependenciesTest {
 
     @Test public void newDependentAfterPlanningIsRejectedByTheFreshExecutionCheck() throws Exception {
         Fixture f = fixture(door(false)); f.world.states.remove(TARGET.asLong());
-        assertEquals(1, f.cost(FLOOR), 0);
+        assertEquals("the desired door already needs this external foundation", COST_INF, f.cost(FLOOR), 0);
         f.world.states.put(TARGET.asLong(), door(true));
         assertFalse(f.owner.allowsSupportRemoval(FLOOR, f.blocks));
     }
@@ -334,9 +334,13 @@ public class BuilderSupportDependenciesTest {
         Fixture f = fixture(door(false));
         assertFalse(f.owner.allowsSupportRemoval(FLOOR,f.blocks));
         assertEquals(TARGET,get(f.owner,"lastSupportDependent"));
-        f.world.states.remove(TARGET.asLong()); assertTrue(f.owner.allowsSupportRemoval(FLOOR,f.blocks));
+        f.world.states.remove(TARGET.asLong());
+        f.world.states.remove(FLOOR.asLong()); // A missing desired target still needs an existing foundation.
+        assertTrue(f.owner.allowsSupportRemoval(FLOOR,f.blocks));
         assertNull(get(f.owner,"lastSupportRefusal")); assertNull(get(f.owner,"lastSupportDependent"));
-        f.world.states.put(TARGET.asLong(),door(false)); assertFalse(f.owner.allowsSupportRemoval(FLOOR,f.blocks));
+        f.world.states.put(TARGET.asLong(),door(false));
+        f.world.states.put(FLOOR.asLong(),Blocks.STONE.defaultBlockState());
+        assertFalse(f.owner.allowsSupportRemoval(FLOOR,f.blocks));
         assertEquals(FLOOR,get(f.owner,"lastSupportRefusal"));
     }
 

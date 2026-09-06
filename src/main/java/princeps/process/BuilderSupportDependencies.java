@@ -67,11 +67,12 @@ final class BuilderSupportDependencies {
     /** The caller may supply only this tick's explicitly selected primary repair, never a navigation target. */
     Decision removal(BlockPos removed, BlockState selectedRepairState) {
         // An ordinary builder context always captures a model. Excavation explicitly does not enter this policy.
-        if (!inside(removed) && !touchesModel(removed)) return ALLOWED;
+        boolean outsideModel = !inside(removed);
+        if (outsideModel && !touchesModel(removed)) return ALLOWED;
         View after = before.withBlock(removed, Blocks.AIR.defaultBlockState());
         try {
             BlockState primary = before.getBlockState(removed); // Unknown terrain is never cheap mining.
-            BlockState primaryWanted = inside(removed) ? desired(removed, primary) : null;
+            BlockState primaryWanted = outsideModel ? null : desired(removed, primary);
             // The working layer can hide an already-built cell. Its full-model material still belongs here:
             // neither a finite path penalty nor a possible drop proves that we can restore it afterwards.
             // Wrong properties retain their material too, except for the existing explicitly selected repair.
@@ -90,6 +91,13 @@ final class BuilderSupportDependencies {
                 // would accidentally authorize destroying an open door while it waits to be closed again.
                 if (wanted != null && !wanted.isAir() && current.is(wanted.getBlock())
                         && current.canSurvive(before, neighbour) && !current.canSurvive(after, neighbour)) {
+                    return new Decision(Reason.REQUIRED_SUPPORT, neighbour.immutable());
+                }
+                // Boundary terrain is also a prerequisite for a not-yet-built/repaired model neighbour.
+                // Reaching that cell must not consume the support it will need on arrival. Keep this future
+                // check outside the full model: an internal model-AIR helper is still temporary cleanup debt.
+                if (outsideModel && wanted != null && !wanted.isAir()
+                        && wanted.canSurvive(before, neighbour) && !wanted.canSurvive(after, neighbour)) {
                     return new Decision(Reason.REQUIRED_SUPPORT, neighbour.immutable());
                 }
             }

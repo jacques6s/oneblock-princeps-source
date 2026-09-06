@@ -194,7 +194,7 @@ public class BuilderModelRouteProtectionTest {
     }
 
     private static Route route() throws Exception { return route(fixture(Blocks.BLACK_STAINED_GLASS.defaultBlockState(), true)); }
-    private static Route route(Fixture base) throws Exception {
+    static Route route(Fixture base) throws Exception {
         PathingBehavior pathing = allocate(PathingBehavior.class); set(pathing, "ctx", base.ctx);
         PathingControlManager control = allocate(PathingControlManager.class);
         set(control, "inControlThisTick", base.owner);
@@ -222,9 +222,9 @@ public class BuilderModelRouteProtectionTest {
                                                               Vec3i origin, Object world, Object player) {
         return new BuilderProcess.ModelProtection(f.owner, model, origin, world, player, List.of());
     }
-    private record Route(Fixture base, PathingBehavior pathing, PathingControlManager control, InputOverrideHandler input,
+    record Route(Fixture base, PathingBehavior pathing, PathingControlManager control, InputOverrideHandler input,
                          PathExecutor executor, BuilderProcess.ModelProtection protection) { }
-    private static IPrincepsProcess foreign() {
+    static IPrincepsProcess foreign() {
         return (IPrincepsProcess) Proxy.newProxyInstance(IPrincepsProcess.class.getClassLoader(), new Class<?>[]{IPrincepsProcess.class},
                 (proxy, method, args) -> { throw new AssertionError("no foreign process actions"); });
     }
