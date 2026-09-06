@@ -19,6 +19,7 @@ package princeps.pathing.movement.movements;
 
 import princeps.Princeps;
 import princeps.api.IPrinceps;
+import princeps.api.pathing.PlacementLicence;
 import princeps.api.pathing.movement.MovementStatus;
 import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.Rotation;
@@ -36,6 +37,7 @@ import princeps.utils.BlockStateInterface;
 import com.google.common.collect.ImmutableSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
@@ -343,6 +345,7 @@ public class MovementTraverse extends Movement {
             switch (p) {
                 case READY_TO_PLACE: {
                     if (ctx.player().isCrouching() || Princeps.settings().assumeSafeWalk.value) {
+                        if (!armExcavationBridgeClick()) return state;
                         BuildTrace.intendWorldChange("traverse-bridge", dest.below().getX(), dest.below().getY(),
                                 dest.below().getZ(), "bridging toward " + dest.getX() + "," + dest.getY() + "," + dest.getZ());
                         state.setInput(Input.CLICK_RIGHT, true);
@@ -399,6 +402,7 @@ public class MovementTraverse extends Movement {
                         && ((BlockHitResult) liveHit).getBlockPos().equals(goalLook)
                         && backplaceFaceReachesTarget(goalLook, ((BlockHitResult) liveHit).getDirection(), dest.below());
                 if (exactBackplaceFace) {
+                    if (!armExcavationBridgeClick()) return state;
                     // The sneak backplace. It never passes attemptToPlaceABlock, so it carries neither the template
                     // guard nor the scaffold licence -- the same shape of leak MovementPillar had, and the reason
                     // the census is declared at the button rather than at the decision.
@@ -420,6 +424,27 @@ public class MovementTraverse extends Movement {
             MovementHelper.moveTowardsWithSlightRotation(ctx, state, dest);
             return state;
         }
+    }
+
+    private boolean armExcavationBridgeClick() {
+        BlockPos floor = dest.below();
+        PlacementLicence licence = MovementHelper.currentRouteLicence(princeps);
+        if (!licence.isExcavationBridge(floor)) return true; // ordinary builder movement keeps its existing lifecycle
+        var helper = ((Princeps) princeps).getInputOverrideHandler().getBlockPlaceHelper();
+        HitResult live = ctx.objectMouseOver();
+        if (helper.isThrottled() || !(ctx.player().getMainHandItem().getItem() instanceof BlockItem)
+                || live == null || live.getType() != HitResult.Type.BLOCK || !(live instanceof BlockHitResult hit)
+                || !backplaceFaceReachesTarget(hit.getBlockPos(), hit.getDirection(), floor)) return false;
+        helper.expectExcavationIntegrityPlacement(hit.getBlockPos(), hit.getDirection(), floor,
+                ctx.player().getInventory().getSelectedSlot(), ctx.player().getMainHandItem().getItem(),
+                () -> excavationBridgeStillOwned(licence, MovementHelper.currentRouteLicence(princeps), floor)
+                        && !MovementHelper.canWalkOn(ctx, floor));
+        return true;
+    }
+
+    static boolean excavationBridgeStillOwned(PlacementLicence planned, PlacementLicence current, BlockPos target) {
+        // A matching coordinate on a later route is not the original step's permission to replay its click.
+        return planned != null && planned == current && planned.isExcavationBridge(target);
     }
 
     static boolean backplaceMotionReady(boolean alreadyReady, boolean aimAligned) {

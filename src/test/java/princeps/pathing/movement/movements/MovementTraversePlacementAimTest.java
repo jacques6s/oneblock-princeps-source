@@ -6,6 +6,7 @@ package princeps.pathing.movement.movements;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import org.junit.Test;
+import princeps.api.pathing.PlacementLicence;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -28,5 +29,19 @@ public class MovementTraversePlacementAimTest {
         assertTrue(MovementTraverse.backplaceFaceReachesTarget(support, Direction.EAST, missingFloor));
         assertFalse(MovementTraverse.backplaceFaceReachesTarget(support, Direction.UP, missingFloor));
         assertFalse(MovementTraverse.backplaceFaceReachesTarget(support, Direction.EAST, support.west()));
+    }
+
+    @Test
+    public void excavationBridgeClickCannotSurviveCancellationOrReplayOnANewRoute() {
+        BlockPos floor = new BlockPos(10, -61, 30);
+        PlacementLicence original = PlacementLicence.excavationBridge(floor.asLong());
+        assertTrue(MovementTraverse.excavationBridgeStillOwned(original, original, floor));
+        assertFalse(MovementTraverse.excavationBridgeStillOwned(original, PlacementLicence.UNRESTRICTED, floor));
+        assertFalse(MovementTraverse.excavationBridgeStillOwned(original, PlacementLicence.NONE, floor));
+        assertFalse(MovementTraverse.excavationBridgeStillOwned(original,
+                PlacementLicence.excavationBridge(floor.asLong()), floor));
+        assertFalse(MovementTraverse.excavationBridgeStillOwned(original, original, floor.east()));
+        assertFalse(MovementTraverse.excavationBridgeStillOwned(PlacementLicence.UNRESTRICTED,
+                PlacementLicence.UNRESTRICTED, floor));
     }
 }

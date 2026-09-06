@@ -8,6 +8,11 @@ import org.junit.BeforeClass;
 import net.minecraft.SharedConstants;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.core.Direction;
+import net.minecraft.core.BlockPos;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.EmptyBlockGetter;
+import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
 import princeps.api.utils.BetterBlockPos;
 
 import static org.junit.Assert.assertEquals;
@@ -154,5 +159,140 @@ public class BuilderAutoDigIntegrityTest {
                 minX, maxX, minZ, maxZ, 8, 10, 13));
         assertFalse(BuilderProcess.snakeShellCoordinate(15, 14, 22,
                 minX, maxX, minZ, maxZ, 11, 13, 13));
+    }
+
+    @Test
+    public void waterloggedSolidsRemainMiningWorkRatherThanUnreplaceableFluidTargets() {
+        for (BlockState dry : new BlockState[] {
+                Blocks.OAK_STAIRS.defaultBlockState(), Blocks.OAK_SLAB.defaultBlockState(),
+                Blocks.OAK_FENCE.defaultBlockState(), Blocks.OAK_LEAVES.defaultBlockState()
+        }) {
+            BlockState wet = dry.setValue(BlockStateProperties.WATERLOGGED, true);
+            assertTrue("fixture must carry a water source: " + wet, wet.getFluidState().isSource());
+            assertFalse("excavation must mine the solid before sealing its water: " + wet,
+                    BuilderProcess.snakeTreatAsFluid(wet, true));
+            assertTrue("construction retains its existing fluid-pass classification: " + wet,
+                    BuilderProcess.snakeTreatAsFluid(wet, false));
+        }
+    }
+
+    @Test
+    public void underwaterPlantsAreBreakableEvenThoughTheyCarrySourceWater() {
+        for (BlockState plant : new BlockState[] {
+                Blocks.SEAGRASS.defaultBlockState(), Blocks.TALL_SEAGRASS.defaultBlockState(),
+                Blocks.KELP.defaultBlockState(), Blocks.KELP_PLANT.defaultBlockState()
+        }) {
+            assertTrue("fixture must carry source water: " + plant, plant.getFluidState().isSource());
+            assertFalse("the plant must not disappear from excavation work: " + plant,
+                    BuilderProcess.snakeTreatAsFluid(plant, true));
+        }
+    }
+
+    @Test
+    public void pureWaterLavaAndBubbleColumnsNeverBecomeMiningTargets() {
+        for (BlockState fluid : new BlockState[] {
+                Blocks.WATER.defaultBlockState(), Blocks.WATER.defaultBlockState()
+                        .setValue(BlockStateProperties.LEVEL, 4),
+                Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL, 8),
+                Blocks.LAVA.defaultBlockState(), Blocks.LAVA.defaultBlockState()
+                        .setValue(BlockStateProperties.LEVEL, 4),
+                Blocks.LAVA.defaultBlockState().setValue(BlockStateProperties.LEVEL, 8),
+                Blocks.BUBBLE_COLUMN.defaultBlockState()
+        }) {
+            assertTrue("fluid-only cells must be sealed or allowed to drain: " + fluid,
+                    BuilderProcess.snakeTreatAsFluid(fluid, true));
+        }
+        assertFalse(BuilderProcess.snakeTreatAsFluid(Blocks.STONE.defaultBlockState(), true));
+        assertFalse(BuilderProcess.snakeTreatAsFluid(Blocks.AIR.defaultBlockState(), true));
+    }
+
+    @Test
+    public void fallingFullHeightFlowWaitsForItsSourceInsteadOfDemandingAPlug() {
+        for (BlockState liquid : new BlockState[] {
+                Blocks.WATER.defaultBlockState(), Blocks.LAVA.defaultBlockState()
+        }) {
+            BlockState falling = liquid.setValue(BlockStateProperties.LEVEL, 8);
+            assertEquals("falling flow can have source-like height", 8, falling.getFluidState().getAmount());
+            assertFalse(falling.getFluidState().isSource());
+            assertTrue(BuilderProcess.snakeTreatAsFluid(falling, true));
+            assertFalse(BuilderProcess.snakeSourceReadyForPlug(falling, true));
+            assertTrue(BuilderProcess.snakeSourceReadyForPlug(liquid, true));
+        }
+    }
+
+    @Test
+    public void partialSliceCentresUseTheirRealOutlineInsteadOfAnAbsentCubeFaceCentre() {
+        for (BlockState state : new BlockState[] {
+                Blocks.OAK_SLAB.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED, true),
+                Blocks.OAK_STAIRS.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED, true),
+                Blocks.SEAGRASS.defaultBlockState(), Blocks.KELP.defaultBlockState(),
+                Blocks.OAK_SLAB.defaultBlockState(), Blocks.OAK_STAIRS.defaultBlockState()
+        }) {
+            assertTrue("partial head needs an ordinary outline ray: " + state,
+                    BuilderProcess.snakeHeadNeedsIndividualBreak(state, EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
+        }
+        for (BlockState state : new BlockState[] {
+                Blocks.STONE.defaultBlockState(), Blocks.OAK_LEAVES.defaultBlockState()
+                        .setValue(BlockStateProperties.WATERLOGGED, true),
+                Blocks.AIR.defaultBlockState(), Blocks.WATER.defaultBlockState(),
+                Blocks.LAVA.defaultBlockState(), Blocks.BUBBLE_COLUMN.defaultBlockState()
+        }) {
+            assertFalse("full cubes and fluid-only cells keep their existing action: " + state,
+                    BuilderProcess.snakeHeadNeedsIndividualBreak(state, EmptyBlockGetter.INSTANCE, BlockPos.ZERO));
+        }
+    }
+
+    @Test
+    public void breakingWaterloggedSolidExposesTheSourceThatCanThenBePlugged() {
+        BlockState wetSlab = Blocks.OAK_SLAB.defaultBlockState()
+                .setValue(BlockStateProperties.WATERLOGGED, true);
+        assertFalse("a solid cannot be replaced by a source plug before it is mined",
+                BuilderProcess.snakeSourceReadyForPlug(wetSlab, true));
+        assertTrue("the solid still belongs in the residual block census",
+                !wetSlab.isAir() && !BuilderProcess.snakeTreatAsFluid(wetSlab, true));
+
+        BlockState exposedWater = wetSlab.getFluidState().createLegacyBlock();
+        assertTrue(BuilderProcess.snakeSourceReadyForPlug(exposedWater, true));
+        assertTrue(BuilderProcess.snakeTreatAsFluid(exposedWater, true));
+        assertFalse(BuilderProcess.snakeSourceReadyForPlug(Blocks.COBBLESTONE.defaultBlockState(), true));
+        assertFalse(BuilderProcess.snakeTreatAsFluid(Blocks.COBBLESTONE.defaultBlockState(), true));
+    }
+
+    @Test
+    public void shellAuditNeverCertifiesWaterloggedExteriorOrFlowingFluidAsDry() {
+        BlockState wetWall = Blocks.OAK_STAIRS.defaultBlockState()
+                .setValue(BlockStateProperties.WATERLOGGED, true);
+        assertTrue(BuilderProcess.snakeShellRequiresSeal(wetWall, false));
+        assertTrue(BuilderProcess.snakeShellRequiresSeal(Blocks.WATER.defaultBlockState()
+                .setValue(BlockStateProperties.LEVEL, 4), true));
+        assertTrue(BuilderProcess.snakeShellRequiresSeal(Blocks.AIR.defaultBlockState(), true));
+        assertFalse(BuilderProcess.snakeShellRequiresSeal(Blocks.STONE.defaultBlockState(), false));
+    }
+
+    @Test
+    public void narrowExcavationsUseOrdinaryClearingWithoutAnOutOfBoundsSnakeCorridor() {
+        for (int narrow = 1; narrow <= 2; narrow++) {
+            assertEquals(1, BuilderProcess.effectiveAreaBreakSize(3, true, narrow, 30));
+            assertEquals(1, BuilderProcess.effectiveAreaBreakSize(3, true, 30, narrow));
+            assertEquals(1, BuilderProcess.effectiveAreaBreakSize(3, true, narrow, narrow));
+        }
+        assertEquals(3, BuilderProcess.effectiveAreaBreakSize(3, true, 3, 3));
+        assertEquals(3, BuilderProcess.effectiveAreaBreakSize(3, true, 20, 30));
+        assertEquals(3, BuilderProcess.effectiveAreaBreakSize(3, false, 1, 1));
+        assertEquals(1, BuilderProcess.effectiveAreaBreakSize(1, true, 30, 30));
+    }
+
+    @Test
+    public void ordinaryHeadSwingsMustUseTheSameBoundaryGuardAsCleanupSwings() {
+        for (Direction face : Direction.values()) {
+            assertTrue(BuilderProcess.snakeAreaFootprintInsideBounds(new BlockPos(1, 1, 1), face,
+                    0, 2, 0, 2, 0, 2));
+            assertFalse(BuilderProcess.snakeAreaFootprintInsideBounds(new BlockPos(0, 0, 0), face,
+                    0, 2, 0, 2, 0, 2));
+        }
+        assertFalse("two-high selection must not mine its roof", BuilderProcess.snakeAreaFootprintInsideBounds(
+                new BlockPos(1, 1, 1), Direction.NORTH, 0, 2, 0, 1, 0, 2));
+        assertFalse("one-high selection must not mine its floor", BuilderProcess.snakeAreaFootprintInsideBounds(
+                new BlockPos(1, 0, 1), Direction.NORTH, 0, 2, 0, 0, 0, 2));
     }
 }

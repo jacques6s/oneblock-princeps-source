@@ -72,4 +72,51 @@ public class BuilderScaffoldLedgerTest {
         assertTrue(ledger.awaitingServer());
         assertFalse(ledger.contains(OUTSIDE));
     }
+
+    @Test
+    public void excavationRoofSealCannotBecomeACompletionCleanupGoal() {
+        BuilderScaffoldLedger ledger = new BuilderScaffoldLedger();
+        boolean retained = BuilderProcess.retainExcavationIntegrity(true, true, false);
+        assertTrue(retained);
+        assertFalse(ledger.record(OUTSIDE, Blocks.AIR.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
+                retained, true, 10));
+        ledger.serverChanged(OUTSIDE, Blocks.COBBLESTONE.defaultBlockState());
+        assertFalse(ledger.awaitingServer());
+        assertTrue(ledger.positions().isEmpty());
+    }
+
+    @Test
+    public void internalExcavationPlugsAndOrdinaryBuilderScaffoldsStillOweCleanup() {
+        for (boolean[] purpose : new boolean[][]{{true, true, true}, {true, false, false}, {false, true, false}, {false, false, false}}) {
+            BuilderScaffoldLedger ledger = new BuilderScaffoldLedger();
+            boolean retained = BuilderProcess.retainExcavationIntegrity(purpose[0], purpose[1], purpose[2]);
+            assertFalse(retained);
+            assertTrue(ledger.record(OUTSIDE, Blocks.AIR.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
+                    retained, true, 10));
+            assertTrue(ledger.serverChanged(OUTSIDE, Blocks.COBBLESTONE.defaultBlockState()));
+            assertTrue(ledger.positions().contains(OUTSIDE));
+        }
+    }
+
+    @Test
+    public void normallyTraversedLastBandBridgeIsRetainedButInternalAndBuilderBridgesAreCleaned() {
+        BlockPos bottomFloor = new BlockPos(10, -61, 30);
+        var route = princeps.api.pathing.PlacementLicence.excavationBridge(bottomFloor.asLong());
+        BuilderScaffoldLedger exterior = new BuilderScaffoldLedger();
+        boolean retained = BuilderProcess.retainExcavationIntegrity(true, route.isExcavationBridge(bottomFloor), false);
+        assertTrue(retained);
+        assertFalse(exterior.record(bottomFloor, Blocks.AIR.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
+                retained, true, 10));
+        exterior.serverChanged(bottomFloor, Blocks.COBBLESTONE.defaultBlockState());
+        assertTrue(exterior.positions().isEmpty());
+        for (boolean[] context : new boolean[][] {{true, true}, {false, false}}) {
+            BuilderScaffoldLedger cleanup = new BuilderScaffoldLedger();
+            boolean keep = BuilderProcess.retainExcavationIntegrity(context[0], route.isExcavationBridge(bottomFloor), context[1]);
+            assertFalse(keep);
+            assertTrue(cleanup.record(bottomFloor, Blocks.AIR.defaultBlockState(), Blocks.COBBLESTONE.defaultBlockState(),
+                    keep, true, 10));
+            assertTrue(cleanup.serverChanged(bottomFloor, Blocks.COBBLESTONE.defaultBlockState()));
+            assertTrue(cleanup.positions().contains(bottomFloor));
+        }
+    }
 }

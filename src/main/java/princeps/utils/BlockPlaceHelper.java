@@ -181,7 +181,8 @@ public class BlockPlaceHelper {
             if (ctx.playerController().processRightClickBlock(ctx.player(), ctx.world(), hand, (BlockHitResult) mouseOver) == InteractionResult.SUCCESS) {
                 if (usedItem instanceof net.minecraft.world.item.BlockItem
                         && princeps.getBuilderProcess() instanceof princeps.process.BuilderProcess builder) {
-                    builder.recordNavigationScaffold(placedAt, beforePlacement, ctx.world().getBlockState(placedAt));
+                    builder.recordNavigationScaffold(placedAt, beforePlacement, ctx.world().getBlockState(placedAt),
+                            expected != null && expected.excavationIntegrity);
                 }
                 successfulBlockInteractions++;
                 // THE GROUND TRUTH OF THE WORLD-CHANGE CENSUS, and the only line in the codebase that is one.
@@ -261,6 +262,14 @@ public class BlockPlaceHelper {
                 support.immutable(), face, target.immutable(), selectedSlot, item, false, stillCorrect);
     }
 
+    /** A source, wall or floor repair, bound to the same exact click guard as every other placement. */
+    public void expectExcavationIntegrityPlacement(BlockPos support, Direction face, BlockPos target,
+                                                   int selectedSlot, Item item,
+                                                   java.util.function.BooleanSupplier stillCorrect) {
+        expectedPlacement = new ExpectedPlacement(
+                support.immutable(), face, target.immutable(), selectedSlot, item, false, stillCorrect, true);
+    }
+
     /** How many clicks were held back because the aim had drifted off the simulated orientation. */
     public long getOrientationHoldbacks() {
         return orientationHoldbacks;
@@ -293,6 +302,7 @@ public class BlockPlaceHelper {
         private final int selectedSlot;
         private final Item item;
         private final boolean deterministic;
+        private final boolean excavationIntegrity;
         /** Last-moment condition, evaluated just before the interaction. Null means unconditional. */
         private final java.util.function.BooleanSupplier stillCorrect;
 
@@ -304,6 +314,12 @@ public class BlockPlaceHelper {
         private ExpectedPlacement(BlockPos support, Direction face, BlockPos target,
                                   int selectedSlot, Item item, boolean deterministic,
                                   java.util.function.BooleanSupplier stillCorrect) {
+            this(support, face, target, selectedSlot, item, deterministic, stillCorrect, false);
+        }
+
+        private ExpectedPlacement(BlockPos support, Direction face, BlockPos target,
+                                  int selectedSlot, Item item, boolean deterministic,
+                                  java.util.function.BooleanSupplier stillCorrect, boolean excavationIntegrity) {
             this.support = support;
             this.face = face;
             this.target = target;
@@ -311,6 +327,7 @@ public class BlockPlaceHelper {
             this.item = item;
             this.deterministic = deterministic;
             this.stillCorrect = stillCorrect;
+            this.excavationIntegrity = excavationIntegrity;
         }
 
         private boolean matches(BlockHitResult hit, int actualSlot, Item actualItem) {

@@ -62,11 +62,17 @@ public final class PlacementLicence {
     /** Only meaningful when {@link #rule} is null: true = everything, false = nothing. */
     private final boolean blanket;
     private final String label;
+    private final long excavationBridgeKey;
 
     private PlacementLicence(LongPredicate rule, boolean blanket, String label) {
+        this(rule, blanket, label, Long.MIN_VALUE);
+    }
+
+    private PlacementLicence(LongPredicate rule, boolean blanket, String label, long excavationBridgeKey) {
         this.rule = rule;
         this.blanket = blanket;
         this.label = label;
+        this.excavationBridgeKey = excavationBridgeKey;
     }
 
     /**
@@ -84,6 +90,16 @@ public final class PlacementLicence {
             return NONE;
         }
         return new PlacementLicence(rule, false, label);
+    }
+
+    /** The one floor cell of an excavation step, including its repair purpose for the movement's actual click. */
+    public static PlacementLicence excavationBridge(long packed) {
+        return packed == Long.MIN_VALUE ? NONE
+                : new PlacementLicence(at -> at == packed, false, "next AutoDig floor cell", packed);
+    }
+
+    public boolean isExcavationBridge(BlockPos at) {
+        return at != null && excavationBridgeKey != Long.MIN_VALUE && at.asLong() == excavationBridgeKey;
     }
 
     public boolean permitsPlacement(int x, int y, int z) {
