@@ -52,6 +52,9 @@ final class SnakeCleanupWork {
                                 Function<Rotation, HitResult> ray,
                                 Supplier<Optional<Rotation>> findHit) {
         if (target == null) return Optional.empty();
+        Optional<Rotation> held = ExcavationMiningLook.retain(true, current, target, null, false,
+                ray, ignored -> false);
+        if (held.isPresent()) return held;
         if (hitPoint != null && eye.distanceToSqr(hitPoint) <= reach * reach) {
             Rotation toward = RotationUtils.calcRotationFromVec3d(eye, hitPoint, current);
             if (hitsTarget(ray.apply(toward))) return Optional.of(toward);

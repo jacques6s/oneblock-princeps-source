@@ -125,8 +125,9 @@ final class AutoDigLookProfile {
         settings.humanizedLookAimCurveYawScale.value = 1.0D;
         settings.humanizedLookAimCurvePitchScale.value = 1.0D;
         settings.humanizedWalkPitchNudgeStep.value = 180.0D;
-        settings.humanizedWalkPitchMin.value = 6.0D;
-        settings.humanizedWalkPitchMax.value = 12.0D;
+        // A flat excavation step inherits the current pitch; only a real break/place/fall target should re-aim it.
+        settings.humanizedWalkPitchMin.value = -90.0D;
+        settings.humanizedWalkPitchMax.value = 90.0D;
         settings.humanizedFallPitchMin.value = 12.0D;
         settings.humanizedFallPitchMax.value = 22.0D;
         settings.humanizedBreakSightDelay.value = true;

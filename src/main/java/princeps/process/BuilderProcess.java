@@ -5360,6 +5360,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             snakeRotWhy = "no head or no face";
             return Optional.empty();
         }
+        if (!snakeEntering) {
+            Optional<Rotation> current = excavationCurrentMiningLook(snakeHead, face,
+                    !snakeSingleBlockFallback && !snakeRequiresOrdinaryTool);
+            if (current.isPresent()) {
+                snakeRotWhy = "current ray already matches the selected face";
+                return current;
+            }
+        }
         Vec3 aim = new Vec3(snakeHead.x + 0.5D + face.getStepX() * 0.5D,
                 snakeHead.y + 0.5D + face.getStepY() * 0.5D,
                 snakeHead.z + 0.5D + face.getStepZ() * 0.5D);
@@ -5413,6 +5421,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (!tried.add(face) || !snakeAreaCutAllowed(target, face)) {
                 continue;
             }
+            Optional<Rotation> current = excavationCurrentMiningLook(target, face, true);
+            if (current.isPresent()) {
+                snakeCleanupAreaFace = face;
+                return current;
+            }
             Vec3 aim = new Vec3(target.x + 0.5D + face.getStepX() * 0.5D,
                     target.y + 0.5D + face.getStepY() * 0.5D,
                     target.z + 0.5D + face.getStepZ() * 0.5D);
@@ -5433,6 +5446,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
         return Optional.empty();
+    }
+
+    /** Target election and cut permissions stay with the builder; this only avoids unnecessary recentering. */
+    private Optional<Rotation> excavationCurrentMiningLook(BlockPos target, Direction requiredFace, boolean areaTool) {
+        if (!excavating) return Optional.empty();
+        double reach = ctx.playerController().getBlockReachDistance();
+        return ExcavationMiningLook.retain(true, ctx.playerRotations(), target, requiredFace, areaTool,
+                rotation -> RayTraceUtils.rayTraceTowards(ctx.player(),
+                        princeps.getLookBehavior().getAimProcessor().peekRotationExact(rotation), reach, false),
+                face -> snakeAreaCutAllowed(target, face));
     }
 
     private boolean snakeAreaFootprintInsideSelection(BlockPos target, Direction face) {
@@ -9631,7 +9654,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 resetBreakProgressTracking();
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
-            princeps.getLookBehavior().updateTarget(rot, true, AimIntent.BREAK); // break aim -> bell-curve arc
             // Breaking is a build action too, and until now it left no record at all -- which is why "the bot kept
             // tearing pistons out again" could be watched on screen and not found in any file.
             blocksBroken++;
@@ -9670,6 +9692,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             boolean exactSnakeFace = snakeHead != null && ((pos.equals(snakeHead) && !snakeCleanupActive)
                     || (snakeCleanupWithAreaTool && pos.equals(snakeCleanupTarget)));
+            if (excavating && !snakeEntering) {
+                Direction requiredFace = exactSnakeFace
+                        ? snakeCleanupWithAreaTool && pos.equals(snakeCleanupTarget)
+                                ? snakeCleanupAreaFace : snakeExpectedFace()
+                        : null;
+                rot = excavationCurrentMiningLook(pos, requiredFace,
+                        snakeIsAreaTool(ctx.player().getMainHandItem())).orElse(rot);
+            }
+            princeps.getLookBehavior().updateTarget(rot, true, AimIntent.BREAK);
             boolean breakAimReady = exactSnakeFace
                     ? snakeLiveHitMatches(pos)
                     : excavating && (snakeOwnedTarget || ordinaryExcavation()) ? snakeMiningHitMatches(ctx.objectMouseOver(), pos, null)
