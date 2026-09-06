@@ -10787,6 +10787,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         CleanupEscapeContext queryContext;
         boolean prefixProved, presentProved, removedProved, placed;
         int placementCenteringTicks, placementSettleTicks;
+        double placementFailedCenterDistanceSq = Double.POSITIVE_INFINITY;
         boolean placementAimReported;
         boolean placementMaterialWaitReported;
         boolean worldInvalidated;
@@ -11074,6 +11075,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             e.stance = e.stances.removeFirst();
             e.prefixProved = e.presentProved = e.removedProved = false;
             e.placementCenteringTicks = e.placementSettleTicks = 0;
+            e.placementFailedCenterDistanceSq = Double.POSITIVE_INFINITY;
             e.placementAimReported = false;
             e.placementMaterialWaitReported = false;
             CleanupEscapeContext context = new CleanupEscapeContext(e.bounds, null, null, null, null);
@@ -11142,22 +11144,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         && stack.getItem() == e.material.getBlock().asItem());
                 return cleanupHold(); // missing material is not evidence against the stance
             }
-            int[] rejected = new int[6];
-            Optional<Placement> placement = possibleToPlace(e.material, e.helper.x, e.helper.y, e.helper.z, ordinary, rejected);
-            if (placement.isPresent()) {
-                if (!e.placementAimReported) {
-                    e.placementAimReported = true;
-                    BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-AIM", e.owner.x, e.owner.y, e.owner.z,
-                            "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
-                                    + " pose=" + ctx.player().position() + " live placement derived; no server ACK yet");
-                }
-                cleanupPlacementClick(e, placement.get(), ordinary);
-            } else {
-                rejectCleanupPlacementStance(e, "centered live derivation failed: noSolid=" + rejected[0]
-                        + " cannotSurvive=" + rejected[1] + " obstructed=" + rejected[2] + " emptyShape=" + rejected[3]
-                        + " rayMiss=" + rejected[4] + " itemStateRejected=" + rejected[5]);
-            }
-            return cleanupHold();
+            return deriveCleanupPlacement(e, ordinary);
         }
         if (e.stage == CleanupStage.WAIT_PLACE) {
             if (cleanupEscapeDebt.state() == BuilderCleanupDebt.State.REMOVED) {
@@ -11209,6 +11196,46 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     "one helper removed; original owner retained; permanent feet=" + e.floor.toShortString());
             cleanupEscape = null;
             return cleanupHold();
+        }
+        return cleanupHold();
+    }
+
+    /** Derive the actual click before treating an approximately centered stance as unreachable. */
+    private PathingCommand deriveCleanupPlacement(CleanupEscape e, BuilderCalculationContext ordinary) {
+        int[] rejected = new int[6];
+        Optional<Placement> placement = possibleToPlace(e.material, e.helper.x, e.helper.y, e.helper.z, ordinary, rejected);
+        if (placement.isPresent()) {
+            if (!e.placementAimReported) {
+                e.placementAimReported = true;
+                BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-AIM", e.owner.x, e.owner.y, e.owner.z,
+                        "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                + " pose=" + ctx.player().position() + " live placement derived; no server ACK yet");
+            }
+            cleanupPlacementClick(e, placement.get(), ordinary);
+        } else {
+            double dx = ctx.player().position().x - (e.stance.x + 0.5D);
+            double dz = ctx.player().position().z - (e.stance.z + 0.5D);
+            double distanceSq = dx * dx + dz * dz;
+            // The ordinary 0.15 arrival tolerance is larger than a near-reach click's margin. It is not a
+            // negative click proof. Reuse one existing centering pulse and settle, then ask the real ray again.
+            // Each further pulse requires measured approach toward the center; repeated/worse poses stop here.
+            if (rejected[4] > 0 && rejected[1] == 0 && rejected[2] == 0 && rejected[3] == 0 && rejected[5] == 0
+                    && distanceSq > 0 && distanceSq < e.placementFailedCenterDistanceSq
+                    && ++e.placementCenteringTicks < STANCE_CENTERING_TICKS) {
+                if (!e.verifyWorld()) { e.block("world changed before click recentering"); return cleanupHold(); }
+                if (Double.isInfinite(e.placementFailedCenterDistanceSq)) {
+                    BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-RECENTER", e.owner.x, e.owner.y, e.owner.z,
+                            "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                    + " pose=" + ctx.player().position() + " live ray missed; approaching proved center");
+                }
+                e.placementFailedCenterDistanceSq = distanceSq;
+                e.placementSettleTicks = 0;
+                e.stage = CleanupStage.WALK_PREFIX;
+                return centerInPlacementStance(e.stance);
+            }
+            rejectCleanupPlacementStance(e, "centered live derivation failed: noSolid=" + rejected[0]
+                    + " cannotSurvive=" + rejected[1] + " obstructed=" + rejected[2] + " emptyShape=" + rejected[3]
+                    + " rayMiss=" + rejected[4] + " itemStateRejected=" + rejected[5]);
         }
         return cleanupHold();
     }
