@@ -11721,6 +11721,18 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 && MovementHelper.canWalkOn(ctx, feetPos.below());
     }
 
+    /** The stance search already owns the current block view; reuse it for all pathing predicates. */
+    private boolean isStandable(int x, int y, int z, BlockStateInterface bsi) {
+        BetterBlockPos feetPos = new BetterBlockPos(x, y, z);
+        BlockState feet = ctx.world().getBlockState(feetPos);
+        BlockState head = ctx.world().getBlockState(feetPos.above());
+        return feet.getFluidState().isEmpty()
+                && head.getFluidState().isEmpty()
+                && MovementHelper.canWalkThrough(bsi, x, y, z)
+                && MovementHelper.canWalkThrough(bsi, x, y + 1, z)
+                && MovementHelper.canWalkOn(bsi, x, y - 1, z);
+    }
+
     /**
      * Somewhere the bot could stand -- either because there is already a floor, or because it can lay one.
      *
@@ -11733,18 +11745,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *
      * <p>The pathfinder can already bridge and pillar to reach a goal; that is what {@code hasThrowaway} and the
      * scaffold block are for. Filtering candidate stances by the CURRENT floor threw away the stances it would have
-     * built its way to. So a missing floor is allowed here when the cell below could hold a placed block and is not
-     * itself part of the schematic -- never scaffold into a cell the build has plans for.
+     * built its way to. A missing floor is allowed when the cell below could hold a placed block and is outside
+     * the schematic, or is explicitly AIR in an ordinary 3D build. A real requested template block stays reserved;
+     * row mode keeps its exact-template-pixel exception below and does not scaffold into planned AIR.
      *
      * <p>An unreachable stance costs a bounded walk that {@code routeTick} already gives up on. Refusing to consider it
      * costs the cell.
      */
     private boolean isStandableOrScaffoldable(int x, int y, int z, BuilderCalculationContext bcc) {
-        if (isStandable(x, y, z)) {
+        if (isStandable(x, y, z, bcc.bsi)) {
             return true;
         }
         BetterBlockPos feetPos = new BetterBlockPos(x, y, z);
-        if (!MovementHelper.canWalkThrough(ctx, feetPos) || !MovementHelper.canWalkThrough(ctx, feetPos.above())) {
+        if (!MovementHelper.canWalkThrough(bcc.bsi, x, y, z)
+                || !MovementHelper.canWalkThrough(bcc.bsi, x, y + 1, z)) {
             return false;   // the body does not fit; no amount of scaffolding helps
         }
         BetterBlockPos below = feetPos.below();
@@ -11765,7 +11779,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (!bcc.hasThrowaway) {
             return false;   // no template pixel here and nothing to build an ordinary floor out of
         }
-        return plannedFloor == null;
+        return plannedFloor == null || (!buildInRows && plannedFloor.isAir());
     }
 
     /** Raytrace from a hypothetical eye using the same quantized rotation and world clip as possibleToPlace. */
