@@ -99,9 +99,12 @@ public class BuilderMaterialVerdictTest {
     @Test
     public void refillReevaluatesTheSameUnchangedWorldAndRealNegativeRemainsCached() throws Exception {
         Fixture f = fixture(Blocks.GLASS.defaultBlockState());
+        // Include the target column in this flooded input: it is now legitimately considered by stance search.
+        // Every candidate has fluid at its feet or head, including the solid neighbour immediately below target.
+        f.world.blocks.put(TARGET.asLong(), Blocks.WATER.defaultBlockState());
         assertUnknown(f.owner.urteileUeber(TARGET, f.context));
         f.inventory.getNonEquipmentItems().set(0, new ItemStack(Items.GLASS));
-        // Every candidate stance is water. The only solid neighbour is in the excluded target column.
+        // The world remains unchanged across refill; no standable body is available despite the solid neighbour.
         assertParkReason(f.owner.urteileUeber(TARGET, f.context), "NO_STANCE");
         assertEquals(1, get(f.owner, "orientedSearchesThisTick"));
         assertEquals(1, f.verdicts().size());

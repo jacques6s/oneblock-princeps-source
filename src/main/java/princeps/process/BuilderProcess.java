@@ -12347,30 +12347,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         for (int dx = -3; dx <= 3; dx++) {
             for (int dz = -3; dz <= 3; dz++) {
                 for (int dy = lowestDy; dy <= 1; dy++) {
-                    // THE WHOLE TARGET COLUMN, all three cells the body could occupy. Feet in the cell (dy == 0), feet
-                    // one above it (dy == 1), and -- new -- feet one BELOW it (dy == -1), where the HEAD lands in the
-                    // cell. A player is two blocks tall, so all three put a body part where the block has to go, and
-                    // vanilla will not materialise a block inside a player.
-                    //
-                    // dy == -1 used to be admitted, with this note: "Excluding it was tried and facings fell from 79 to
-                    // 56: the stance count went 145 -> 144 for every block in the build, and this file's own history
-                    // says the candidate ORDER and the target lock are more sensitive than the geometry."
-                    //
-                    // That measurement stands and its explanation is exactly why excluding it is right NOW and was not
-                    // then. Removing one of 145 candidates shifted WHICH 24 of them MAX_STANCES_EVALUATED_PER_CALL
-                    // got to evaluate -- the outcome moved because the budget moved, not because the candidate had
-                    // value. And back then the candidate could still return a spurious answer, because
-                    // simulatePlacement asked with the body wherever the bot happened to stand. With the body now
-                    // placed at the candidate (see simulatePlacement's bodyAt), a dy == -1 stance can only ever answer
-                    // "no" -- the head is provably in the target. So it is not a candidate that might work, it is an
-                    // evaluation slot that is guaranteed to be wasted, and one of only 24.
-                    //
-                    // Measured cost of leaving it in, twice on independent scenarios: the oak_door at 73,-60,67
-                    // (oriented, run 5146df14) and 95,-59,67 (facings, run a4932f6b) both reported every stance
-                    // impossible while the bot's own body sat in the cell.
-                    if (dx == 0 && dz == 0 && (dy == 0 || dy == 1 || dy == -1)) {
-                        continue; // no part of a two-block-tall body may be in the cell being filled
-                    }
+                    // A shared block cell does not imply a shared collision volume. Thin panels can be placed
+                    // beside a centred player in this very cell. Keep the candidate: standability, the actual ray,
+                    // and vanilla item placement with the hypothetical body still decide whether it is usable.
                     candidates.add(new BetterBlockPos(tx + dx, ty + dy, tz + dz));
                 }
             }
