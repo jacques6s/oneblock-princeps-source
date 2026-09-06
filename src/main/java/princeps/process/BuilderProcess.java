@@ -9566,6 +9566,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (snakeRepair != null) {
             return snakeRepair;
         }
+        if (toBreak.isPresent()) {
+            PathingCommand wetApproach = ExcavationMiningApproach.finishWetStep(excavating,
+                    princeps.getPathingBehavior().getCurrent(), ctx.playerFeet(), toBreak.get().getA(),
+                    pos -> bcc.bsi.get0(pos.getX(), pos.getY(), pos.getZ()));
+            if (wetApproach != null) return wetApproach;
+        }
         // THE BOUND THAT COUNTS THE BRANCH, because the one that counts the CELL cannot fire here.
         //
         // breakMadeNoProgress zeroes breakNoProgressTicks whenever the target or its block differs from last tick,

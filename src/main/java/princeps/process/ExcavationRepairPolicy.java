@@ -70,14 +70,19 @@ final class ExcavationRepairPolicy {
         BetterBlockPos approach = bounds.approach(feet, work);
         if (approach == null || approach.equals(feet)) return null;
         BetterBlockPos step = BuilderProcess.nextSnakeWaypoint(feet, approach);
+        return clearWaterCorridor(feet, step, read) ? step : null;
+    }
+
+    /** The two body columns must still be clear; waterlogged solids and lava are never a walkable water step. */
+    static boolean clearWaterCorridor(BlockPos feet, BlockPos step, Function<BlockPos, BlockState> read) {
         boolean water = false;
         for (BlockPos body : new BlockPos[] {feet, feet.above(), step, step.above()}) {
             BlockState state = read.apply(body);
             if (state.isAir()) continue;
-            if (!(state.getBlock() instanceof LiquidBlock) || !state.getFluidState().is(FluidTags.WATER)) return null;
+            if (!(state.getBlock() instanceof LiquidBlock) || !state.getFluidState().is(FluidTags.WATER)) return false;
             water = true;
         }
-        return water ? step : null;
+        return water;
     }
 
     static Kind repair(Bounds bounds, int x, int y, int z, BlockState state, boolean replaceable,
