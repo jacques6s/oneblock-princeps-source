@@ -33,10 +33,14 @@ public class ExcavationRepairPolicyTest {
 
     private static ExcavationRepairPolicy.Census inspect(ExcavationRepairPolicy.Bounds bounds,
                                                         Map<BlockPos, BlockState> changes) {
-        return ExcavationRepairPolicy.inspect(bounds, pos -> changes.getOrDefault(pos,
+        // Vanilla and BetterBlockPos compare equal but use different hash functions. Model world coordinates,
+        // not the concrete position object's hash, just as the production BlockStateInterface lookup does.
+        Map<Long, BlockState> cells = new HashMap<>();
+        changes.forEach((pos, state) -> cells.put(pos.asLong(), state));
+        return ExcavationRepairPolicy.inspect(bounds, pos -> cells.getOrDefault(pos.asLong(),
                         bounds.inside(pos.getX(), pos.getY(), pos.getZ()) ? AIR : STONE),
                 pos -> {
-                    BlockState state = changes.getOrDefault(pos,
+                    BlockState state = cells.getOrDefault(pos.asLong(),
                             bounds.inside(pos.getX(), pos.getY(), pos.getZ()) ? AIR : STONE);
                     return state.isAir() || BuilderProcess.snakeTreatAsFluid(state, true);
                 });
