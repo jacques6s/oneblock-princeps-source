@@ -1342,6 +1342,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * proven stance -- never by the bot having moved.
      */
     private BetterBlockPos electedCell;
+    /** Removal work owns navigation too, but never asks the placement/hotbar oracle to place AIR. */
+    private boolean electedBreak;
     /**
      * TWO PASSES, and this is which one we are in: false = walk only, true = building permitted.
      *
@@ -6094,6 +6096,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  though the stance key, support, item, and target are unchanged. If the current stance truly becomes unusable,
      *  ownership stays on the same cell while recovery walks to a different concrete stance. */
     private Optional<Placement> stickyPlacement(BuilderCalculationContext bcc, List<BlockState> desirableOnHotbar) {
+        if (electedBreak) {
+            // assemble/recalc releases a completed or invalid removal. A nearby placement is not a reason to
+            // replace its route, nor is the absence of an item which places AIR a material shortage.
+            return Optional.empty();
+        }
         if (placementTargetLock.isActive() && committedPlaceTarget != null) {
             int x = committedPlaceTarget.x, y = committedPlaceTarget.y, z = committedPlaceTarget.z;
             BlockState curr = bcc.bsi.get0(x, y, z);
@@ -9053,8 +9060,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     /** A completed/invalid target releases both the cell and its last usable navigation goal. */
     private void clearElectedTarget() {
+        discardLaneQuestion();
+        laneAProof = null;
+        laneEscalatedCell = null;
+        laneBAnswered = false;
         electedCell = null;
         electedGoal = null;
+        electedBreak = false;
         scaffoldPassAllowed = false;
     }
 
@@ -9451,77 +9463,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 minYInclusive = 0;
                 maxYInclusive = band.hi();
             }
-            schematic = new ISchematic() {
-                @Override
-                public BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable) {
-                    BlockState geruest = BuilderProcess.this.scaffoldOverrideAt(x, y, z);
-                    if (geruest != null) {
-                        return geruest;
-                    }
-                    return realSchematic.desiredState(x, y, z, current, BuilderProcess.this.approxPlaceable);
-                }
-
-                @Override
-                public boolean inSchematic(int x, int y, int z, BlockState currentState) {
-                    if (BuilderProcess.this.scaffoldOverrideAt(x, y, z) != null) {
-                        // Die Geruestzelle liegt regelmaessig UNTER dem Ebenenband -- das ist ja der Grund, warum
-                        // die bediente Zelle in der Luft haengt. Ohne diese Zeile waere sie ausserhalb des
-                        // Arbeitssatzes und niemand wuerde sie je setzen.
-                        return true;
-                    }
-                    if (!ISchematic.super.inSchematic(x, y, z, currentState)
-                            || !realSchematic.inSchematic(x, y, z, currentState)) {
-                        return false;
-                    }
-                    if (y >= minYInclusive && y <= maxYInclusive) {
-                        return true;
-                    }
-                    // A top-down layer containing a door UPPER must atomically include its LOWER one row below.
-                    // Otherwise the upper is intentionally non-placeable, the base is outside the wrapper, and the
-                    // layer can never finish or expand.
-                    if (!topDownLayers || y != minYInclusive - 1) {
-                        return false;
-                    }
-                    BlockState lower = realSchematic.desiredState(
-                            x, y, z, currentState, BuilderProcess.this.approxPlaceable);
-                    if (lower == null || !(lower.getBlock() instanceof DoorBlock)
-                            || lower.getValue(DoorBlock.HALF) != DoubleBlockHalf.LOWER) {
-                        return false;
-                    }
-                    BlockPos aboveWorld = new BlockPos(
-                            BuilderProcess.this.origin.getX() + x,
-                            BuilderProcess.this.origin.getY() + y + 1,
-                            BuilderProcess.this.origin.getZ() + z);
-                    BlockState aboveCurrent = ctx.world().getBlockState(aboveWorld);
-                    if (!realSchematic.inSchematic(x, y + 1, z, aboveCurrent)) {
-                        return false;
-                    }
-                    BlockState upper = realSchematic.desiredState(
-                            x, y + 1, z, aboveCurrent, BuilderProcess.this.approxPlaceable);
-                    return upper != null && upper.getBlock() == lower.getBlock()
-                            && upper.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER;
-                }
-
-                @Override
-                public void reset() {
-                    realSchematic.reset();
-                }
-
-                @Override
-                public int widthX() {
-                    return realSchematic.widthX();
-                }
-
-                @Override
-                public int heightY() {
-                    return realSchematic.heightY();
-                }
-
-                @Override
-                public int lengthZ() {
-                    return realSchematic.lengthZ();
-                }
-            };
+            schematic = layerMask(realSchematic, minYInclusive, maxYInclusive, topDownLayers);
         }
         // DER SCHALTER (Schritt 24). Der Kontext dieses Ticks traegt die Bahn der Zelle, die gerade gefahren wird.
         //
@@ -10331,7 +10273,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // the work set that are starving for a material sitting in the backpack. See appendStarvedWorkSetMaterials.
             List<BlockState> hotbarDemand = new ArrayList<>(desirableOnHotbar);
             appendStarvedWorkSetMaterials(bcc, hotbarDemand);
-            if (electedCell != null) {
+            if (electedCell != null && !electedBreak) {
                 BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, bcc.bsi.get0(electedCell));
                 if (wanted != null) {
                     hotbarDemand.clear();
@@ -10825,22 +10767,164 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * eine Frage, deren Antwort im Schattenlauf 1483 von 1483 Mal "ja" lautete (Median 1 ms).
      */
     private Lane laneForCurrentCell(BetterBlockPos cell) {
-        return cell != null && cell.equals(laneEscalatedCell) ? Lane.B_HELPERS_ALLOWED : Lane.A_NO_PLACING;
+        return cell != null && cell.equals(laneEscalatedCell) && helpersAllowedForElectedWork()
+                && laneQuestionCurrent(laneAProof, laneAProof == null ? null : laneAProof.goal, false)
+                ? Lane.B_HELPERS_ALLOWED : Lane.A_NO_PLACING;
     }
 
     /** The one cell lane A has provably failed on. At most one at a time -- there is only ever one target. */
     private BetterBlockPos laneEscalatedCell;
 
+    private ISchematic layerMask;
+    private ISchematic layerMaskSource;
+    private int layerMaskMinY;
+    private int layerMaskMaxY;
+    private boolean layerMaskTopDown;
+
+    /** Stable identity for the same tick-produced model mask; a genuine model/band/rule change gets a new mask. */
+    private ISchematic layerMask(ISchematic realSchematic, int minYInclusive, int maxYInclusive, boolean topDownLayers) {
+        if (layerMask != null && layerMaskSource == realSchematic && layerMaskMinY == minYInclusive
+                && layerMaskMaxY == maxYInclusive && layerMaskTopDown == topDownLayers) return layerMask;
+        layerMaskSource = realSchematic;
+        layerMaskMinY = minYInclusive;
+        layerMaskMaxY = maxYInclusive;
+        layerMaskTopDown = topDownLayers;
+        layerMask = new ISchematic() {
+            @Override
+            public BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable) {
+                BlockState geruest = BuilderProcess.this.scaffoldOverrideAt(x, y, z);
+                if (geruest != null) {
+                    return geruest;
+                }
+                return realSchematic.desiredState(x, y, z, current, BuilderProcess.this.approxPlaceable);
+            }
+
+            @Override
+            public boolean inSchematic(int x, int y, int z, BlockState currentState) {
+                if (BuilderProcess.this.scaffoldOverrideAt(x, y, z) != null) {
+                    // Die Geruestzelle liegt regelmaessig UNTER dem Ebenenband -- das ist ja der Grund, warum
+                    // die bediente Zelle in der Luft haengt. Ohne diese Zeile waere sie ausserhalb des
+                    // Arbeitssatzes und niemand wuerde sie je setzen.
+                    return true;
+                }
+                if (!ISchematic.super.inSchematic(x, y, z, currentState)
+                        || !realSchematic.inSchematic(x, y, z, currentState)) {
+                    return false;
+                }
+                if (y >= minYInclusive && y <= maxYInclusive) {
+                    return true;
+                }
+                // A top-down layer containing a door UPPER must atomically include its LOWER one row below.
+                // Otherwise the upper is intentionally non-placeable, the base is outside the wrapper, and the
+                // layer can never finish or expand.
+                if (!topDownLayers || y != minYInclusive - 1) {
+                    return false;
+                }
+                BlockState lower = realSchematic.desiredState(
+                        x, y, z, currentState, BuilderProcess.this.approxPlaceable);
+                if (lower == null || !(lower.getBlock() instanceof DoorBlock)
+                        || lower.getValue(DoorBlock.HALF) != DoubleBlockHalf.LOWER) {
+                    return false;
+                }
+                BlockPos aboveWorld = new BlockPos(
+                        BuilderProcess.this.origin.getX() + x,
+                        BuilderProcess.this.origin.getY() + y + 1,
+                        BuilderProcess.this.origin.getZ() + z);
+                BlockState aboveCurrent = ctx.world().getBlockState(aboveWorld);
+                if (!realSchematic.inSchematic(x, y + 1, z, aboveCurrent)) {
+                    return false;
+                }
+                BlockState upper = realSchematic.desiredState(
+                        x, y + 1, z, aboveCurrent, BuilderProcess.this.approxPlaceable);
+                return upper != null && upper.getBlock() == lower.getBlock()
+                        && upper.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER;
+            }
+
+            @Override
+            public void reset() {
+                realSchematic.reset();
+            }
+
+            @Override
+            public int widthX() {
+                return realSchematic.widthX();
+            }
+
+            @Override
+            public int heightY() {
+                return realSchematic.heightY();
+            }
+
+            @Override
+            public int lengthZ() {
+                return realSchematic.lengthZ();
+            }
+        };
+        return layerMask;
+    }
+
+    private LaneQuestion laneQuestion;
+    private LaneQuestion laneAProof;
+    private boolean laneBAnswered;
+
+    /** The actual question, including the build/model snapshot and the start from which a negative answer applies. */
+    private record LaneQuestion(BetterBlockPos cell, Goal goal, Goal targetGoal, BetterBlockPos start,
+                                BuilderCalculationContext context, BlockState targetState,
+                                boolean cleanup, long worldRevision, BetterBlockPos scaffold, BlockState scaffoldState) { }
+
+    private boolean laneQuestionCurrent(LaneQuestion question, Goal goal, boolean pending) {
+        if (question == null || !question.cell.equals(electedCell) || !Objects.equals(question.goal, goal)
+                || !Objects.equals(question.targetGoal, electedGoal) || question.cleanup != scaffoldCleanupActive
+                || !Objects.equals(question.scaffold, scaffoldCell) || !Objects.equals(question.scaffoldState, scaffoldWanted)
+                || question.context.schematic != schematic || question.context.rowMode != buildInRows
+                || buildInRows && (question.context.rowBandStart != rowActiveBandStart
+                    || question.context.rowFrontier != rowActiveFrontier)
+                || origin == null || question.context.originX != origin.getX()
+                || question.context.originY != origin.getY() || question.context.originZ != origin.getZ()
+                || question.context.world != ctx.world()
+                || !question.targetState.equals(ctx.world().getBlockState(question.cell))) return false;
+        int count = question.context.placeable.size();
+        if (approxPlaceable == null || approxPlaceable.size() < count) return false;
+        // These are inventory approximations, whose simulated facing changes with the player's look/position.
+        // Routing uses their block/item identity; a head turn must not revoke the same available material.
+        for (int slot = 0; slot < count; slot++) {
+            if (question.context.placeable.get(slot).getBlock() != approxPlaceable.get(slot).getBlock()) return false;
+        }
+        return !pending || question.start.equals(ctx.playerFeet()) && question.worldRevision == confirmedProgressRevision;
+    }
+
+    private void discardLaneQuestion() {
+        if (laneProbe != null) laneProbe.cancel();
+        laneQuestion = null;
+        laneProbeCell = null;
+    }
+
+    private boolean helpersAllowedForElectedWork() {
+        // An owned helper must not create a new helper debt to remove itself. A separate bounded descent contract
+        // is required before that transition can be enabled. Ordinary target removals keep the normal lane rules.
+        return !scaffoldCleanupActive && (!electedBreak || !navigationScaffolds.contains(electedCell));
+    }
+
     private void driveLanesInShadow(Goal goal) {
         if (goal == null || electedCell == null) {
+            discardLaneQuestion();
+            laneAProof = null;
+            laneEscalatedCell = null;
             return;
         }
-        if (laneEscalatedCell != null && !laneEscalatedCell.equals(electedCell)) {
-            laneEscalatedCell = null;   // eine andere Zelle: die Eskalation der alten gilt nicht fuer sie
+        if (laneAProof != null && !laneQuestionCurrent(laneAProof, goal, false)) {
+            laneAProof = null;
+            laneEscalatedCell = null;
+            laneBAnswered = false;
+        }
+        if (laneQuestion != null && !laneQuestionCurrent(laneQuestion, goal, true)) {
+            discardLaneQuestion(); // a completed old worker is discarded under the same request boundary
         }
         PathProbe.Result answer = laneProbe.poll();
-        if (answer != null && laneProbeCell != null) {
-            int base = laneProbeLane == Lane.A_NO_PLACING ? 0 : 4;
+        if (answer != null && laneQuestion != null) {
+            LaneQuestion answered = laneQuestion;
+            Lane answeredLane = laneProbeLane;
+            int base = answeredLane == Lane.A_NO_PLACING ? 0 : 4;
             int slot = switch (answer.outcome) {
                 case COMPLETE -> 0;
                 case PARTIAL -> 1;
@@ -10848,76 +10932,44 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 default -> 3;
             };
             laneOutcomes[base + slot]++;
-            BuildTrace.cell(buildTick, "LANE", laneProbeCell.x, laneProbeCell.y, laneProbeCell.z,
-                    (laneProbeLane == Lane.A_NO_PLACING ? "A" : "B") + "=" + answer.outcome
+            BuildTrace.cell(buildTick, "LANE", answered.cell.x, answered.cell.y, answered.cell.z,
+                    (answeredLane == Lane.A_NO_PLACING ? "A" : "B") + "=" + answer.outcome
                             + " positions=" + answer.positions + " ms=" + answer.millis
-                            // Das Ziel, das die SONDE bekommen hat -- daneben steht in der Tick-Zeile das des
-                            // Routers. Sind die beiden verschieden, ist der Faktor 400 zwischen 519 und 210998
-                            // Knoten erklaert und die Sonde hat die ganze Zeit eine andere Frage beantwortet.
-                            + " probegoal=" + String.valueOf(goal).replace(' ', '_'));
-            if (laneProbeLane == Lane.A_NO_PLACING && answer.outcome != PathProbe.Outcome.COMPLETE) {
-                // P3 NEGATIV -> S5. Ab jetzt faehrt genau diese Zelle unter Bahn B, und zwar bis sie steht oder
-                // parkt. PARTIAL zaehlt hier ausdruecklich nicht als Ja: A* liefert routinemaessig einen Weg, der
-                // naeher kommt ohne anzukommen, und den als Erfolg zu lesen ist genau, wie eine Bahn, die nicht
-                // setzen darf, irgendwohin laeuft und nie eskaliert.
-                boolean neuEskaliert = !laneProbeCell.equals(laneEscalatedCell);
-                laneEscalatedCell = laneProbeCell;
-                if (neuEskaliert) {
-                    // DIE LAUFENDE SUCHE MUSS WEG, weil sie unter der falschen Regel geboren wurde. Ein A*-Lauf
-                    // behaelt den CalculationContext, mit dem er konstruiert wurde (PathingBehavior:514), und
-                    // secretInternalSetGoalAndPath kehrt bei inProgress != null zurueck, BEVOR der neue Kontext
-                    // ankommt (:294). Die Eskalation aendert also nur ein Feld, das die steuernde Suche nie liest.
-                    //
-                    // GEMESSEN: 55 Strecken in Lauf 28b210f3, jede bis zu 120 Ticks, path=calculating in 5231
-                    // Ticks gegen 36 Ticks goal-no-path -- der Bot steht nicht, weil kein Weg gefunden wird,
-                    // sondern weil die falsche Frage noch laeuft. Es ist EIN failureTimeoutMS von 2000 ms, und
-                    // der Bench faehrt 60 Ticks je Sekunde: 2000 ms sind dort genau die beobachteten 120 Ticks.
-                    // Im selben Fenster steht im Log eine einzige unbudgetierte Suche (PathNode map size 210998,
-                    // rund 2,1 s, ohne Ergebnis) gegen die Sonde mit "reached goal after 519 nodes ... 5ms".
-                    //
-                    // Zurueckgezogen wird ausschliesslich die RECHNUNG, nicht der laufende Weg: ein Weg, der
-                    // gerade gegangen wird, ist unter jeder Bahn gueltig -- er liegt ja schon in der Welt --,
-                    // und ihn abzubrechen waere ein Eingriff, den der Befund nicht deckt.
-                    if (princeps.getPathingBehavior() instanceof princeps.behavior.PathingBehavior pb) {
-                        pb.getInProgress().ifPresent(suche -> suche.cancel());
-                    }
-                }
-                BuildTrace.cell(buildTick, "LANE-ESCALATE", laneProbeCell.x, laneProbeCell.y, laneProbeCell.z,
-                        "lane A found no complete route within " + LANE_A_BUDGET + "; helper blocks now allowed");
-                askLane(Lane.B_HELPERS_ALLOWED, laneProbeCell, goal);
-                return;
-            }
-            if (laneProbeLane == Lane.B_HELPERS_ALLOWED && answer.outcome != PathProbe.Outcome.COMPLETE) {
-                // P4 NEGATIV = PARK, GRUND C. Der erste Schreiber dieses Grundes ueberhaupt -- bis hierher war
-                // ParkReason.UNREACHABLE ein Enum-Wert ohne Erzeuger und der C-Zweig des Waechters unerreichbar.
-                // Ein Timeout ist ausdruecklich KEIN Grund C: hier haben BEIDE Bahnen unter ihrem Knotenbudget
-                // gesucht und keine hat einen vollstaendigen Weg gefunden. Das ist ein Urteil ueber die Welt.
-                parkCell(laneProbeCell, ParkReason.UNREACHABLE);
-                if (incorrectPositions != null) {
-                    incorrectPositions.remove(laneProbeCell);
-                }
-                if (placementTargetLock.owns(positionKey(laneProbeCell))) {
-                    releasePlacementTarget();
-                }
-                if (laneProbeCell.equals(electedCell)) {
-                    clearElectedTarget();
-                }
-                laneEscalatedCell = null;
-                laneProbeCell = null;
-                return;
-            }
+                            + " negativeEvidence=" + answer.failedToReachGoal()
+                            + " probegoal=" + String.valueOf(answered.goal).replace(' ', '_'));
+            laneQuestion = null;
             laneProbeCell = null;
+            if (answeredLane == Lane.A_NO_PLACING && answer.failedToReachGoal()) {
+                laneAProof = answered;
+                laneBAnswered = false;
+                if (!helpersAllowedForElectedWork()) {
+                    BuildTrace.cell(buildTick, "LANE-CLEANUP-BOUND", answered.cell.x, answered.cell.y, answered.cell.z,
+                            "no complete A route; helper removal requires a bounded descent and A-only cleanup proof");
+                    return;
+                }
+                laneEscalatedCell = answered.cell;
+                if (princeps.getPathingBehavior() instanceof princeps.behavior.PathingBehavior pb) {
+                    pb.getInProgress().ifPresent(search -> search.cancel());
+                }
+                BuildTrace.cell(buildTick, "LANE-ESCALATE", answered.cell.x, answered.cell.y, answered.cell.z,
+                        "fresh lane A found no complete route within " + LANE_A_BUDGET + "; helper blocks now allowed");
+                askLane(Lane.B_HELPERS_ALLOWED, answered.cell, goal);
+                return;
+            }
+            if (answeredLane == Lane.B_HELPERS_ALLOWED && answer.failedToReachGoal()) {
+                parkCell(answered.cell, ParkReason.UNREACHABLE);
+                if (incorrectPositions != null) incorrectPositions.remove(answered.cell);
+                if (placementTargetLock.owns(positionKey(answered.cell))) releasePlacementTarget();
+                clearElectedTarget();
+                return;
+            }
+            if (answeredLane == Lane.B_HELPERS_ALLOWED && answer.reachedGoal()) laneBAnswered = true;
+            // ERROR, timeout and chunk-limited partial paths are unknown, never a licence or a parking verdict.
             return;
         }
-        if (laneProbe.isRunning() || laneProbeCell != null) {
-            return;   // eine Frage zur Zeit; die Antwort steht noch aus
-        }
-        if (electedCell.equals(laneEscalatedCell)) {
-            // SCHON ENTSCHIEDEN. P3 ist fuer diese Zelle negativ ausgefallen, und die Spezifikation sagt, dass
-            // sie ab dann unter Bahn B faehrt "bis sie steht oder parkt" -- eine erneute A-Frage kann daran
-            // nichts mehr aendern. Trotzdem wurde sie gestellt: im Fenster 7409-7522 lief der Zyklus A=NONE ->
-            // ESKALATION -> B=COMPLETE alle sechs bis acht Ticks neu durch, 33 bis 90 ms Suchzeit je Runde fuer
-            // eine Antwort, die schon in der Zeile darueber stand.
+        if (laneProbe.isRunning() || laneQuestion != null) return;
+        if (laneAProof != null) {
+            if (helpersAllowedForElectedWork() && !laneBAnswered) askLane(Lane.B_HELPERS_ALLOWED, electedCell, goal);
             return;
         }
         askLane(Lane.A_NO_PLACING, electedCell, goal);
@@ -10928,18 +10980,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         try {
             probeContext = new BuilderCalculationContext(lane);
         } catch (RuntimeException e) {
-            return;   // eine Frage, die sich nicht stellen laesst, ist keine Aussage ueber die Welt
+            return; // an unasked question says nothing about reachability
         }
-        boolean started = laneProbe.start(ctx, ctx.playerFeet(), goal, probeContext,
+        BetterBlockPos start = ctx.playerFeet();
+        boolean started = laneProbe.start(ctx, start, goal, probeContext,
                 lane == Lane.A_NO_PLACING ? LANE_A_BUDGET : LANE_B_BUDGET,
-                Princeps.settings().primaryTimeoutMS.value,
-                Princeps.settings().failureTimeoutMS.value);
+                Princeps.settings().primaryTimeoutMS.value, Princeps.settings().failureTimeoutMS.value);
         if (started) {
             laneProbeCell = cell;
             laneProbeLane = lane;
+            laneQuestion = new LaneQuestion(cell, goal, electedGoal, start, probeContext,
+                    probeContext.bsi.get0(cell), scaffoldCleanupActive, confirmedProgressRevision, scaffoldCell, scaffoldWanted);
         }
     }
-
     /** A-COMPLETE/PARTIAL/NONE/ERROR then B-COMPLETE/PARTIAL/NONE/ERROR. Read by the narration. */
     private String laneCensus() {
         return "A=" + laneOutcomes[0] + "/" + laneOutcomes[1] + "/" + laneOutcomes[2] + "/" + laneOutcomes[3]
@@ -11403,7 +11456,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         List<BetterBlockPos> sourceLiquids = new ArrayList<>();
         List<BetterBlockPos> flowingLiquids = new ArrayList<>();
         Map<BlockState, Integer> missing = new HashMap<>();
-        List<BetterBlockPos> outOfBounds = new ArrayList<>();
+        List<BetterBlockPos> noLongerWork = new ArrayList<>();
         incorrectPositions.forEach(pos -> {
             final boolean watched = CellWatch.isWatched(pos.x, pos.y, pos.z);
             if (!includeDeferred && isCellParked(pos.x, pos.y, pos.z)) {
@@ -11415,7 +11468,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             BlockState state = bcc.bsi.get0(pos);
             BlockState desired = bcc.getSchematic(pos.x, pos.y, pos.z, state);
             if (desired == null) {
-                outOfBounds.add(pos);
+                noLongerWork.add(pos);
                 if (watched) {
                     CellWatch.note(buildTick, pos.x, pos.y, pos.z, "assemble",
                             "dropped: outside the current layer mask");
@@ -11435,7 +11488,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     && (state.getBlock() instanceof AirBlock || state.getBlock() instanceof LiquidBlock)) {
                 // Door upper / bed head completes automatically when its primary half is placed.
             } else if (desired.getBlock() instanceof AirBlock) {
-                breakable.add(pos);
+                if (state.isAir()) noLongerWork.add(pos);
+                else breakable.add(pos);
             } else if (state.getBlock() instanceof AirBlock
                     || state.getBlock() instanceof LiquidBlock
                     || MovementHelper.isReplaceable(pos.x, pos.y, pos.z, state, bcc.bsi)) {
@@ -11461,7 +11515,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 breakable.add(pos);
             }
         });
-        incorrectPositions.removeAll(outOfBounds);
+        incorrectPositions.removeAll(noLongerWork);
+        if (electedBreak) {
+            if (breakable.contains(electedCell)) {
+                // Preserve the exact chosen removal while the body moves. This path deliberately precedes every
+                // placement/material gate; only the real classification above may revoke it.
+                return electedGoal;
+            }
+            clearElectedTarget();
+        }
         // THE CENSUS, MOVED OUT OF A BRANCH IT COULD NOT REACH.
         //
         // It used to sit inside `if (toBreak.isEmpty())`, which is itself only reached when `toPlace` is empty -- so it
@@ -11672,6 +11734,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         .collect(Collectors.joining("\n")));
             }
             return null;
+        }
+        if (electedCell == null && !breakable.isEmpty()) {
+            BetterBlockPos target = breakable.stream().min(java.util.Comparator
+                    .comparingDouble((BetterBlockPos pos) -> pos.distSqr(here))
+                    .thenComparingInt(pos -> pos.x).thenComparingInt(pos -> pos.y).thenComparingInt(pos -> pos.z))
+                    .orElseThrow();
+            electedCell = target;
+            electedGoal = breakGoal(target, bcc);
+            electedBreak = true;
+            scaffoldPassAllowed = false;
+            BuildTrace.cell(buildTick, "ELECT-BREAK", target.x, target.y, target.z,
+                    "latched removal; no placement material required");
+            return electedGoal;
         }
         return new GoalComposite(toBreak.toArray(new Goal[0]));
     }
@@ -13593,6 +13668,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         excavationRepairAim.clear();
         lastExcavationRepairAimTrace = null;
         blockedFluidPlugThisTick = null;
+        layerMask = null;
+        layerMaskSource = null;
         scaffoldCleanupActive = false;
         scaffoldCleanupTargets.clear();
         // Die beiden Listen gehoeren zu EINEM Bauauftrag. Eine PARK-Liste, die einen Auftrag ueberlebt,

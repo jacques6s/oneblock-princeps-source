@@ -42,6 +42,24 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
     private final Favoring favoring;
     private final CalculationContext calcContext;
     private final SearchBudget budget;
+    private boolean exhaustedSearch;
+    private boolean encounteredUnknownChunk;
+
+    /** True only after frontier exhaustion or the explicit node budget, never timeout/chunk limit/cancellation. */
+    boolean exhaustedSearch() {
+        return exhaustedSearch;
+    }
+
+    /** A single unknown chunk makes negative geometry evidence incomplete, even below the chunk-fetch limit. */
+    void recordSearchEnd(boolean outOfBudget, BinaryHeapOpenSet frontier, int unknownChunks) {
+        exhaustedSearch = !cancelRequested && !encounteredUnknownChunk && unknownChunks == 0
+                && (outOfBudget || frontier.isEmpty());
+    }
+
+    /** Separate from the fetch-limit counter, which deliberately omits dynamic-XZ movements. */
+    void recordUnknownChunk() {
+        encounteredUnknownChunk = true;
+    }
 
     /**
      * @param budget how many nodes this search may expand. MANDATORY rather than optional on purpose — see
@@ -134,6 +152,7 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
                 int newX = currentNode.x + moves.xOffset;
                 int newZ = currentNode.z + moves.zOffset;
                 if ((newX >> 4 != currentNode.x >> 4 || newZ >> 4 != currentNode.z >> 4) && !calcContext.isLoaded(newX, newZ)) {
+                    recordUnknownChunk();
                     // only need to check if the destination is a loaded chunk if it's in a different chunk than the start of the movement
                     if (!moves.dynamicXZ) { // only increment the counter if the movement would have gone out of bounds guaranteed
                         numEmptyChunk++;
@@ -230,6 +249,7 @@ public final class AStarPathFinder extends AbstractNodeCostSearch {
         if (cancelRequested) {
             return Optional.empty();
         }
+        recordSearchEnd(outOfBudget, openSet, numEmptyChunk);
         System.out.println(numMovementsConsidered + " movements considered");
         System.out.println("Open set size: " + openSet.size());
         System.out.println("PathNode map size: " + mapSize());

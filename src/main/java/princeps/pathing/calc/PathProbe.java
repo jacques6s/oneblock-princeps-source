@@ -74,12 +74,23 @@ public final class PathProbe {
         /** Positions in the returned route; the number of STEPS is one less. Zero when there is no route. */
         public final int positions;
         public final long millis;
+        private final boolean exhaustedSearch;
 
         Result(Outcome outcome, IPath path, long millis) {
+            this(outcome, path, millis, false);
+        }
+
+        Result(Outcome outcome, IPath path, long millis, boolean exhaustedSearch) {
             this.outcome = outcome;
             this.path = path;
             this.positions = path == null ? 0 : path.length();
             this.millis = millis;
+            this.exhaustedSearch = exhaustedSearch;
+        }
+
+        /** A bounded negative search result, not an exception, timeout, chunk limit or cancelled request. */
+        public boolean failedToReachGoal() {
+            return exhaustedSearch && (outcome == Outcome.PARTIAL || outcome == Outcome.NONE);
         }
 
         public boolean reachedGoal() {
@@ -124,7 +135,7 @@ public final class PathProbe {
      *                default failure timeout of 2000 ms is about 240000 nodes — against a median of FOUR nodes for
      *                a search that succeeds.
      */
-    public boolean start(IPlayerContext ctx, BetterBlockPos from, Goal goal, CalculationContext context,
+    public synchronized boolean start(IPlayerContext ctx, BetterBlockPos from, Goal goal, CalculationContext context,
                          SearchBudget budget, long primaryTimeoutMs, long failureTimeoutMs) {
         if (running != null) {
             return false;
@@ -166,15 +177,13 @@ public final class PathProbe {
                         break;
                 }
                 result = new Result(outcome, outcome == Outcome.COMPLETE || outcome == Outcome.PARTIAL ? path : null,
-                        System.currentTimeMillis() - startedAt);
+                        System.currentTimeMillis() - startedAt, pathfinder.exhaustedSearch());
             } catch (RuntimeException e) {
                 // A probe that throws must not take the build with it: an unanswered question is a reason to try
                 // something else, never a reason to stop.
                 result = new Result(Outcome.ERROR, null, System.currentTimeMillis() - startedAt);
-            } finally {
-                running = null;
             }
-            finished.set(result);
+            complete(pathfinder, result);
         });
         return true;
     }
@@ -184,9 +193,17 @@ public final class PathProbe {
         return finished.getAndSet(null);
     }
 
+    /** Completion and cancellation share one boundary: an old worker cannot publish into a newer request. */
+    synchronized void complete(AbstractNodeCostSearch search, Result result) {
+        if (running != search) return;
+        finished.set(result);
+        running = null;
+    }
+
     /** Stop caring about the answer. Safe to call at any time, including when nothing is running. */
-    public void cancel() {
+    public synchronized void cancel() {
         AbstractNodeCostSearch search = running;
+        running = null;
         if (search != null) {
             search.cancel();
         }
