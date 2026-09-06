@@ -25,6 +25,7 @@ import princeps.api.utils.IPlayerContext;
 import princeps.api.utils.input.Input;
 import princeps.behavior.PathingBehavior;
 import princeps.pathing.movement.CalculationContext;
+import princeps.pathing.path.PathExecutor;
 import princeps.utils.InputOverrideHandler;
 import princeps.utils.PathingCommandContext;
 import sun.misc.Unsafe;
@@ -166,8 +167,26 @@ public class BuilderRouteContextTest {
             }
         }
         assertEquals(Set.of("observeBuilderProgress", "holdStillWithoutTearingUpTheRoute", "onTick",
-                "placementRecoveryCommand"), callers);
-        assertEquals(4, calls);
+                "placementRecoveryCommand", "driveCleanupEscape"), callers);
+        assertEquals(5, calls);
+    }
+
+    @Test public void actualCleanupDriverRetainsItsStrictContextUntilAnAirborneMovementCanCancel() throws Exception {
+        Fixture f = fixture(BuilderProcess.Lane.A_NO_PLACING);
+        set(f.pathing, "current", allocate(PathExecutor.class));
+        Class<?> episodeType = Class.forName("princeps.process.BuilderProcess$CleanupEscape");
+        Object episode = allocator.allocateInstance(episodeType);
+        set(episode, "this$0", f.builder); set(f.builder, "cleanupEscape", episode);
+        set(f.context, "fallWaterForbidden", true);
+        Method drive = BuilderProcess.class.getDeclaredMethod("driveCleanupEscape", boolean.class,
+                BuilderProcess.BuilderCalculationContext.class);
+        drive.setAccessible(true);
+        PathingCommand command = (PathingCommand) drive.invoke(f.builder, false, null);
+        assertEquals(PathingCommandType.REVALIDATE_GOAL_AND_PATH, command.commandType);
+        assertSame(f.goal, command.goal);
+        assertFalse(f.pathing.secretInternalSetGoalAndPath(command));
+        assertSame(f.context, f.pathing.secretInternalGetCalculationContext());
+        assertTrue(f.pathing.secretInternalGetCalculationContext().forbidsWaterBucketFall());
     }
 
     private static Fixture fixture(BuilderProcess.Lane lane) throws Exception {

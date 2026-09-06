@@ -47,6 +47,7 @@ import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementOption;
+import princeps.pathing.movement.movements.MovementDownward;
 import princeps.pathing.path.PathExecutor;
 import princeps.process.builder.BlockItemPlacementHelper;
 import princeps.process.builder.ActionJournal;
@@ -624,6 +625,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private String lastExcavationRepairAimTrace;
     private long lastExcavationRepairAimTraceTick;
     private ExcavationFluidPlugs.Hazard blockedFluidPlugThisTick;
+    private volatile CleanupEscape cleanupEscape;
+    /** Retained on stop/new job: clearing working sets is not server-confirmed removal. */
+    private volatile BuilderCleanupDebt cleanupEscapeDebt;
+    /** Local observation fence for the existing server-packet callback, not a claim of a protocol action id. */
+    private long cleanupServerUpdateSequence;
+    private final Set<Long> cleanupEscapeAttemptedOwners = new HashSet<>();
     private boolean scaffoldCleanupActive;
     private final Set<Long> scaffoldCleanupTargets = new HashSet<>();
     /** Die geparkte Zelle, die sie freimachen soll. */
@@ -2375,6 +2382,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     public void recordNavigationScaffold(BlockPos pos, BlockState before, BlockState after,
                                          boolean excavationIntegrity) {
         if (isActive()) progressActions.arm(positionKey(pos), before, after);
+        // BlockPlaceHelper calls here at local SUCCESS, before publishing its receipt. The escape's OWNED
+        // phase alone transfers this one request to the ordinary ledger after both observations agree.
+        BuilderCleanupDebt debt = cleanupEscapeDebt;
+        if (cleanupEscape != null && debt != null && debt.episode == cleanupEscape
+                && debt.world == ctx.world() && debt.pos.equals(pos)) return;
         if (!isActive() || buildInRows || temporarySupportTargets.containsKey(positionKey(pos))) {
             return;
         }
@@ -2407,6 +2419,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
         excavationFluidPlugs.observe(pos, state);
         excavationRepairAim.observe(pos, state);
+        long sequence = ++cleanupServerUpdateSequence;
+        if (cleanupEscapeDebt != null) cleanupEscapeDebt.serverChanged(ctx.world(), pos, state, sequence, System.nanoTime());
+        if (cleanupEscape != null) cleanupEscape.serverChanged(pos, state);
         if (isActive() && progressActions.serverChanged(positionKey(pos), state)) {
             confirmedProgressRevision++;
         }
@@ -6652,6 +6667,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * is what should have happened immediately.
      */
     private void abandonAGoalAlreadySatisfiedWhereWeStand() {
+        if (cleanupEscape != null) return; // reaching an intermediate episode goal advances its next bounded action
         Goal goal = princeps.getPathingBehavior().getGoal();
         if (goal == null || princeps.getPathingBehavior().getCurrent() != null) {
             return;   // no goal, or a real path is being walked -- nothing dead about either
@@ -9299,7 +9315,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 || command.goal != null) {
             return command; // not an idle hold -- leave it exactly as it is
         }
-        if (paused || progressHold || incorrectPositions == null || incorrectPositions.isEmpty()) {
+        if (paused || progressHold || cleanupEscape != null || incorrectPositions == null || incorrectPositions.isEmpty()) {
             return command; // nothing owed, so cancelling is the right answer
         }
         if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
@@ -9478,6 +9494,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // der Planer plante unter der einen Regel und der Mover fuhr unter einer anderen.
         scaffoldPassAllowed = laneThisTick == Lane.B_HELPERS_ALLOWED;
         BuilderCalculationContext scanContext = new BuilderCalculationContext(laneThisTick);
+        if (cleanupEscape != null) return driveCleanupEscape(isSafeToCancel, scanContext);
         // GANZ FRUEH IM TICK, nicht am Ende. Zwei Fragen haengen daran und beide muessen JEDEN Tick beantwortet
         // werden: hat die Geruestzelle ihren Zweck erfuellt (dann faellt ihr Soll auf Luft zurueck und der
         // vorhandene Abbau raeumt sie weg), und ist sie gescheitert (dann wird sie aufgegeben)?
@@ -10698,8 +10715,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
         }
-        return finishBuilderRoute(goal, electedGoal == null ? goal : electedGoal,
+        PathingCommand route = finishBuilderRoute(goal, electedGoal == null ? goal : electedGoal,
                 PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, bcc);
+        return startCleanupEscape(bcc, isSafeToCancel) ? cleanupHold() : route;
     }
 
     /** All new builder routes service the same target-bound probe, including early recovery returns.
@@ -10713,6 +10731,488 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         BuilderCalculationContext routeContext = context.lane == lane ? context : new BuilderCalculationContext(lane);
         scaffoldPassAllowed = lane == Lane.B_HELPERS_ALLOWED;
         return new PathingCommandContext(routeGoal, type, routeContext);
+    }
+
+    private enum CleanupStage { CANDIDATE, PREFIX_PROOF, PRESENT_PROOF, REMOVED_PROOF,
+        WALK_PREFIX, PLACE, WAIT_PLACE, WALK_PRESENT, DOWNWARD, WALK_REMOVED, BLOCKED }
+
+    private record CleanupBounds(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
+        boolean contains(int x, int y, int z) {
+            return x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ;
+        }
+    }
+
+    /** A finite local action chain. Its three search contexts never escape into the movement executor. */
+    private final class CleanupEscape {
+        final BetterBlockPos owner = electedCell;
+        final Goal ownerGoal = electedGoal;
+        final Object world = ctx.world();
+        final ISchematic model = realSchematic == null ? schematic : realSchematic;
+        final BlockPos buildOrigin = new BlockPos(origin);
+        final BetterBlockPos start = ctx.playerFeet();
+        final BuilderCalculationContext initialRules;
+        final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+        final PathProbe probe = new PathProbe("cleanup-one-helper");
+        final CleanupBounds bounds;
+        final Map<Long, BlockState> snapshot = new HashMap<>();
+        final ArrayDeque<BetterBlockPos> candidates = new ArrayDeque<>();
+        final ArrayDeque<BetterBlockPos> stances = new ArrayDeque<>();
+        final List<BetterBlockPos> floors = new ArrayList<>();
+        final List<BetterBlockPos> originalSupports = new ArrayList<>();
+        CleanupStage stage = CleanupStage.CANDIDATE;
+        BetterBlockPos helper, stance, floor;
+        BlockState material;
+        Goal queryGoal;
+        BetterBlockPos queryStart;
+        CleanupEscapeContext queryContext;
+        boolean prefixProved, presentProved, removedProved, placed;
+        boolean worldInvalidated;
+        Placement placementRequest;
+        CleanupEscapeContext realRouteContext;
+        Goal realRouteGoal;
+        BetterBlockPos realRouteDestination;
+        boolean realRouteMayMine;
+        String blockedReason;
+
+        CleanupEscape(BuilderCalculationContext bcc) {
+            initialRules = bcc;
+            int radius = (int) Math.ceil(ctx.playerController().getBlockReachDistance()) + 1;
+            bounds = new CleanupBounds(start.x - radius, start.x + radius,
+                    Math.min(owner.y - 1, start.y - bcc.maxFallHeightNoWater - 2), start.y + 3,
+                    start.z - radius, start.z + radius);
+            // A margin covers jump overshoot/head checks. Any unobserved/unloaded area refuses the episode.
+            for (int x = bounds.minX - 5; x <= bounds.maxX + 5; x++) {
+                for (int z = bounds.minZ - 5; z <= bounds.maxZ + 5; z++) {
+                    if (!bcc.bsi.worldContainsLoadedChunk(x, z)) { block("unloaded local proof area"); return; }
+                    for (int y = bounds.minY - 2; y <= bounds.maxY + 3; y++) {
+                        snapshot.put(BlockPos.asLong(x, y, z), ctx.world().getBlockState(new BlockPos(x, y, z)));
+                    }
+                }
+            }
+            List<BetterBlockPos> ordered = new ArrayList<>();
+            for (int x = bounds.minX; x <= bounds.maxX; x++) {
+                for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
+                    for (int y = bounds.minY + 1; y < start.y; y++) {
+                        BetterBlockPos at = new BetterBlockPos(x, y, z);
+                        if (!dryClear(at, bcc) || !MovementHelper.canWalkOn(bcc, x, y - 1, z)) continue;
+                        // The permanent destination must stay valid after removing all original helper debt.
+                        if (cleanupPermanentFloor(at.below(), bcc)
+                                && y <= owner.y && cleanupCanSwingFrom(at, owner)) floors.add(at);
+                        if (cleanupMayOccupy(at, bcc) && !at.equals(owner)) ordered.add(at);
+                    }
+                }
+            }
+            ordered.sort(Comparator.<BetterBlockPos>comparingInt(p -> -p.y)
+                    .thenComparingDouble(p -> p.distSqr(owner)).thenComparingInt(p -> p.x).thenComparingInt(p -> p.z));
+            candidates.addAll(ordered);
+            if (floors.isEmpty()) block("no independent permanent cleanup floor");
+        }
+
+        void block(String why) {
+            if (stage == CleanupStage.BLOCKED) return;
+            probe.cancel();
+            stage = CleanupStage.BLOCKED;
+            blockedReason = why;
+            princeps.getInputOverrideHandler().getBlockPlaceHelper().clearExpectedPlacement();
+            BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-BLOCKED", owner.x, owner.y, owner.z, why);
+        }
+
+        boolean identityCurrent() {
+            return world == ctx.world() && model == (realSchematic == null ? schematic : realSchematic)
+                    && buildOrigin.equals(origin) && owner.equals(electedCell) && ownerGoal == electedGoal
+                    && !buildInRows && System.nanoTime() < deadline;
+        }
+
+        boolean rulesCurrent(BuilderCalculationContext now) {
+            return initialRules.maxFallHeightNoWater == now.maxFallHeightNoWater
+                    && initialRules.allowDownward == now.allowDownward && initialRules.allowParkour == now.allowParkour
+                    && initialRules.allowParkourAscend == now.allowParkourAscend
+                    && initialRules.allowParkourPlace == now.allowParkourPlace
+                    && initialRules.allowBreak == now.allowBreak && initialRules.allowBreakAnyway.equals(now.allowBreakAnyway)
+                    && initialRules.canSprint == now.canSprint;
+        }
+
+        void serverChanged(BlockPos at, BlockState state) {
+            BlockState before = snapshot.get(at.asLong());
+            if (before != null && !(placed && at.equals(helper)) && !before.equals(state)) worldInvalidated = true;
+        }
+
+        boolean worldCurrent() { return !worldInvalidated; }
+
+        /** Full comparison only at proof/action boundaries; ordinary route ticks use packet invalidation. */
+        boolean verifyWorld() {
+            if (worldInvalidated || world != ctx.world()) return false;
+            for (Map.Entry<Long, BlockState> entry : snapshot.entrySet()) {
+                BlockPos at = BlockPos.of(entry.getKey());
+                if (placed && at.equals(helper)) continue; // the sole declared mutation of this episode
+                if (!ctx.world().hasChunkAt(at) || !entry.getValue().equals(ctx.world().getBlockState(at))) {
+                    worldInvalidated = true; return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /** Strict dry navigation. Ordinary Lane A alone still permits template placement and mining. */
+    final class CleanupEscapeContext extends BuilderCalculationContext {
+        private final CleanupBounds bounds;
+        private final BlockPos mineOnly;
+        private final BlockState mineState;
+        private final BuilderCleanupDebt permittedDebt;
+        private final boolean hypotheticalMine;
+
+        CleanupEscapeContext(CleanupBounds bounds, BlockPos mineOnly, BlockState mineState,
+                             BlockPos assumeAt, BlockState assumedState) {
+            super(Lane.A_NO_PLACING, null, false);
+            this.bounds = bounds;
+            this.mineOnly = mineOnly;
+            this.mineState = mineState;
+            this.hypotheticalMine = mineOnly != null && mineOnly.equals(assumeAt);
+            this.permittedDebt = mineOnly != null && assumeAt == null ? cleanupEscapeDebt : null;
+            if (assumeAt != null) bsi.nimmBlockAn(assumeAt, assumedState);
+            // Each context and BSI is private and immutable for the full worker lifetime, including cancellation.
+        }
+
+        @Override public double costOfPlacingAt(int x, int y, int z, BlockState current) { return COST_INF; }
+        @Override public PlacementLicence placementLicence() { return PlacementLicence.NONE; }
+        @Override public boolean mayUsePathingBarriers() { return false; }
+        @Override public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
+            if (mineOnly == null || mineOnly.getX() != x || mineOnly.getY() != y || mineOnly.getZ() != z
+                    || mineState == null || current.getBlock() != mineState.getBlock()
+                    || (!allowBreak && !allowBreakAnyway.contains(current.getBlock()))
+                    || isPossiblyProtected(x, y, z)) return COST_INF;
+            // PRESENT proves only a hypothetical edge. Real execution must retain its current, revocable
+            // ownership: AIR followed by an identical foreign block never reacquires that permission.
+            if (!hypotheticalMine && (permittedDebt == null || permittedDebt != cleanupEscapeDebt
+                    || permittedDebt.episode != cleanupEscape
+                    || !permittedDebt.mayMine(ctx.world(), mineOnly, current))) return COST_INF;
+            return super.breakCostMultiplierAt(x, y, z, current);
+        }
+        @Override public boolean isPathPositionAllowed(int x, int y, int z) {
+            return bounds.contains(x, y, z) && bsi.isLoaded(x, z)
+                    && get(x, y, z).getFluidState().isEmpty() && get(x, y + 1, z).getFluidState().isEmpty()
+                    && get(x, y - 1, z).getFluidState().isEmpty();
+        }
+    }
+
+    private boolean dryClear(BlockPos feet, BuilderCalculationContext bcc) {
+        return bcc.get(feet).isAir() && bcc.get(feet.above()).isAir()
+                && bcc.get(feet.below()).getFluidState().isEmpty();
+    }
+
+    private boolean cleanupMayOccupy(BlockPos at, BuilderCalculationContext bcc) {
+        if (!bcc.hasThrowaway || !Princeps.settings().allowPlace.value || !bcc.get(at).isAir()
+                || bcc.isPossiblyProtected(at.getX(), at.getY(), at.getZ())
+                || !bcc.worldBorder.canPlaceAt(at.getX(), at.getZ())) return false;
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        int x = at.getX() - origin.getX(), y = at.getY() - origin.getY(), z = at.getZ() - origin.getZ();
+        if (x < 0 || y < 0 || z < 0 || x >= full.widthX() || y >= full.heightY() || z >= full.lengthZ()) return true;
+        try {
+            BlockState wanted = full.desiredState(x, y, z, bcc.get(at), approxPlaceable);
+            return wanted != null && wanted.isAir();
+        } catch (RuntimeException invalidModel) { return false; }
+    }
+
+    private boolean cleanupPermanentFloor(BlockPos at, BuilderCalculationContext bcc) {
+        if (navigationScaffolds.contains(at) || isScaffoldLeftBehind(at.getX(), at.getY(), at.getZ(), bcc)
+                || incorrectPositions != null && incorrectPositions.contains(new BetterBlockPos(at))) return false;
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        int x = at.getX() - origin.getX(), y = at.getY() - origin.getY(), z = at.getZ() - origin.getZ();
+        if (x < 0 || y < 0 || z < 0 || x >= full.widthX() || y >= full.heightY() || z >= full.lengthZ()) return true;
+        BlockState current = bcc.get(at);
+        try {
+            BlockState wanted = full.desiredState(x, y, z, current, approxPlaceable);
+            return wanted != null && !wanted.isAir() && wanted.equals(current);
+        } catch (RuntimeException invalidModel) { return false; }
+    }
+
+    /** The finite original support columns involved in this candidate, never the new helper itself. */
+    private void cleanupOriginalSupports(CleanupEscape e, BlockPos base, BuilderCalculationContext bcc) {
+        if (!navigationScaffolds.owns(base, bcc.get(base))) return;
+        for (int step : new int[]{-1, 1}) {
+            for (int y = base.getY(); y >= e.bounds.minY && y <= e.bounds.maxY; y += step) {
+                BetterBlockPos at = new BetterBlockPos(base.getX(), y, base.getZ());
+                if (!navigationScaffolds.owns(at, bcc.get(at))) break;
+                if (!e.originalSupports.contains(at)) e.originalSupports.add(at);
+            }
+        }
+    }
+
+    private boolean cleanupCanSwingFrom(BetterBlockPos stance, BetterBlockPos target) {
+        Vec3 eye = new Vec3(stance.x + 0.5, stance.y + ctx.player().getEyeHeight(Pose.STANDING), stance.z + 0.5);
+        double reach = ctx.playerController().getBlockReachDistance();
+        for (Direction face : Direction.values()) {
+            Vec3 hitAt = Vec3.atCenterOf(target).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+            if (eye.distanceTo(hitAt) > reach) continue;
+            BlockHitResult hit = ctx.world().clip(new net.minecraft.world.level.ClipContext(eye,
+                    hitAt.add(hitAt.subtract(eye).normalize().scale(0.001)),
+                    net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                    net.minecraft.world.level.ClipContext.Fluid.NONE, ctx.player()));
+            if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target)) return true;
+        }
+        return false;
+    }
+
+    private boolean startCleanupEscape(BuilderCalculationContext bcc, boolean safeToCancel) {
+        if (cleanupEscape != null || !safeToCancel || !ctx.player().onGround() || buildInRows || !electedBreak
+                || electedCell == null || laneAProof == null || !laneQuestionCurrent(laneAProof, electedGoal, false)
+                || !navigationScaffolds.owns(electedCell, ctx.world().getBlockState(electedCell))
+                || cleanupEscapeAttemptedOwners.contains(electedCell.asLong())
+                || cleanupEscapeDebt != null && !cleanupEscapeDebt.discharged()) return false;
+        if (!laneQuestionCurrent(laneAProof, electedGoal, true)) {
+            // Accepted navigation permission can survive movement; a new escape needs a fresh negative search
+            // from the actual body/world revision. Re-ask instead of upgrading that older fact into a proof.
+            discardLaneQuestion();
+            laneAProof = null;
+            laneEscalatedCell = null;
+            return false;
+        }
+        cleanupEscapeAttemptedOwners.add(electedCell.asLong());
+        cleanupEscape = new CleanupEscape(bcc);
+        BuildTrace.cell(buildTick, "CLEANUP-ESCAPE", electedCell.x, electedCell.y, electedCell.z,
+                "finite candidates=" + cleanupEscape.candidates.size() + " permanentFloors=" + cleanupEscape.floors.size());
+        return true;
+    }
+
+    private PathingCommand cleanupHold() {
+        return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+    }
+
+    private boolean askCleanup(CleanupEscape e, BetterBlockPos start, Goal goal, CleanupEscapeContext context) {
+        if (!e.identityCurrent() || !ctx.playerFeet().equals(e.start) || !e.verifyWorld()) {
+            e.block("proof identity/start/world changed"); return false;
+        }
+        e.queryStart = start;
+        e.queryGoal = goal;
+        e.queryContext = context;
+        return e.probe.start(ctx, start, goal, context, LANE_B_BUDGET,
+                Princeps.settings().primaryTimeoutMS.value, Princeps.settings().failureTimeoutMS.value);
+    }
+
+    static boolean cleanupCompleteDryPath(PathProbe.Result answer, BetterBlockPos start, Goal goal, int maxDryFall) {
+        if (answer == null || !answer.reachedGoal() || answer.path == null || answer.path.positions().isEmpty()
+                || !start.equals(answer.path.getSrc()) || !goal.isInGoal(answer.path.getDest())) return false;
+        List<BetterBlockPos> positions = answer.path.positions();
+        for (int i = 1; i < positions.size(); i++) {
+            if (positions.get(i - 1).y - positions.get(i).y > maxDryFall) return false;
+        }
+        return true;
+    }
+
+    private PathingCommand cleanupRoute(CleanupEscape e, BetterBlockPos destination, boolean mayMineHelper) {
+        if (e.realRouteContext == null || !destination.equals(e.realRouteDestination) || mayMineHelper != e.realRouteMayMine) {
+            BlockPos mine = mayMineHelper ? e.helper : null;
+            e.realRouteContext = new CleanupEscapeContext(e.bounds, mine, e.material, null, null);
+            e.realRouteGoal = new GoalBlock(destination);
+            e.realRouteDestination = destination;
+            e.realRouteMayMine = mayMineHelper;
+        }
+        return new PathingCommandContext(e.realRouteGoal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, e.realRouteContext);
+    }
+
+    private PathingCommand driveCleanupEscape(boolean safeToCancel, BuilderCalculationContext ordinary) {
+        CleanupEscape e = cleanupEscape;
+        observeCleanupInteraction(e);
+        if (!safeToCancel && princeps.getPathingBehavior().isPathing()) {
+            return continueCurrentRoute(princeps.getPathingBehavior().getGoal(), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        }
+        if (!e.identityCurrent() || !e.worldCurrent() || !e.rulesCurrent(ordinary)) {
+            e.block("owner/model/world/rules changed or finite episode expired");
+        }
+        if (e.stage == CleanupStage.BLOCKED) return cleanupHold();
+        if (e.placed && (cleanupEscapeDebt == null || cleanupEscapeDebt.state() == BuilderCleanupDebt.State.REPLACED)) {
+            e.block("helper ownership revoked by server state"); return cleanupHold();
+        }
+
+        if (e.stage == CleanupStage.CANDIDATE) {
+            if (!e.worldCurrent()) { e.block("local world changed before proof"); return cleanupHold(); }
+            if (e.stances.isEmpty()) {
+                if (e.candidates.isEmpty()) { e.block("finite helper candidates exhausted"); return cleanupHold(); }
+                e.helper = e.candidates.removeFirst();
+                e.material = snakeIntegrityBlockState(e.helper);
+                if (e.material == null || !cleanupMayOccupy(e.helper, ordinary)) return cleanupHold();
+                e.originalSupports.clear();
+                cleanupOriginalSupports(e, e.owner, ordinary);
+                cleanupOriginalSupports(e, e.helper.below(), ordinary);
+                // Use normal inventory rules; no direct inventory write and no permission override.
+                princeps.getInventoryBehavior().throwaway(true, stack -> !stack.isEmpty()
+                        && stack.getItem() == e.material.getBlock().asItem());
+                if (hotbarStackThatPlaces(e.material) == null) {
+                    e.candidates.addFirst(e.helper); return cleanupHold();
+                }
+                e.stances.addAll(placementStancesFor(e.helper.x, e.helper.y, e.helper.z, e.material, ordinary,
+                        Integer.MAX_VALUE, true, key -> {
+                            BlockPos p = BlockPos.of(key);
+                            return e.bounds.contains(p.getX(), p.getY(), p.getZ())
+                                    && dryClear(p, ordinary) && isStandable(p.getX(), p.getY(), p.getZ());
+                        }));
+                if (e.stances.isEmpty()) return cleanupHold();
+            }
+            e.stance = e.stances.removeFirst();
+            e.prefixProved = e.presentProved = e.removedProved = false;
+            CleanupEscapeContext context = new CleanupEscapeContext(e.bounds, null, null, null, null);
+            if (askCleanup(e, e.start, new GoalBlock(e.stance), context)) e.stage = CleanupStage.PREFIX_PROOF;
+            return cleanupHold();
+        }
+
+        if (e.stage == CleanupStage.PREFIX_PROOF || e.stage == CleanupStage.PRESENT_PROOF
+                || e.stage == CleanupStage.REMOVED_PROOF) {
+            PathProbe.Result answer = e.probe.poll();
+            if (answer == null) return cleanupHold();
+            if (!ctx.playerFeet().equals(e.start) || !e.verifyWorld()) {
+                e.block("start/world changed while proving an escape leg"); return cleanupHold();
+            }
+            if (!cleanupCompleteDryPath(answer, e.queryStart, e.queryGoal, e.queryContext.maxFallHeightNoWater)) {
+                e.stage = CleanupStage.CANDIDATE; return cleanupHold();
+            }
+            if (e.stage == CleanupStage.PREFIX_PROOF) {
+                e.prefixProved = true;
+                CleanupEscapeContext present = new CleanupEscapeContext(e.bounds, null, null, e.helper, e.material);
+                if (askCleanup(e, e.stance, new GoalBlock(e.helper.above()), present)) e.stage = CleanupStage.PRESENT_PROOF;
+            } else if (e.stage == CleanupStage.PRESENT_PROOF) {
+                e.presentProved = true;
+                CleanupEscapeContext downward = new CleanupEscapeContext(e.bounds, e.helper, e.material, e.helper, e.material);
+                double cost = MovementDownward.cost(
+                        downward, e.helper.x, e.helper.y + 1, e.helper.z);
+                if (!Double.isFinite(cost) || cost >= COST_INF) { e.stage = CleanupStage.CANDIDATE; return cleanupHold(); }
+                CleanupEscapeContext removed = new CleanupEscapeContext(e.bounds, null, null, e.helper, Blocks.AIR.defaultBlockState());
+                Goal floors = new GoalComposite(e.floors.stream()
+                        .filter(at -> e.originalSupports.stream().allMatch(support -> cleanupCanSwingFrom(at, support)))
+                        .map(GoalBlock::new).toArray(Goal[]::new));
+                if (askCleanup(e, e.helper, floors, removed)) e.stage = CleanupStage.REMOVED_PROOF;
+            } else {
+                e.removedProved = true;
+                e.floor = answer.path.getDest();
+                e.stage = CleanupStage.WALK_PREFIX;
+            }
+            return cleanupHold();
+        }
+
+        if (e.stage == CleanupStage.WALK_PREFIX) {
+            if (!ctx.playerFeet().equals(e.stance) || !ctx.player().onGround()) return cleanupRoute(e, e.stance, false);
+            if (!e.verifyWorld()) { e.block("world changed before actual placement"); return cleanupHold(); }
+            e.stage = CleanupStage.PLACE;
+        }
+        if (e.stage == CleanupStage.PLACE) {
+            if (!e.prefixProved || !e.presentProved || !e.removedProved || !cleanupMayOccupy(e.helper, ordinary)
+                    || !ctx.player().onGround() || !ctx.playerFeet().equals(e.stance)) {
+                e.block("placement prerequisites no longer hold"); return cleanupHold();
+            }
+            if (!e.worldCurrent()) { e.block("world changed during aim"); return cleanupHold(); }
+            Optional<Placement> placement = possibleToPlace(e.material, e.helper.x, e.helper.y, e.helper.z, ordinary);
+            if (placement.isPresent()) cleanupPlacementClick(e, placement.get(), ordinary);
+            return cleanupHold();
+        }
+        if (e.stage == CleanupStage.WAIT_PLACE) {
+            if (cleanupEscapeDebt.state() == BuilderCleanupDebt.State.REMOVED) {
+                e.block("server rejected or removed the requested helper"); return cleanupHold();
+            }
+            if (cleanupEscapeDebt.state() != BuilderCleanupDebt.State.OWNED) {
+                if (cleanupEscapeDebt.mayRequest()) cleanupPlacementClick(e, e.placementRequest, ordinary);
+                return cleanupHold();
+            }
+            if (!e.verifyWorld() || !ordinary.get(e.helper).equals(e.material)) {
+                e.block("world changed after helper confirmation"); return cleanupHold();
+            }
+            // The existing ledger must not acquire this new block from a request or client prediction alone.
+            if (navigationScaffolds.record(e.helper, Blocks.AIR.defaultBlockState(), e.material,
+                    templateNamesABlockAt(e.helper), Princeps.settings().acceptableThrowawayItems.value
+                            .contains(e.material.getBlock().asItem()), buildTick)) {
+                navigationScaffolds.serverChanged(e.helper, e.material); // replay the exact observation already held by OWNED debt
+            }
+            e.stage = CleanupStage.WALK_PRESENT;
+        }
+        if (e.stage == CleanupStage.WALK_PRESENT) {
+            if (!ctx.playerFeet().equals(e.helper.above()) || !ctx.player().onGround()) {
+                return cleanupRoute(e, e.helper.above(), false);
+            }
+            if (!cleanupEscapeDebt.mayMine(ctx.world(), e.helper, ordinary.get(e.helper))
+                    || !e.verifyWorld() || !MovementHelper.canWalkOn(ordinary, e.helper.x, e.helper.y - 1, e.helper.z)) {
+                e.block("downward support or ownership changed"); return cleanupHold();
+            }
+            CleanupEscapeContext downward = new CleanupEscapeContext(e.bounds, e.helper, e.material, null, null);
+            double cost = MovementDownward.cost(downward,
+                    e.helper.x, e.helper.y + 1, e.helper.z);
+            if (!Double.isFinite(cost) || cost >= COST_INF) { e.block("real downward movement is forbidden"); return cleanupHold(); }
+            e.stage = CleanupStage.DOWNWARD;
+        }
+        if (e.stage == CleanupStage.DOWNWARD) {
+            PathingCommand descending = driveCleanupDownward(e, ordinary);
+            if (descending != null) return descending;
+        }
+        if (e.stage == CleanupStage.WALK_REMOVED) {
+            if (!ctx.playerFeet().equals(e.floor) || !ctx.player().onGround()) return cleanupRoute(e, e.floor, false);
+            if (!e.verifyWorld() || !cleanupEscapeDebt.discharged() || !dryClear(e.floor, ordinary)
+                    || !MovementHelper.canWalkOn(ordinary, e.floor.x, e.floor.y - 1, e.floor.z)
+                    || !cleanupPermanentFloor(e.floor.below(), ordinary)
+                    || !cleanupCanSwingFrom(e.floor, e.owner)
+                    || !e.originalSupports.stream().allMatch(support -> cleanupCanSwingFrom(e.floor, support))) {
+                e.block("permanent cleanup stance did not verify"); return cleanupHold();
+            }
+            BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-LANDED", e.owner.x, e.owner.y, e.owner.z,
+                    "one helper removed; original owner retained; permanent feet=" + e.floor.toShortString());
+            cleanupEscape = null;
+            return cleanupHold();
+        }
+        return cleanupHold();
+    }
+
+    /** The real Downward phase: an already removed helper may be entered, but never mined a second time. */
+    private PathingCommand driveCleanupDownward(CleanupEscape e, BuilderCalculationContext ordinary) {
+        BlockState actual = ordinary.get(e.helper);
+        if (!actual.isAir() && !cleanupEscapeDebt.mayMine(ctx.world(), e.helper, actual)) {
+            e.block("downward helper is no longer owned"); return cleanupHold();
+        }
+        if (!ctx.playerFeet().equals(e.helper) || !ctx.player().onGround()
+                || !cleanupEscapeDebt.discharged()) return cleanupRoute(e, e.helper, true);
+        if (!e.verifyWorld() || !actual.isAir()) {
+            e.block("world changed after downward removal"); return cleanupHold();
+        }
+        e.stage = CleanupStage.WALK_REMOVED;
+        return null;
+    }
+
+    private void observeCleanupInteraction(CleanupEscape e) {
+        if (e.placementRequest == null || cleanupEscapeDebt == null) return;
+        Placement placement = e.placementRequest;
+        BlockPlaceHelper.SuccessfulBlockInteraction receipt =
+                princeps.getInputOverrideHandler().getBlockPlaceHelper().getLastSuccessfulBlockInteraction();
+        if (receipt != null && receipt.matchesMainHandPlacement(placement.placeAgainst, placement.side, placement.target,
+                placement.hotbarSelection, placement.desired.getBlock().asItem())) {
+            cleanupEscapeDebt.interactionObserved(ctx.world(), e, receipt.getSerial(), System.nanoTime());
+        }
+    }
+
+    private void cleanupPlacementClick(CleanupEscape e, Placement placement, BuilderCalculationContext bcc) {
+        if (placement == null || !e.identityCurrent() || !e.worldCurrent()) return;
+        if (princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory()) return;
+        princeps.getLookBehavior().updateTarget(placement.rot, true, AimIntent.PLACE);
+        ctx.player().getInventory().setSelectedSlot(placement.hotbarSelection);
+        princeps.getInputOverrideHandler().setInputForceState(Input.SNEAK, true);
+        HitResult hit = ctx.objectMouseOver();
+        BlockPlaceHelper placer = princeps.getInputOverrideHandler().getBlockPlaceHelper();
+        if (hit == null || hit.getType() != HitResult.Type.BLOCK || placer.isThrottled()
+                || !((BlockHitResult) hit).getBlockPos().equals(placement.placeAgainst)
+                || ((BlockHitResult) hit).getDirection() != placement.side || !liveRayWouldPlaceDesired(placement, bcc)) return;
+        if (e.placementRequest == null) {
+            if (!e.verifyWorld()) { e.block("world changed at actual placement"); return; }
+            e.placementRequest = placement;
+            cleanupEscapeDebt = new BuilderCleanupDebt(ctx.world(), e, e.helper, e.material,
+                    placer.getSuccessfulBlockInteractions(), cleanupServerUpdateSequence, System.nanoTime());
+            progressActions.arm(positionKey(e.helper), Blocks.AIR.defaultBlockState(), e.material);
+            e.placed = true;
+            e.stage = CleanupStage.WAIT_PLACE;
+        }
+        BuilderCleanupDebt debt = cleanupEscapeDebt;
+        if (debt == null || debt.episode != e || !debt.mayRequest()) return;
+        Item expected = placement.desired.getBlock().asItem();
+        placer.expectMainHandPlacement(placement.placeAgainst, placement.side, placement.target,
+                placement.hotbarSelection, expected, () -> cleanupEscape == e && e.identityCurrent()
+                        && e.worldCurrent() && cleanupEscapeDebt == debt && debt.mayRequest()
+                        && e.stage == CleanupStage.WAIT_PLACE && liveRayWouldPlaceDesired(placement, bcc));
+        BuildTrace.intendWorldChange("cleanup-helper", e.helper.x, e.helper.y, e.helper.z,
+                "one proved helper for retained BREAK owner");
+        princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
     }
 
     // ==========================================================================================================
@@ -13653,6 +14153,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         lastSupportDependent = null;
         lastSupportRefusalReason = null;
         supportRepair = null;
+        if (cleanupEscape != null) cleanupEscape.probe.cancel();
+        cleanupEscape = null;
+        cleanupEscapeAttemptedOwners.clear();
+        // cleanupEscapeDebt deliberately survives. Foreign replacement revokes mining, not the audit record.
         progressWatch.reset();
         progressActions.clear();
         confirmedProgressRevision = 0;
@@ -14024,7 +14528,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
 
         private BuilderCalculationContext(Lane lane, BetterBlockPos excavationRouteWaypoint) {
-            super(BuilderProcess.this.princeps, true); // wew lad
+            this(lane, excavationRouteWaypoint, true);
+        }
+
+        private BuilderCalculationContext(Lane lane, BetterBlockPos excavationRouteWaypoint, boolean permitFallWater) {
+            super(BuilderProcess.this.princeps, true, permitFallWater);
             this.lane = lane;
             this.ordinaryExcavationMode = ordinaryExcavation();
             this.fluidPlugSnapshot = excavating ? excavationFluidPlugs.snapshot() : new ExcavationFluidPlugs();

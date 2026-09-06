@@ -25,6 +25,7 @@ import princeps.api.utils.Rotation;
 import princeps.api.utils.RotationUtils;
 import princeps.api.utils.VecUtils;
 import princeps.api.utils.input.Input;
+import princeps.behavior.PathingBehavior;
 import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
@@ -81,6 +82,11 @@ public class MovementFall extends Movement {
     }
 
     private boolean willPlaceBucket() {
+        CalculationContext route = princeps.getPathingBehavior() instanceof PathingBehavior behavior
+                ? behavior.secretInternalGetCalculationContext() : null;
+        if (route != null && route.forbidsWaterBucketFall()) return false;
+        // Every ordinary route keeps the original fresh inventory/settings check. A stale route snapshot must not
+        // enable a removed bucket or suppress one that has since become available.
         CalculationContext context = new CalculationContext(princeps);
         MutableMoveResult result = new MutableMoveResult();
         return MovementDescend.dynamicFallCost(context, src.x, src.y, src.z, dest.x, dest.z, 0, context.get(dest.x, src.y - 2, dest.z), result);

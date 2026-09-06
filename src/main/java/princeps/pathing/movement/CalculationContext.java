@@ -62,6 +62,7 @@ public class CalculationContext {
     public final BlockStateInterface bsi;
     public final ToolSet toolSet;
     public final boolean hasWaterBucket;
+    private final boolean fallWaterForbidden;
     public final boolean hasThrowaway;
     public final boolean canSprint;
     protected final double placeBlockCost; // protected because you should call the function instead
@@ -108,6 +109,12 @@ public class CalculationContext {
     }
 
     public CalculationContext(IPrinceps princeps, boolean forUseOnAnotherThread) {
+        this(princeps, forUseOnAnotherThread, true);
+    }
+
+    /** A caller may prohibit water placement for its route; this never enables a disabled bucket setting. */
+    protected CalculationContext(IPrinceps princeps, boolean forUseOnAnotherThread, boolean permitFallWater) {
+        this.fallWaterForbidden = !permitFallWater;
         this.precomputedData = new PrecomputedData();
         this.safeForThreadedUse = forUseOnAnotherThread;
         this.princeps = princeps;
@@ -117,7 +124,7 @@ public class CalculationContext {
         this.bsi = new BlockStateInterface(princeps.getPlayerContext(), forUseOnAnotherThread);
         this.toolSet = new ToolSet(player);
         this.hasThrowaway = Princeps.settings().allowPlace.value && ((Princeps) princeps).getInventoryBehavior().hasGenericThrowaway();
-        this.hasWaterBucket = Princeps.settings().allowWaterBucketFall.value && Inventory.isHotbarSlot(player.getInventory().findSlotMatchingItem(STACK_BUCKET_WATER)) && world.dimension() != Level.NETHER;
+        this.hasWaterBucket = permitFallWater && Princeps.settings().allowWaterBucketFall.value && Inventory.isHotbarSlot(player.getInventory().findSlotMatchingItem(STACK_BUCKET_WATER)) && world.dimension() != Level.NETHER;
         this.canSprint = Princeps.settings().allowSprint.value && player.getFoodData().getFoodLevel() > 6;
         this.placeBlockCost = Princeps.settings().blockPlacementPenalty.value;
         this.allowBreak = Princeps.settings().allowBreak.value;
@@ -192,6 +199,9 @@ public class CalculationContext {
     public BlockState get(int x, int y, int z) {
         return bsi.get0(x, y, z); // laughs maniacally
     }
+
+    /** An explicit route restriction, independent of the current inventory/setting capability snapshot. */
+    public final boolean forbidsWaterBucketFall() { return fallWaterForbidden; }
 
     public boolean isLoaded(int x, int z) {
         return bsi.isLoaded(x, z);
