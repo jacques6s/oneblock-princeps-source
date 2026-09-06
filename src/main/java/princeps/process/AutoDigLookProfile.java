@@ -12,7 +12,7 @@ package princeps.process;
 import princeps.api.Settings;
 
 /**
- * Scoped, deterministic look policy for the area-tool excavation snake.
+ * Scoped look policy for excavation, preserving the existing construction area-tool policy.
  *
  * <p>The caller still owns the one deliberate user dial, {@code humanizedLookAimCurveTurnTicks}. Everything else
  * that decides whether a turn curves, snaps, wanders, or inherits a prior module's steering is fixed for the life of
@@ -60,8 +60,11 @@ final class AutoDigLookProfile {
     private final double humanizedSteeringHysteresis;
     private boolean restored;
 
-    private AutoDigLookProfile(Settings settings) {
+    private final boolean preserveWalkingPitch;
+
+    private AutoDigLookProfile(Settings settings, boolean preserveWalkingPitch) {
         this.settings = settings;
+        this.preserveWalkingPitch = preserveWalkingPitch;
         freeLook = settings.freeLook.value;
         blockFreeLook = settings.blockFreeLook.value;
         elytraFreeLook = settings.elytraFreeLook.value;
@@ -98,7 +101,11 @@ final class AutoDigLookProfile {
     }
 
     static AutoDigLookProfile apply(Settings settings) {
-        AutoDigLookProfile snapshot = new AutoDigLookProfile(settings);
+        return apply(settings, true);
+    }
+
+    static AutoDigLookProfile apply(Settings settings, boolean excavating) {
+        AutoDigLookProfile snapshot = new AutoDigLookProfile(settings, excavating);
         snapshot.enforce();
         return snapshot;
     }
@@ -125,8 +132,9 @@ final class AutoDigLookProfile {
         settings.humanizedLookAimCurveYawScale.value = 1.0D;
         settings.humanizedLookAimCurvePitchScale.value = 1.0D;
         settings.humanizedWalkPitchNudgeStep.value = 180.0D;
-        settings.humanizedWalkPitchMin.value = 6.0D;
-        settings.humanizedWalkPitchMax.value = 12.0D;
+        // A flat excavation step inherits the current pitch; only a real break/place/fall target should re-aim it.
+        settings.humanizedWalkPitchMin.value = preserveWalkingPitch ? -90.0D : 6.0D;
+        settings.humanizedWalkPitchMax.value = preserveWalkingPitch ? 90.0D : 12.0D;
         settings.humanizedFallPitchMin.value = 12.0D;
         settings.humanizedFallPitchMax.value = 22.0D;
         settings.humanizedBreakSightDelay.value = true;

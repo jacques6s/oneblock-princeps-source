@@ -37,6 +37,36 @@ public class SnakeCleanupWorkTest {
     }
 
     @Test
+    public void aPredictedCleanupHitCannotStandInForAValidCurrentRay() {
+        SnakeCleanupWork work = selected(Blocks.STONE.defaultBlockState());
+        VoxelShape shape = net.minecraft.world.phys.shapes.Shapes.block();
+        Vec3 eye = new Vec3(2.5, 65.65, 0.5);
+        Rotation actual = new Rotation(0, 0);
+        Rotation predicted = RotationUtils.calcRotationFromVec3d(eye, new Vec3(0.5, 65.5, 0.5), actual);
+        assertFalse(BuilderProcess.snakeMiningHitMatches(ray(shape, eye, actual), TARGET, null));
+        assertTrue(BuilderProcess.snakeMiningHitMatches(ray(shape, eye, predicted), TARGET, null));
+        assertTrue(work.rotation(eye, actual, REACH, raw -> ray(shape, eye, raw),
+                raw -> ray(shape, eye, predicted), Optional::empty).isEmpty());
+    }
+
+    @Test
+    public void anotherValidCurrentHitOnTheChosenBlockDoesNotReturnToTheRememberedPoint() {
+        SnakeCleanupWork work = selected(Blocks.STONE.defaultBlockState());
+        VoxelShape shape = net.minecraft.world.phys.shapes.Shapes.block();
+        Vec3 eye = new Vec3(2.5, 65.65, 0.5);
+        Rotation centered = RotationUtils.calcRotationFromVec3d(eye, new Vec3(0.5, 65.5, 0.5), new Rotation(0, 0));
+        assertTrue(work.rotation(eye, new Rotation(0, 0), REACH, aimed -> ray(shape, eye, aimed),
+                () -> Optional.of(centered)).isPresent());
+        Rotation current = RotationUtils.calcRotationFromVec3d(eye, new Vec3(0.5, 65.8, 0.7), centered);
+        assertTrue(BuilderProcess.snakeMiningHitMatches(ray(shape, eye, current), TARGET, null));
+        assertSame("the chosen cell stays fixed, but a valid current ray need not recenter on its old hit point",
+                current, work.rotation(eye, current, REACH, aimed -> ray(shape, eye, aimed), () -> {
+                    fail("a matching current ray does not need another target search");
+                    return Optional.empty();
+                }).orElseThrow());
+    }
+
+    @Test
     public void lateralFlowKeepsTheActualWetSlabHitWithoutReelectingAHitEveryTick() {
         BlockState slab = Blocks.OAK_SLAB.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED, true);
         SnakeCleanupWork work = selected(slab);
@@ -49,6 +79,7 @@ public class SnakeCleanupWorkTest {
                     BuilderProcess.snakeWithinFaceAngle(eye.x - 0.5D, eye.z, Direction.NORTH));
             assertEquals(TARGET, work.retained(HEAD, BAND_TOP, at -> slab, at -> true));
             Rotation current = previous;
+            boolean currentRayStillHits = BuilderProcess.snakeMiningHitMatches(ray(shape, eye, current), TARGET, null);
             Optional<Rotation> rotation = work.rotation(eye, current, REACH,
                     aimed -> ray(shape, eye, aimed), () -> {
                         freshHits.incrementAndGet();
@@ -57,12 +88,15 @@ public class SnakeCleanupWorkTest {
             assertTrue(rotation.isPresent());
             BlockHitResult hit = (BlockHitResult) ray(shape, eye, rotation.get());
             assertEquals(TARGET, hit.getBlockPos());
-            assertEquals(Direction.EAST, hit.getDirection());
+            // Ordinary mining owns the block, not a Shard plane. A held ray may drift from the slab's side to its
+            // top while remaining correct; forcing EAST here would require the unnecessary recentering under test.
+            assertTrue(hit.getDirection() == Direction.EAST || hit.getDirection() == Direction.UP);
+            if (currentRayStillHits) assertSame(current, rotation.get());
             assertTrue(BuilderProcess.snakeMiningHitMatches(hit, TARGET, null));
             assertFalse(BuilderProcess.snakeMiningHitMatches(hit, TARGET, Direction.NORTH));
             previous = rotation.get();
         }
-        assertEquals("flow updates the rotation toward one real hit; it does not reselect the surface", 1, freshHits.get());
+        assertEquals("a still-valid ray is held; losing it returns to the one remembered hit", 1, freshHits.get());
     }
 
     @Test

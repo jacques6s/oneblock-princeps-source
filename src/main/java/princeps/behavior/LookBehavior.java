@@ -1066,12 +1066,7 @@ private float nudgeToLevel(float pitch) {
                 hi = Math.max(lo, Princeps.settings().humanizedWalkPitchMax.value.floatValue());
             }
             final float step = (float) Math.max(0.1, Princeps.settings().humanizedWalkPitchNudgeStep.value);
-            if (pitch < lo) {
-                return Math.min(lo, pitch + step); // clamp so a big step never overshoots past the band
-            } else if (pitch > hi) {
-                return Math.max(hi, pitch - step);
-            }
-            return pitch;
+            return nudgePitchToBand(pitch, lo, hi, step);
         }
 
         /** Cheap ~normal noise (mean 0, std ~0.5) from three uniforms — stateless, deterministic under fork(). */
@@ -1260,6 +1255,13 @@ private float nudgeToLevel(float pitch) {
     static double aimCurveAccel() {
         final double ticks = aimCurveTurnTicks();
         return turnCal(ticks, 2) * Math.max(0.1, Princeps.settings().humanizedLookAimCurvePeakScale.value);
+    }
+
+    /** One walking-band step; shared with the headless excavation-profile regression. */
+    static float nudgePitchToBand(float pitch, float lo, float hi, float step) {
+        if (pitch < lo) return Math.min(lo, pitch + step);
+        if (pitch > hi) return Math.max(hi, pitch - step);
+        return pitch;
     }
 
     /**
