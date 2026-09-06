@@ -553,6 +553,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private final Set<BetterBlockPos> snakePendingBridgeRepairs = new HashSet<>();
     private int snakeVerificationRepairSweeps;
     private int snakeVerificationStableTicks;
+    private int ordinaryIntegrityStableTicks;
+    private long ordinaryIntegrityObservedTick = Long.MIN_VALUE;
+    private int ordinaryIntegrityBandTop = Integer.MIN_VALUE;
+    private BetterBlockPos ordinaryIntegrityTarget;
+    private int ordinaryIntegrityTargetTicks;
 
     private boolean routeCrossIsX;
     private boolean routeAxisChosen;
@@ -1759,6 +1764,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         this.snakePendingBridgeRepairs.clear();
         this.snakeVerificationRepairSweeps = 0;
         this.snakeVerificationStableTicks = 0;
+        this.ordinaryIntegrityStableTicks = 0;
+        this.ordinaryIntegrityObservedTick = Long.MIN_VALUE;
+        this.ordinaryIntegrityBandTop = Integer.MIN_VALUE;
+        this.ordinaryIntegrityTarget = null;
+        this.ordinaryIntegrityTargetTicks = 0;
         this.paused = false;
         this.layer = Princeps.settings().startAtLayer.value;
         this.stopAtHeight = schematic.heightY();
@@ -3390,9 +3400,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     static int effectiveAreaBreakSize(int requested, boolean excavation, int width, int length) {
-        // A three-wide snake has no in-volume centre line in a one/two-wide selection. Ordinary clearing already
-        // owns source displacement and flowing-fluid waits, so use it for those boxes instead of inventing an
-        // outside corridor. This is a per-job decision: the user's area setting and construction jobs stay intact.
+        // A three-wide snake has no in-volume centre line in a one/two-wide selection. Use ordinary clearing with
+        // the shared excavation repair policy; the user's area setting and construction jobs stay intact.
         if (excavation && (width < SERPENTINE_LANE_WIDTH || length < SERPENTINE_LANE_WIDTH)) {
             return 1;
         }
@@ -4547,7 +4556,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             snakeTurnCross = Integer.MIN_VALUE;
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
-        PathingCommand repair = snakeIntegrityPlacementCommand(bcc,
+        PathingCommand repair = excavationIntegrityPlacementCommand(bcc,
                 princeps.getPathingBehavior().isSafeToCancel());
         if (repair != null) {
             return repair;
@@ -4690,14 +4699,25 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return snakeShellRequiresSeal(state, MovementHelper.isReplaceable(x, y, z, state, bcc.bsi));
     }
 
-    private enum SnakeRepairKind {
-        INTERNAL_SOURCE,
-        SHELL_SOURCE,
-        SHELL_GAP,
-        BRIDGE
+    private record SnakeRepair(BetterBlockPos pos, ExcavationRepairPolicy.Kind kind, int distanceSq) {
     }
 
-    private record SnakeRepair(BetterBlockPos pos, SnakeRepairKind kind, int distanceSq) {
+    private boolean ordinaryExcavation() {
+        return excavating && effectiveAreaBreakSize() == 1;
+    }
+
+    private ExcavationRepairPolicy.Bounds excavationRepairBounds() {
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        boolean ordinary = ordinaryExcavation();
+        if (full == null || origin == null
+                || (!ordinary && (snakeHead == null || snakeBandTop == Integer.MIN_VALUE))) return null;
+        int floor = ordinary ? origin.getY() + (Princeps.settings().buildInLayers.value ? bandMinYLocal : 0)
+                : snakeBandFloor;
+        int top = ordinary ? origin.getY() + (Princeps.settings().buildInLayers.value
+                ? bandMaxYLocal : full.heightY() - 1) : snakeBandTop;
+        return new ExcavationRepairPolicy.Bounds(origin.getX(), origin.getX() + full.widthX() - 1,
+                origin.getY(), origin.getY() + full.heightY() - 1,
+                origin.getZ(), origin.getZ() + full.lengthZ() - 1, floor, top, ordinary);
     }
 
     /**
@@ -4708,7 +4728,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * and those few ticks are enough for water to fan out. The repair preempts that route and the same snake stance
      * resumes immediately afterwards.
      */
-    private PathingCommand snakeIntegrityPlacementCommand(BuilderCalculationContext bcc, boolean safeToCancel) {
+    private PathingCommand excavationIntegrityPlacementCommand(BuilderCalculationContext bcc, boolean safeToCancel) {
         // ON GROUND *OR* IN WATER, and the difference is the whole run. This gate is here to keep a FALLING body from
         // placing -- a sensible rule, and it happens to also switch off the one repair that can end a flood, at the
         // exact moment the flood is what put the body in the air.
@@ -4720,7 +4740,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         //
         // A body IN WATER is not a falling body: it is supported, its aim is steady, and it is exactly where the
         // sources it must plug are. The falling case stays refused.
-        if (snakeHead == null || snakeBandTop == Integer.MIN_VALUE || !safeToCancel
+        ExcavationRepairPolicy.Bounds bounds = excavationRepairBounds();
+        if (bounds == null || !safeToCancel
                 || !(ctx.player().onGround() || ctx.player().isInWater())) {
             return null;
         }
@@ -4736,15 +4757,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     }
                     int x = feet.x + dx, y = feet.y + dy, z = feet.z + dz;
                     BlockState state = bcc.bsi.get0(x, y, z);
-                    boolean source = state.getFluidState().isSource();
-                    if (snakeSourceReadyForPlug(state, excavating) && insideSnakeVolume(x, y, z)) {
-                        candidates.add(new SnakeRepair(new BetterBlockPos(x, y, z),
-                                SnakeRepairKind.INTERNAL_SOURCE, distanceSq));
-                    } else if (snakeIsCurrentShellCoordinate(x, y, z)
-                            && snakeShellCellNeedsBlock(bcc, x, y, z)) {
-                        candidates.add(new SnakeRepair(new BetterBlockPos(x, y, z),
-                                source ? SnakeRepairKind.SHELL_SOURCE : SnakeRepairKind.SHELL_GAP, distanceSq));
-                    }
+                    ExcavationRepairPolicy.Kind kind = ExcavationRepairPolicy.repair(bounds, x, y, z, state,
+                            MovementHelper.isReplaceable(x, y, z, state, bcc.bsi), excavating);
+                    if (kind != null) candidates.add(new SnakeRepair(new BetterBlockPos(x, y, z), kind, distanceSq));
                 }
             }
         }
@@ -4785,24 +4800,69 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return null;
     }
 
-    private boolean insideSnakeVolume(int x, int y, int z) {
-        ISchematic full = realSchematic == null ? schematic : realSchematic;
-        return full != null && origin != null
-                && x >= origin.getX() && x < origin.getX() + full.widthX()
-                && y >= origin.getY() && y < origin.getY() + full.heightY()
-                && z >= origin.getZ() && z < origin.getZ() + full.lengthZ();
-    }
-
-    private boolean snakeIsCurrentShellCoordinate(int x, int y, int z) {
-        ISchematic full = realSchematic == null ? schematic : realSchematic;
-        if (full == null || origin == null) {
-            return false;
+    /** Ordinary mining still owes the same dry, closed boundary before it may descend or finish. */
+    private PathingCommand ordinaryExcavationIntegrityCommand(BuilderCalculationContext bcc,
+                                                              boolean safeToCancel, boolean hasWork) {
+        if (!ordinaryExcavation()) return null;
+        ExcavationRepairPolicy.Bounds bounds = excavationRepairBounds();
+        if (bounds == null) return null;
+        if (ordinaryIntegrityBandTop != bounds.bandTop()) {
+            ordinaryIntegrityBandTop = bounds.bandTop();
+            ordinaryIntegrityStableTicks = 0;
+            ordinaryIntegrityObservedTick = Long.MIN_VALUE;
         }
-        int minX = origin.getX(), maxX = minX + full.widthX() - 1;
-        int minZ = origin.getZ(), maxZ = minZ + full.lengthZ() - 1;
-        int top = origin.getY() + full.heightY() - 1;
-        return snakeShellCoordinate(x, y, z, minX, maxX, minZ, maxZ,
-                snakeBandFloor, snakeBandTop, top);
+        ExcavationRepairPolicy.Census census = ExcavationRepairPolicy.inspect(bounds,
+                pos -> bcc.bsi.get0(pos.getX(), pos.getY(), pos.getZ()), pos -> {
+                    BlockState state = bcc.bsi.get0(pos.getX(), pos.getY(), pos.getZ());
+                    return MovementHelper.isReplaceable(pos.getX(), pos.getY(), pos.getZ(), state, bcc.bsi);
+                });
+        PathingCommand hold = new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        if (census.clean()) {
+            ordinaryIntegrityTarget = null;
+            ordinaryIntegrityTargetTicks = 0;
+            if (ordinaryIntegrityObservedTick != buildTick) {
+                ordinaryIntegrityObservedTick = buildTick;
+                ordinaryIntegrityStableTicks++;
+            }
+            return ordinaryIntegrityStableTicks < 4 ? hold : null;
+        }
+        ordinaryIntegrityStableTicks = 0;
+        if (census.repairs().isEmpty()) {
+            ordinaryIntegrityTarget = null;
+            ordinaryIntegrityTargetTicks = 0;
+            if (census.solid() > 0) {
+                // A placement/gravity packet can arrive after recalc. Put that real block back into normal mining.
+                if (!hasWork) incorrectPositions = null;
+                return hasWork ? null : hold;
+            }
+            // Finite flow remains unresolved until the world acknowledges AIR; never repeatedly plug its tail.
+            return hold;
+        }
+        BetterBlockPos feet = ctx.playerFeet();
+        ExcavationRepairPolicy.Target target = census.repairs().stream()
+                .min(Comparator.comparingDouble(repair -> repair.pos().distSqr(feet))).orElseThrow();
+        if (target.pos().equals(ordinaryIntegrityTarget)) {
+            ordinaryIntegrityTargetTicks++;
+        } else {
+            ordinaryIntegrityTarget = target.pos();
+            ordinaryIntegrityTargetTicks = 0;
+        }
+        if (ordinaryIntegrityTargetTicks > 600) {
+            abortBuild(Ending.LAYER_VERIFICATION_FAILED, "AutoDig cannot reach an unresolved excavation repair",
+                    java.util.List.of("Unresolved " + target.kind() + " at " + target.pos(),
+                            "The layer remains unfinished; no outside route or vertical scaffold was attempted."));
+            return hold;
+        }
+        PathingCommand repair = excavationIntegrityPlacementCommand(bcc, safeToCancel);
+        if (repair != null) return repair;
+        if (!safeToCancel || !(ctx.player().onGround() || ctx.player().isInWater())) return hold;
+        // The existing one-edge route and bridge licence serve both excavation modes. A wall target itself is
+        // outside the selection; its approach cell never is. No remote source is made into an outside GoalBlock.
+        BetterBlockPos approach = bounds.approach(feet, target.pos());
+        if (approach == null) return hasWork ? null : hold;
+        if (!feet.equals(approach)) return excavationLevelPathingCommand(feet, approach);
+        if (!centeredInPlacementStance(approach)) return centerInPlacementStance(approach);
+        return hold;
     }
 
     static boolean snakeShellCoordinate(int x, int y, int z, int minX, int maxX, int minZ, int maxZ,
@@ -4845,14 +4905,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             Item expected = placement.desired.getBlock().asItem();
             helper.expectExcavationIntegrityPlacement(placement.placeAgainst, placement.side, placement.target,
                     placement.hotbarSelection, expected, () -> liveRayWouldPlaceDesired(placement, bcc));
-            String kind = repair.kind() == SnakeRepairKind.INTERNAL_SOURCE ? "autodig-source"
-                    : repair.kind() == SnakeRepairKind.BRIDGE ? "autodig-bridge" : "autodig-shell";
+            String kind = repair.kind() == ExcavationRepairPolicy.Kind.INTERNAL_SOURCE ? "autodig-source"
+                    : repair.kind() == ExcavationRepairPolicy.Kind.BRIDGE ? "autodig-bridge" : "autodig-shell";
             BuildTrace.intendWorldChange(kind, placement.target.getX(), placement.target.getY(),
                     placement.target.getZ(), "seal before next excavation action");
             princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
-            if (repair.kind() == SnakeRepairKind.INTERNAL_SOURCE) {
+            if (repair.kind() == ExcavationRepairPolicy.Kind.INTERNAL_SOURCE) {
                 snakeFluidSourcesPlugged++;
-            } else if (repair.kind() == SnakeRepairKind.BRIDGE) {
+            } else if (repair.kind() == ExcavationRepairPolicy.Kind.BRIDGE) {
                 snakeFloorRepairs++;
             } else {
                 snakeShellRepairs++;
@@ -8894,6 +8954,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // GIVEUP=0, Ende im Zeitablauf. Die Regel war da, sie kam nur nie an die Reihe.
         scaffoldPhaseTick(scanContext);
         boolean hasWork = recalc(scanContext);
+        if (hasWork) ordinaryIntegrityStableTicks = 0;
 
         // BAND COMPLETION IS ITS OWN STATE TRANSITION. It cannot live under !recalc: a clear job normally keeps the
         // thousands of cells in lower bands in its global work set, so recalc remains true while the current 3-high
@@ -9030,6 +9091,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return finishAbortedBuild() ? null
                         : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
+            PathingCommand integrity = ordinaryExcavationIntegrityCommand(scanContext, isSafeToCancel, false);
+            if (integrity != null) return integrity;
             // S10 + P6b. Die Ebene wird nachgesehen, bevor sie verlassen wird.
             LayerAudit audit = auditLayer(scanContext);
             logMechanic("S10 " + audit.headline());
@@ -9156,7 +9219,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (buildTick % 40 == 0) { logMechanic("PROBE B2 tick=" + buildTick + " toBreak=" + toBreak.isPresent()
                 + " safeToCancel=" + isSafeToCancel + " onGround=" + ctx.player().onGround()
                 + " yieldUntil=" + breakBranchYieldUntilTick + " idle=" + breakBranchIdleTicks); }
-        PathingCommand snakeRepair = snakeIntegrityPlacementCommand(bcc, isSafeToCancel);
+        PathingCommand snakeRepair = excavationIntegrityPlacementCommand(bcc, isSafeToCancel);
         if (snakeRepair != null) {
             return snakeRepair;
         }
@@ -10022,6 +10085,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (goal == null) {
             goal = assemble(bcc, approxPlaceable, true); // we're far away, so assume that we have our whole inventory to recalculate placeable properly
             if (goal == null) {
+                PathingCommand integrity = ordinaryExcavationIntegrityCommand(bcc, isSafeToCancel, true);
+                if (integrity != null) return integrity;
                 if (hasDeferredCells()) {
                     return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
@@ -11965,6 +12030,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                             "No stair, pillar, or vertical detour was attempted."));
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
+        return excavationLevelPathingCommand(feet, goal);
+    }
+
+    private PathingCommand excavationLevelPathingCommand(BetterBlockPos feet, BetterBlockPos goal) {
         // A bridge is counted only after the world acknowledges a standable block at the licensed cell. Planning a
         // bridge is not evidence that it happened, and incrementing here previously made the integrity report claim a
         // repair even in the run that fell into the cavity.
@@ -12042,7 +12111,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
         return snakeIntegrityPlacementClick(option.get(),
-                new SnakeRepair(floor, SnakeRepairKind.BRIDGE, 0), bcc);
+                new SnakeRepair(floor, ExcavationRepairPolicy.Kind.BRIDGE, 0), bcc);
     }
 
     static BetterBlockPos nextSnakeWaypoint(BetterBlockPos feet, BetterBlockPos goal) {
@@ -13171,6 +13240,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         /** Which of the owner's two lanes this context expresses. See {@link Lane}. */
         private final Lane lane;
         private final boolean rowMode;
+        private final boolean ordinaryExcavationMode;
         private final boolean rowSweepAlongX;
         private final int rowBandStart;
         private final int rowFrontier;
@@ -13186,6 +13256,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         private BuilderCalculationContext(Lane lane, BetterBlockPos excavationRouteWaypoint) {
             super(BuilderProcess.this.princeps, true); // wew lad
             this.lane = lane;
+            this.ordinaryExcavationMode = ordinaryExcavation();
             this.excavationRouteStart = lane == Lane.EXCAVATION_PATH ? ctx.playerFeet() : null;
             this.excavationRouteWaypoint = lane == Lane.EXCAVATION_PATH ? excavationRouteWaypoint : null;
             this.rowMode = buildInRows;
@@ -13528,6 +13599,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return COST_INF;
             }
             BlockState sch = getSchematic(x, y, z, current);
+            if (!ExcavationRepairPolicy.navigationMayMine(ordinaryExcavationMode, sch)) {
+                // Generic single-block navigation may clear only AIR cells owned by this excavation layer.
+                // Outside access tunnels, repaired shell blocks and lower-band shortcuts are never mining work.
+                return COST_INF;
+            }
             if (sch != null) {
                 if (sch.getBlock() instanceof AirBlock) {
                     // it should be air
