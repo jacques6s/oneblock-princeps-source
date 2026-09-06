@@ -85,6 +85,7 @@ import net.minecraft.world.item.Items;
 import net.minecraft.world.item.context.BlockPlaceContext;
 import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.BlockGetter;
 import net.minecraft.world.level.block.*;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BedPart;
@@ -474,6 +475,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      */
     private int snakeNotSquareTicks;
     private boolean snakeSingleBlockFallback;
+    private boolean snakeRequiresOrdinaryTool;
     private int snakeToolWantedSlot = -1;
     private long snakeToolWaitLastTick = Long.MIN_VALUE;
     private int snakeToolWaitTicks;
@@ -1728,6 +1730,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         this.snakeMissingCentreTicks = 0;
         this.snakeNotSquareTicks = 0;
         this.snakeSingleBlockFallback = false;
+        this.snakeRequiresOrdinaryTool = false;
         this.snakeToolWantedSlot = -1;
         this.snakeToolWaitLastTick = Long.MIN_VALUE;
         this.snakeToolWaitTicks = 0;
@@ -2998,7 +3001,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private Optional<Tuple<BetterBlockPos, Rotation>> toBreakNearPlayer(BuilderCalculationContext bcc) {
         BetterBlockPos center = ctx.playerFeet();
         BetterBlockPos pathStart = princeps.getPathingBehavior().pathStart();
-        int areaSize = Math.max(1, Princeps.settings().areaBreakSize.value);
+        int areaSize = effectiveAreaBreakSize();
         List<long[]> ranked = areaSize > 1 ? new ArrayList<>() : Collections.emptyList();
         int bandTop = areaSize > 1 ? areaHighestUnfinishedY(bcc) : Integer.MIN_VALUE;
         if (areaSize > 1) {
@@ -3129,7 +3132,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         continue;
                     }
                     BlockState curr = bcc.bsi.get0(x, y, z);
-                    if (!(curr.getBlock() instanceof AirBlock) && !(curr.getBlock() == Blocks.WATER || curr.getBlock() == Blocks.LAVA) && !valid(curr, desired, false)
+                    boolean fluidOnly = excavating ? snakeTreatAsFluid(curr, true)
+                            : curr.getBlock() == Blocks.WATER || curr.getBlock() == Blocks.LAVA;
+                    if (!(curr.getBlock() instanceof AirBlock) && !fluidOnly && !valid(curr, desired, false)
                             && !isPendingChestPairHalf(curr, desired, x, y, z, bcc)
                             && interactionClicks(curr, desired) < 0) {
                         // interactionClicks >= 0 means the block is right, only its open/delay/mode/note is off — that's
@@ -3364,6 +3369,22 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return band != null && band.forbids(x, y, z);
     }
 
+    private int effectiveAreaBreakSize() {
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        return effectiveAreaBreakSize(Princeps.settings().areaBreakSize.value, excavating,
+                full == null ? 0 : full.widthX(), full == null ? 0 : full.lengthZ());
+    }
+
+    static int effectiveAreaBreakSize(int requested, boolean excavation, int width, int length) {
+        // A three-wide snake has no in-volume centre line in a one/two-wide selection. Ordinary clearing already
+        // owns source displacement and flowing-fluid waits, so use it for those boxes instead of inventing an
+        // outside corridor. This is a per-job decision: the user's area setting and construction jobs stay intact.
+        if (excavation && (width < SERPENTINE_LANE_WIDTH || length < SERPENTINE_LANE_WIDTH)) {
+            return 1;
+        }
+        return Math.max(1, requested);
+    }
+
     /** One immutable publication prevents the pathing thread from observing half of a new band. */
     private static final class AreaBand {
         private final int minX, minZ, maxX, maxZ, minY, floorY;
@@ -3419,7 +3440,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private void publishAreaBand(ISchematic full, int bandTop) {
-        int size = Math.max(1, Princeps.settings().areaBreakSize.value);
+        int size = effectiveAreaBreakSize();
         if (size <= 1 || origin == null) {
             areaBand = null;
             return;
@@ -3486,6 +3507,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         snakeCleanupActive = false;
         snakeCleanupWithAreaTool = false;
         snakeCleanupAreaFace = null;
+        snakeRequiresOrdinaryTool = false;
         snakeSliceFace = null;
         snakeTransit = false;
         if (!snakeVerificationActive) {
@@ -3978,6 +4000,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             snakeWhy("walking the already-clear route", bcc);
             return null;
         }
+        // Own the safe tool before asking whether this pose can swing. The same ordering as vertical entry keeps
+        // a required single-block cut from waiting behind a readiness condition caused by the wide tool itself.
+        boolean partialHead = excavating && snakeHead != null
+                && snakeHeadNeedsIndividualBreak(bcc.get(snakeHead), ctx.world(), snakeHead);
+        snakeRequiresOrdinaryTool = excavating && snakeHead != null
+                && (partialHead || !snakeAreaFootprintInsideSelection(snakeHead, snakeExpectedFace()));
+        if (snakeRequiresOrdinaryTool && !snakeToolReady(bcc.get(snakeHead), true)) {
+            snakeWhy("waiting for an ordinary pickaxe for this individual cut", bcc);
+            return null;
+        }
         if (snakeHead == null || !snakeReadyToSwing()) {
             snakeWhy("not ready", bcc);
             // A TOOL IS ONLY WRONG AT THE MOMENT IT SWINGS, and this line used to change it at moments when
@@ -4005,6 +4037,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         boolean centreNeedsClear = snakeCellNeedsClear(snakeHead, bcc);
         if (centreNeedsClear) {
             resetSnakeMissingCentre();
+            if (partialHead) {
+                // Slabs, stairs and underwater plants may have no surface at the nominal full-block face centre.
+                // Mine their real outline with an ordinary tool, then seal any source the break leaves behind.
+                snakeCleanupTarget = snakeHead;
+                snakeCleanupActive = true;
+                snakeCleanupWithAreaTool = false;
+                snakeDiagnosis = "t=" + buildTick + " Snake clears partial centre " + snakeHead.toShortString();
+                return snakeHead;
+            }
             // The working case needs a line too, or the trace shows only the last thing that went WRONG and the
             // healthy ticks in between inherit it.
             snakeDiagnosis = "t=" + buildTick + " Snake swing head=" + snakeHead.x + "," + snakeHead.y + ","
@@ -4216,7 +4257,30 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private boolean snakeIsFluid(BlockState state) {
-        return state != null && !state.getFluidState().isEmpty();
+        return snakeTreatAsFluid(state, excavating);
+    }
+
+    static boolean snakeTreatAsFluid(BlockState state, boolean excavation) {
+        if (state == null || state.getFluidState().isEmpty()) {
+            return false;
+        }
+        // A waterlogged block still has a solid/plant block to remove. Trying to fill that occupied cell skips the
+        // required break and leaves an unreplaceable source in every later band census. Construction keeps its own
+        // fluid-pass policy; only an excavation distinguishes the block from the water it will leave behind.
+        return !excavation || state.getBlock() instanceof LiquidBlock
+                || state.getBlock() instanceof BubbleColumnBlock;
+    }
+
+    static boolean snakeSourceReadyForPlug(BlockState state, boolean excavation) {
+        return snakeTreatAsFluid(state, excavation) && state.getFluidState().isSource();
+    }
+
+    static boolean snakeHeadNeedsIndividualBreak(BlockState state, BlockGetter world, BlockPos at) {
+        return !state.isAir() && !snakeTreatAsFluid(state, true) && !state.isCollisionShapeFullBlock(world, at);
+    }
+
+    static boolean snakeShellRequiresSeal(BlockState state, boolean replaceable) {
+        return (state != null && !state.getFluidState().isEmpty()) || replaceable;
     }
 
     private boolean snakeCellNeedsClear(BlockPos cell, BuilderCalculationContext bcc) {
@@ -4609,7 +4673,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     private boolean snakeShellCellNeedsBlock(BuilderCalculationContext bcc, int x, int y, int z) {
         BlockState state = bcc.bsi.get0(x, y, z);
-        return snakeIsFluid(state) || MovementHelper.isReplaceable(x, y, z, state, bcc.bsi);
+        return snakeShellRequiresSeal(state, MovementHelper.isReplaceable(x, y, z, state, bcc.bsi));
     }
 
     private enum SnakeRepairKind {
@@ -4659,7 +4723,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     int x = feet.x + dx, y = feet.y + dy, z = feet.z + dz;
                     BlockState state = bcc.bsi.get0(x, y, z);
                     boolean source = state.getFluidState().isSource();
-                    if (source && insideSnakeVolume(x, y, z)) {
+                    if (snakeSourceReadyForPlug(state, excavating) && insideSnakeVolume(x, y, z)) {
                         candidates.add(new SnakeRepair(new BetterBlockPos(x, y, z),
                                 SnakeRepairKind.INTERNAL_SOURCE, distanceSq));
                     } else if (snakeIsCurrentShellCoordinate(x, y, z)
@@ -5038,6 +5102,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         int maxY = minY + full.heightY() - 1;
         int minZ = origin.getZ();
         int maxZ = minZ + full.lengthZ() - 1;
+        return snakeAreaFootprintInsideBounds(target, face, minX, maxX, minY, maxY, minZ, maxZ);
+    }
+
+    static boolean snakeAreaFootprintInsideBounds(BlockPos target, Direction face, int minX, int maxX,
+                                                  int minY, int maxY, int minZ, int maxZ) {
+        if (target == null || face == null) {
+            return false;
+        }
         for (int first = -1; first <= 1; first++) {
             for (int second = -1; second <= 1; second++) {
                 int x = target.getX();
@@ -5117,6 +5189,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return false; // not ready to swing, but nothing is wrong -- the hands are simply busy staying alive
         }
         int wanted = cleanup ? snakeOrdinaryPickSlot(targetState) : snakeAreaToolSlot();
+        if (wanted < 0 && cleanup && excavating
+                && (snakeEntering || snakeSingleBlockFallback || snakeRequiresOrdinaryTool)) {
+            abortBuild(Ending.MATERIALS_MISSING,
+                    "AutoDig needs an ordinary pickaxe for this single-block cut",
+                    java.util.List.of("This cut needs an individual block target and an ordinary mining tool.",
+                            "Put an ordinary pickaxe on the hotbar to continue."));
+            return false;
+        }
         if (wanted < 0 && cleanup) {
             wanted = snakeAreaToolSlot();
         }
@@ -8658,6 +8738,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (paused) {
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
+        if (excavating && Princeps.settings().areaBreakSize.value > 1 && effectiveAreaBreakSize() == 1
+                && !(princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory())
+                && snakeOrdinaryPickSlot(Blocks.STONE.defaultBlockState()) < 0) {
+            abortBuild(Ending.MATERIALS_MISSING,
+                    "AutoDig needs an ordinary pickaxe for a selection narrower than three blocks",
+                    java.util.List.of("A 3x3 swing cannot stay inside this selection.",
+                            "Put an ordinary pickaxe on the hotbar to continue."));
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
         if (scaffoldCleanupActive && realSchematic != null) {
             schematic = realSchematic;
         }
@@ -8669,7 +8758,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             final boolean topDownLayers = Princeps.settings().layerOrder.value;
             // DIE EINE HERLEITUNG. Beide Felder werden hier gesetzt und nirgends sonst; countScaffoldInLayer und
             // die Ebenen-Verifikation lesen sie, statt die Formel ein zweites und drittes Mal zu schreiben.
-            int areaSize = Math.max(1, Princeps.settings().areaBreakSize.value);
+            int areaSize = effectiveAreaBreakSize();
             LayerBand band;
             if (areaSize > 1 && topDownLayers && areaBandTopCache != Integer.MIN_VALUE) {
                 int top = Math.min(realSchematic.heightY() - 1, areaBandTopCache - origin.getY());
@@ -8800,7 +8889,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // The committed band is held independently of both the global work set and mutable snake route state. A full
         // route completion (or an actually empty work set) starts the settle + complete world-state census. Only its
         // successful certificate releases the latch and permits discovery of a lower band.
-        int areaSize = Math.max(1, Princeps.settings().areaBreakSize.value);
+        int areaSize = effectiveAreaBreakSize();
         int committedAreaTop = areaCommittedBandTop;
         if (areaSize > 1 && origin != null && schematic != null
                 && (snakeVerificationActive || parkedCells.isEmpty())
@@ -9135,6 +9224,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // what it swings at; it is the wrong tool for standing on top of it.
                 boolean singleBlockSwing = snakeEntering
                         || snakeSingleBlockFallback
+                        || snakeRequiresOrdinaryTool
                         || (snakeCleanupActive && pos.equals(snakeCleanupTarget));
                 toolReady = snakeToolReady(breakState, singleBlockSwing);
             } else {
@@ -9151,7 +9241,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // so leaving this ungated would keep the very duck the two helpers above just stopped starting.
                 princeps.getInputOverrideHandler().setInputForceState(Input.SNEAK, true);
             }
-            boolean exactSnakeFace = snakeHead != null && (pos.equals(snakeHead)
+            boolean exactSnakeFace = snakeHead != null && ((pos.equals(snakeHead) && !snakeCleanupActive)
                     || (snakeCleanupWithAreaTool && pos.equals(snakeCleanupTarget)));
             boolean breakAimReady = exactSnakeFace
                     ? snakeLiveHitMatches(pos)
@@ -10530,11 +10620,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         for (BetterBlockPos pos : incorrectPositions) {
             BlockState current = bcc.bsi.get0(pos);
             BlockState desired = bcc.getSchematic(pos.x, pos.y, pos.z, current);
-            if (desired == null || !(current.getBlock() instanceof LiquidBlock)
+            if (desired == null || !(current.getBlock() instanceof LiquidBlock
+                    || (excavating && snakeTreatAsFluid(current, true)))
                     || !(desired.getBlock() instanceof AirBlock)) {
                 continue;
             }
-            if (MovementHelper.possiblyFlowing(current)) {
+            if (excavating ? !snakeSourceReadyForPlug(current, true) : MovementHelper.possiblyFlowing(current)) {
                 continue; // transient world condition: retain and retry, do not turn it into a material pause
             }
             if (!bcc.hasThrowaway) {
@@ -10607,12 +10698,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     CellWatch.note(buildTick, pos.x, pos.y, pos.z, "assemble",
                             "dropped: outside the current layer mask");
                 }
-            } else if (state.getBlock() instanceof LiquidBlock
+            } else if ((state.getBlock() instanceof LiquidBlock
+                    || (excavating && snakeTreatAsFluid(state, true)))
                     && desired.getBlock() instanceof AirBlock) {
                 // A source can be displaced by pathing onto the cell above: CalculationContext selects an allowed
                 // throwaway for the supporting block, then the normal break pass removes it to produce AIR. Flowing
                 // liquid has no stable block to displace, so retain it unresolved until the world settles.
-                if (MovementHelper.possiblyFlowing(state)) {
+                if (excavating ? !snakeSourceReadyForPlug(state, true) : MovementHelper.possiblyFlowing(state)) {
                     flowingLiquids.add(pos);
                 } else if (bcc.hasThrowaway) {
                     sourceLiquids.add(pos);
