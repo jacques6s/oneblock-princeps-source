@@ -4797,6 +4797,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private PathingCommand ordinaryWetApproachCommand(BuilderCalculationContext bcc, boolean safeToCancel) {
+        BetterBlockPos step = ordinaryWetApproachStep(bcc, safeToCancel);
+        return step == null ? null : excavationLevelPathingCommand(ctx.playerFeet(), step);
+    }
+
+    private BetterBlockPos ordinaryWetApproachStep(BuilderCalculationContext bcc, boolean safeToCancel) {
         if (!ordinaryExcavation() || !safeToCancel || incorrectPositions == null
                 || !(ctx.player().onGround() || ctx.player().isInWater())) return null;
         ExcavationRepairPolicy.Bounds bounds = excavationRepairBounds();
@@ -4816,7 +4821,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 bestDistance = work.distSqr(feet);
             }
         }
-        return bestStep == null ? null : excavationLevelPathingCommand(feet, bestStep);
+        return bestStep;
     }
 
     private boolean shallowExcavation() {
@@ -10018,9 +10023,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
 
         // A failed generic search is not a verdict on the separately licensed, already-clear water step.
-        // Derive that existing approach once before judging a one-high remainder, then execute this same command.
+        // Read the existing step before judging a one-high remainder. Construct its command only when it wins:
+        // excavationLevelPathingCommand can perform a bridge repair and must not run during a speculative check.
         boolean shallowSurface = shallowExcavation();
-        PathingCommand wetApproach = shallowSurface ? ordinaryWetApproachCommand(bcc, isSafeToCancel) : null;
+        BetterBlockPos shallowWetStep = shallowSurface ? ordinaryWetApproachStep(bcc, isSafeToCancel) : null;
 
         // Reaching here means no build action fired. Navigation toward an unsatisfied goal is legitimate progress:
         // never punish a distant glass cell merely because the walk lasts longer than six seconds.
@@ -10042,7 +10048,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     && !(princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory());
             BetterBlockPos covered = shallowRouteVerdictReady ? shallowCoveredWork(bcc) : null;
             if (ShallowExcavationPolicy.stopAfterFailedRoute(shallowSurface, calcFailed,
-                    completedChanged, covered != null, wetApproach != null)) {
+                    completedChanged, covered != null, shallowWetStep != null)) {
                 abortBuild(Ending.LAYER_UNBUILDABLE, "AutoDig cannot reach the remaining one-block-high area",
                         java.util.List.of("A fixed roof blocks standing headroom above " + covered.toShortString() + ".",
                                 "No safe route was found. The remaining cells are unfinished and the fixed roof stays protected."));
@@ -10264,7 +10270,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
 
-        if (!shallowSurface) wetApproach = ordinaryWetApproachCommand(bcc, isSafeToCancel);
+        PathingCommand wetApproach = shallowSurface
+                ? shallowWetStep == null ? null : excavationLevelPathingCommand(ctx.playerFeet(), shallowWetStep)
+                : ordinaryWetApproachCommand(bcc, isSafeToCancel);
         if (wetApproach != null) return wetApproach;
         Goal goal = assemble(bcc, approxPlaceable.subList(0, 9));
         if (goal == null) {
