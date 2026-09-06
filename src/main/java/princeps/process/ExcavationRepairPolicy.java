@@ -17,6 +17,10 @@ final class ExcavationRepairPolicy {
 
     record Bounds(int minX, int maxX, int minY, int maxY, int minZ, int maxZ,
                   int bandFloor, int bandTop, boolean ordinary) {
+        boolean hasActiveBand() {
+            return bandFloor <= bandTop;
+        }
+
         boolean inside(int x, int y, int z) {
             return x >= minX && x <= maxX && z >= minZ && z <= maxZ
                     && y >= minY && y <= maxY;
@@ -78,6 +82,7 @@ final class ExcavationRepairPolicy {
 
     static Kind repair(Bounds bounds, int x, int y, int z, BlockState state, boolean replaceable,
                        boolean excavation) {
+        if (!bounds.hasActiveBand()) return null;
         boolean sourceBand = !bounds.ordinary() || (y >= bounds.bandFloor() && y <= bounds.bandTop());
         if (sourceBand && bounds.inside(x, y, z) && BuilderProcess.snakeSourceReadyForPlug(state, excavation)) {
             return Kind.INTERNAL_SOURCE;
@@ -94,6 +99,7 @@ final class ExcavationRepairPolicy {
     }
 
     static Census inspect(Bounds bounds, Function<BlockPos, BlockState> read, Predicate<BlockPos> replaceable) {
+        if (!bounds.hasActiveBand()) return new Census(List.of(), 0, 0);
         List<Target> repairs = new ArrayList<>();
         int flowing = 0, solid = 0;
         for (int x = bounds.minX() - 1; x <= bounds.maxX() + 1; x++) {

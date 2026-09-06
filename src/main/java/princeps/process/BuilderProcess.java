@@ -4848,9 +4848,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 : snakeBandFloor;
         int top = ordinary ? origin.getY() + (Princeps.settings().buildInLayers.value
                 ? bandMaxYLocal : full.heightY() - 1) : snakeBandTop;
-        return new ExcavationRepairPolicy.Bounds(origin.getX(), origin.getX() + full.widthX() - 1,
+        ExcavationRepairPolicy.Bounds bounds = new ExcavationRepairPolicy.Bounds(origin.getX(), origin.getX() + full.widthX() - 1,
                 origin.getY(), origin.getY() + full.heightY() - 1,
                 origin.getZ(), origin.getZ() + full.lengthZ() - 1, floor, top, ordinary);
+        // Layer zero is deliberately empty. Its top still equals the selection top, so treating it as a real
+        // band would seal the occupied roof entry before the normal layer transition can offer any mining work.
+        return bounds.hasActiveBand() ? bounds : null;
     }
 
     /**
