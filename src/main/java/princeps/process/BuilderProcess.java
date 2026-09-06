@@ -439,6 +439,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private volatile String snakeDiagnosis = "";
     /** One non-centre cell in a damaged 3x3 slice, cleared without letting the generic chooser steal the route. */
     private BetterBlockPos snakeCleanupTarget;
+    private final SnakeCleanupWork snakeCleanupWork = new SnakeCleanupWork();
     /** True for the whole tick in which {@link #snakeCleanupTarget} owns the mining action. */
     private boolean snakeCleanupActive;
     /** The ordinary-pick preference was unavailable, so this cleanup click must preserve the Shard's exact face. */
@@ -1725,6 +1726,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         snakeAimSettledTicks = 0;
         snakeFaceChangeWaitTicks = 0;
         this.snakeCleanupTarget = null;
+        this.snakeCleanupWork.clear();
         this.snakeCleanupActive = false;
         this.snakeCleanupWithAreaTool = false;
         this.snakeCleanupAreaFace = null;
@@ -3049,8 +3051,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // and the two correct local decisions fight forever. Preflight the exact cardinal route before either tool is
         // selected and make its nearest obstruction the single-block cleanup target. Cursor and turn state remain
         // untouched; once the path is clear, the original slice resumes on the following tick.
-        Optional<BetterBlockPos> routeObstruction = snakeRouteObstruction(bcc);
+        Optional<Rotation> ordinaryCleanupRotation = excavating && snakeCleanupActive && !snakeCleanupWithAreaTool
+                ? snakeOrdinaryCleanupRotation(snakeCleanupTarget, bcc) : Optional.empty();
+        // A reachable committed cut owns the action. An observed corridor obstruction may preempt it only after
+        // that hit is no longer reachable; excavation paths themselves are deliberately forbidden to mine.
+        Optional<BetterBlockPos> routeObstruction = ordinaryCleanupRotation.isPresent()
+                ? Optional.empty() : snakeRouteObstruction(bcc);
         if (routeObstruction.isPresent()) {
+            ordinaryCleanupRotation = Optional.empty();
             snakeCleanupTarget = routeObstruction.get();
             snakeCleanupActive = true;
             // Prefer a true single-block tool. If production inventory has none, retain the area tool's exact
@@ -3097,8 +3105,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 Optional<Rotation> targetRotation = snakeCleanupActive
                         ? (snakeCleanupWithAreaTool
                                 ? snakeCleanupAreaRotation(snakeCell)
-                                : RotationUtils.reachableForWork(ctx, snakeCell,
-                                        ctx.playerController().getBlockReachDistance(), false))
+                                : ordinaryCleanupRotation.isPresent() ? ordinaryCleanupRotation
+                                        : snakeOrdinaryCleanupRotation(snakeCell, bcc))
                         : snakeHeadRotation();
                 if (targetRotation.isPresent()) {
                     return Optional.of(new Tuple<>(snakeCell, targetRotation.get()));
@@ -4027,55 +4035,43 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * generic nearby-block scan is exactly how the old implementation abandoned its lanes and appeared random.
      */
     private BetterBlockPos snakeSelectedSliceTarget(BuilderCalculationContext bcc) {
-        if (snakeTransit) {
+        if (snakeTransit || snakeHead == null) {
             snakeWhy("walking the already-clear route", bcc);
             return null;
         }
-        // Own the safe tool before asking whether this pose can swing. The same ordering as vertical entry keeps
-        // a required single-block cut from waiting behind a readiness condition caused by the wide tool itself.
-        boolean partialHead = excavating && snakeHead != null
+        if (!excavating && !snakeReadyToSwing()) {
+            snakeWhy("not ready", bcc);
+            return null;
+        }
+        boolean centreNeedsClear = snakeCellNeedsClear(snakeHead, bcc);
+        // A single-block action has no 3x3 plane. Classify it BEFORE the Shard pose gate; water drift may make that
+        // pose impossible while the real outline of a leftover remains plainly within ordinary mining reach.
+        if (excavating && !snakeEntering) {
+            BetterBlockPos retained = snakeCleanupWork.retained(snakeHead, snakeBandTop, bcc::get,
+                    cell -> snakeCellNeedsClear(cell, bcc) && !isCellParked(cell.x, cell.y, cell.z));
+            if (retained != null) return selectSnakeOrdinaryCleanup(retained, bcc);
+            Optional<BetterBlockPos> sourceBlock = reachableSnakeSourceBlock(bcc);
+            if (sourceBlock.isPresent()) return selectSnakeOrdinaryCleanup(sourceBlock.get(), bcc);
+        }
+        boolean partialHead = excavating
                 && snakeHeadNeedsIndividualBreak(bcc.get(snakeHead), ctx.world(), snakeHead);
-        snakeRequiresOrdinaryTool = excavating && snakeHead != null
+        snakeRequiresOrdinaryTool = excavating
                 && (partialHead || !snakeAreaFootprintInsideSelection(snakeHead, snakeExpectedFace()));
         if (snakeRequiresOrdinaryTool && !snakeToolReady(bcc.get(snakeHead), true)) {
             snakeWhy("waiting for an ordinary pickaxe for this individual cut", bcc);
             return null;
         }
-        if (snakeHead == null || !snakeReadyToSwing()) {
-            snakeWhy("not ready", bcc);
-            // A TOOL IS ONLY WRONG AT THE MOMENT IT SWINGS, and this line used to change it at moments when
-            // nothing swings at all.
-            //
-            // It asserted the ordinary pickaxe on every tick the snake was not ready -- walking the last cell to
-            // a stance, settling, waiting for the head to line up. None of those breaks a block, so the choice
-            // bought nothing, and it was made about ten times per slice: seven ticks of Shard for the swing, a
-            // handful of ticks of Netherite for the approach, over and over. Counted straight out of the owner's
-            // trace of 20.08.: 47 ticks / 2 / 29 / 22 / 60 / 71 / 95, all the way down the run. The owner watched
-            // that as a hand that will not settle, and he is right -- it is visible, it is pointless, and every
-            // slot change is also a packet.
-            //
-            // What the ordinary pickaxe is genuinely FOR is two things, and both are asked for where they happen:
-            // sinking the entry shaft into the next band (an upward 3x3 would take the block underfoot -- see the
-            // entry branch of snakeUpdate), and clearing a single leftover out of a damaged slice. Walking is not
-            // one of them, because walking does not break anything by itself; when a route DOES have to mine its
-            // way through, MovementHelper.switchToBestToolFor picks the tool at that exact moment and ToolSet
-            // refuses to hand it the area tool at all.
-            //
-            // So the hand simply stays where it is. Fewer switches, no lost break progress, and the tool is still
-            // chosen by whoever is about to use it.
-            return null;
-        }
-        boolean centreNeedsClear = snakeCellNeedsClear(snakeHead, bcc);
         if (centreNeedsClear) {
             resetSnakeMissingCentre();
-            if (partialHead) {
-                // Slabs, stairs and underwater plants may have no surface at the nominal full-block face centre.
-                // Mine their real outline with an ordinary tool, then seal any source the break leaves behind.
-                snakeCleanupTarget = snakeHead;
-                snakeCleanupActive = true;
-                snakeCleanupWithAreaTool = false;
-                snakeDiagnosis = "t=" + buildTick + " Snake clears partial centre " + snakeHead.toShortString();
-                return snakeHead;
+            if (!snakeEntering && snakeRequiresOrdinaryTool) {
+                return selectSnakeOrdinaryCleanup(snakeHead, bcc);
+            }
+            if (excavating && !snakeReadyToSwing()) {
+                snakeWhy("not ready for the selected face", bcc);
+                return null;
+            }
+            if (excavating && !snakeEntering && snakeSingleBlockFallback) {
+                return selectSnakeOrdinaryCleanup(snakeHead, bcc);
             }
             // The working case needs a line too, or the trace shows only the last thing that went WRONG and the
             // healthy ticks in between inherit it.
@@ -4130,6 +4126,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         snakeCleanupTarget = leftover.get();
         snakeCleanupActive = true;
         snakeCleanupWithAreaTool = snakeOrdinaryPickSlot(bcc.get(snakeCleanupTarget)) < 0;
+        if (excavating && !snakeCleanupWithAreaTool) return selectSnakeOrdinaryCleanup(snakeCleanupTarget, bcc);
+        if (snakeCleanupWithAreaTool && !snakeReadyToSwing()) {
+            snakeWhy("waiting for a safe Shard cleanup pose", bcc);
+            return null;
+        }
         // The working case needs a line for the same reason the swing does: without it the trace inherits the last
         // thing that went wrong and a healthy cleanup reads as a stall.
         snakeDiagnosis = "t=" + buildTick + " Snake cleanup target=" + snakeCleanupTarget.x + ","
@@ -4146,6 +4147,65 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         snakeMissingCentreKey = Long.MIN_VALUE;
         snakeMissingCentreLastTick = Long.MIN_VALUE;
         snakeMissingCentreTicks = 0;
+    }
+
+    private BetterBlockPos selectSnakeOrdinaryCleanup(BetterBlockPos target, BuilderCalculationContext bcc) {
+        snakeCleanupTarget = target;
+        snakeCleanupActive = true;
+        snakeCleanupWithAreaTool = false;
+        snakeRequiresOrdinaryTool = true;
+        snakeCleanupWork.choose(snakeHead, snakeBandTop, target, bcc.get(target));
+        snakeDiagnosis = "t=" + buildTick + " Snake ordinary cleanup target=" + target.toShortString()
+                + " head=" + snakeHead.toShortString() + " hit=" + describeCrosshair();
+        return target;
+    }
+
+    private Optional<Rotation> snakeOrdinaryCleanupRotation(BetterBlockPos target, BuilderCalculationContext bcc) {
+        if (!excavating) return RotationUtils.reachableForWork(ctx, target,
+                ctx.playerController().getBlockReachDistance(), false);
+        snakeCleanupWork.choose(snakeHead, snakeBandTop, target, bcc.get(target));
+        double reach = ctx.playerController().getBlockReachDistance();
+        return snakeCleanupWork.rotation(ctx.player().getEyePosition(1.0F), ctx.playerRotations(), reach,
+                raw -> RayTraceUtils.rayTraceTowards(ctx.player(),
+                        princeps.getLookBehavior().getAimProcessor().peekRotationExact(raw), reach, false),
+                () -> RotationUtils.reachableForWork(ctx, target, reach, false));
+    }
+
+    /** A source held by a solid outline must be broken before the existing source-plug pass can seal it. */
+    private Optional<BetterBlockPos> reachableSnakeSourceBlock(BuilderCalculationContext bcc) {
+        if (!excavating || snakeBandFloor == Integer.MIN_VALUE || snakeBandTop == Integer.MIN_VALUE) {
+            return Optional.empty();
+        }
+        BetterBlockPos feet = ctx.playerFeet();
+        int radius = Math.min(6, (int) Math.ceil(ctx.playerController().getBlockReachDistance()));
+        List<BetterBlockPos> sources = new ArrayList<>();
+        // Bounded by normal arm's reach and the three-cell active band, never by total selection volume.
+        for (int y = Math.max(feet.y, snakeBandFloor); y <= snakeBandTop; y++) {
+            for (int x = feet.x - radius; x <= feet.x + radius; x++) {
+                for (int z = feet.z - radius; z <= feet.z + radius; z++) {
+                    BetterBlockPos cell = new BetterBlockPos(x, y, z);
+                    BlockState state = bcc.get(cell);
+                    if (snakeSourceBlockNeedsBreak(state) && snakeCellNeedsClear(cell, bcc)
+                            && !isCellParked(x, y, z)) sources.add(cell);
+                }
+            }
+        }
+        sources.sort(Comparator.comparingDouble((BetterBlockPos cell) -> cell.distSqr(feet))
+                .thenComparingInt(cell -> cell.y).thenComparingInt(cell -> cell.x).thenComparingInt(cell -> cell.z));
+        for (BetterBlockPos source : sources) {
+            if (RotationUtils.reachableForWork(ctx, source,
+                    ctx.playerController().getBlockReachDistance(), false).isPresent()) return Optional.of(source);
+        }
+        return Optional.empty();
+    }
+
+    static boolean snakeSourceBlockNeedsBreak(BlockState state) {
+        return state != null && state.getFluidState().isSource() && !snakeTreatAsFluid(state, true);
+    }
+
+    static boolean snakeMiningPostureReady(boolean onGround, boolean inWater,
+                                           boolean ordinaryCleanup, boolean entering) {
+        return onGround || (inWater && ordinaryCleanup && !entering);
     }
 
     /** First reachable leftover in the exact face-owned 3x3 footprint, in a stable centre-out order. */
@@ -5240,10 +5300,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private boolean snakeLiveHitMatches(BetterBlockPos pos) {
         Direction face = snakeCleanupWithAreaTool && pos != null && pos.equals(snakeCleanupTarget)
                 ? snakeCleanupAreaFace : snakeExpectedFace();
-        HitResult result = ctx.objectMouseOver();
-        return face != null && result != null && result.getType() == HitResult.Type.BLOCK
-                && ((BlockHitResult) result).getBlockPos().equals(pos)
-                && ((BlockHitResult) result).getDirection() == face;
+        return face != null && snakeMiningHitMatches(ctx.objectMouseOver(), pos, face);
+    }
+
+    static boolean snakeMiningHitMatches(HitResult result, BlockPos target, Direction requiredFace) {
+        return result instanceof BlockHitResult hit && result.getType() == HitResult.Type.BLOCK
+                && hit.getBlockPos().equals(target)
+                && (requiredFace == null || hit.getDirection() == requiredFace);
     }
 
     /**
@@ -9224,6 +9287,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         if (buildTick % 40 == 0) { logMechanic("PROBE B tick=" + buildTick + " reached the break call"); }
         Optional<Tuple<BetterBlockPos, Rotation>> toBreak = toBreakNearPlayer(bcc);
+        boolean miningPostureReady = snakeMiningPostureReady(ctx.player().onGround(), ctx.player().isInWater(),
+                excavating && snakeCleanupActive && !snakeCleanupWithAreaTool, snakeEntering);
         if (buildTick % 40 == 0) { logMechanic("PROBE B2 tick=" + buildTick + " toBreak=" + toBreak.isPresent()
                 + " safeToCancel=" + isSafeToCancel + " onGround=" + ctx.player().onGround()
                 + " yieldUntil=" + breakBranchYieldUntilTick + " idle=" + breakBranchIdleTicks); }
@@ -9254,7 +9319,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // A forced left click is the engine actually holding the mouse down on a block. Keys are cleared at the
         // top of every tick, so that flag can only have been set by this tick: it is the exact test for "is it
         // mining right now", and those ticks are not idle however long they last.
-        if (toBreak.isPresent() && isSafeToCancel && ctx.player().onGround()) {
+        if (toBreak.isPresent() && isSafeToCancel && miningPostureReady) {
             boolean actuallyMining = princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT);
             if (BuildTrace.worldChanges() != breakBranchLastWorldChanges || actuallyMining) {
                 breakBranchLastWorldChanges = BuildTrace.worldChanges();
@@ -9276,7 +9341,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (toBreak.isPresent() && buildTick < breakBranchYieldUntilTick) {
             toBreak = Optional.empty();
         }
-        if (toBreak.isPresent() && isSafeToCancel && ctx.player().onGround()) {
+        if (toBreak.isPresent() && isSafeToCancel && miningPostureReady) {
             // we'd like to pause to break this block
             // only change look direction if it's safe (don't want to fuck up an in progress parkour for example
             Rotation rot = toBreak.get().getB();
@@ -9285,6 +9350,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             blockWorthATool = breakState;
             if (breakMadeNoProgress(pos, breakState)) {
                 princeps.getInputOverrideHandler().getBlockBreakHelper().stopBreakingBlock();
+                if (pos.equals(snakeCleanupTarget)) snakeCleanupWork.clear();
                 deferCell(pos, "breaking made no block-state progress for " + breakNoProgressTicks + " ticks");
                 resetBreakProgressTracking();
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
@@ -9330,6 +9396,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     || (snakeCleanupWithAreaTool && pos.equals(snakeCleanupTarget)));
             boolean breakAimReady = exactSnakeFace
                     ? snakeLiveHitMatches(pos)
+                    : excavating && snakeOwnedTarget ? snakeMiningHitMatches(ctx.objectMouseOver(), pos, null)
                     : ctx.isLookingAt(pos) || ctx.playerRotations().isReallyCloseTo(rot);
             // DIAGNOSTIC (added while investigating the horizontal-head stall).
             if (snakeOwnedTarget) {
@@ -9349,7 +9416,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // enough that the movement packet carrying it has reached the server before the click does.
             boolean aimReceivedByServer = true;
             Direction swingFace = snakeExpectedFace();
-            if (snakeOwnedTarget && swingFace != null && swingFace != snakeLastSwungFace) {
+            boolean needsSnakeFaceSettle = snakeOwnedTarget && (!excavating || exactSnakeFace);
+            if (needsSnakeFaceSettle && swingFace != null && swingFace != snakeLastSwungFace) {
                 if (aimMovementDegrees <= AIM_SETTLED_DEGREES) {
                     snakeAimSettledTicks++;
                 } else {
@@ -9365,7 +9433,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             if (toolReady && breakAimReady && aimReceivedByServer) {
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
-                if (snakeOwnedTarget && swingFace != null) {
+                if (needsSnakeFaceSettle && swingFace != null) {
                     snakeLastSwungFace = swingFace;
                 }
                 snakeAimSettledTicks = 0;
