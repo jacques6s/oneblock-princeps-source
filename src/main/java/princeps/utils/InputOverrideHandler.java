@@ -60,11 +60,16 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     public InputOverrideHandler(Princeps princeps) {
         super(princeps);
-        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext(), target -> {
-            observeMiningOwner(princeps.getPathingControlManager().mostRecentInControl().orElse(null));
-            return supportMiningOwner == null || supportMiningOwner.allowsSupportRemoval(target);
-        });
+        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext(), this::allowsMining);
         this.blockPlaceHelper = new BlockPlaceHelper(princeps);
+    }
+
+    boolean allowsMining(net.minecraft.core.BlockPos target) {
+        var controlling = princeps.getPathingControlManager().mostRecentInControl().orElse(null);
+        observeMiningOwner(controlling);
+        var executing = princeps.getPathingBehavior().getCurrent();
+        if (executing != null && !executing.allowsModelRemoval(target, controlling, blockBreakHelper::isBreakingBlock)) return false;
+        return supportMiningOwner == null || supportMiningOwner.allowsSupportRemoval(target);
     }
 
     void observeMiningOwner(princeps.api.process.IPrincepsProcess controlling) {

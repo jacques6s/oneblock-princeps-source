@@ -2062,6 +2062,54 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                  ISchematic model, long tick) {}
     private SupportRepair supportRepair;
 
+    /** The full model bound to a particular search, retained by its executor even after pause/owner handover. */
+    public static final class ModelProtection {
+        private final BuilderProcess owner;
+        private final ISchematic model;
+        private final Vec3i origin;
+        private final Object world, player;
+        private final List<BlockState> stock;
+
+        ModelProtection(BuilderProcess owner, ISchematic model, Vec3i origin,
+                        Object world, Object player, List<BlockState> stock) {
+            this.owner = owner;
+            this.model = model;
+            this.origin = new Vec3i(origin.getX(), origin.getY(), origin.getZ());
+            this.world = world;
+            this.player = player;
+            this.stock = List.copyOf(stock);
+        }
+
+        public boolean sameBinding(ModelProtection other) {
+            return other != null && owner == other.owner && model == other.model
+                    && origin.equals(other.origin) && world == other.world && player == other.player && stock.equals(other.stock);
+        }
+
+        public boolean allowsRemoval(BlockPos target, princeps.api.utils.IPlayerContext context,
+                                     princeps.api.process.IPrincepsProcess controlling,
+                                     java.util.function.BooleanSupplier continuing) {
+            if (context.world() != world || context.player() != player) return false;
+            BlockState repairing = null;
+            if (controlling == owner && owner.isActive() && !owner.paused && !owner.excavating
+                    && owner.supportModelForDependencies() == model && origin.equals(owner.origin)) {
+                SupportRepair repair = owner.supportRepair;
+                boolean held = repair != null && repair.tick() != owner.buildTick && continuing.getAsBoolean();
+                repairing = owner.selectedSupportRepairState(target, model, world, player, held);
+            }
+            // A planning BSI is a snapshot. Re-read the actual world at the final crosshair boundary.
+            return BuilderSupportDependencies.currentWorld(model, origin, stock, context.world())
+                    .removal(target, repairing).allowed();
+        }
+    }
+
+    private BlockState selectedSupportRepairState(BlockPos target, ISchematic model,
+                                                  Object world, Object player, boolean continuing) {
+        SupportRepair repair = supportRepair;
+        return repair != null && (repair.tick() == buildTick || repair.tick() == buildTick - 1 && continuing)
+                && repair.target().equals(target) && repair.world() == world && repair.player() == player
+                && repair.model() == model ? repair.state() : null;
+    }
+
     /** A temporary process can take control without onLostControl; its mining is not this repair's continuation. */
     public void revokeSupportRepair() {
         supportRepair = null;
@@ -2079,7 +2127,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (!isActive() || paused || excavating) { supportRepair = null; return true; }
         boolean continuing = supportRepair != null && supportRepair.tick() != buildTick
                 && princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock();
-        return allowsSupportRemoval(target, new BlockStateInterface(ctx), continuing);
+        return allowsSupportRemoval(target, BuilderSupportDependencies.currentWorld(supportModelForDependencies(), origin,
+                approxPlaceable == null ? Collections.emptyList() : approxPlaceable, ctx.world()), continuing);
     }
 
     boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks) {
@@ -2088,19 +2137,18 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks, boolean controllerContinuingSameBlock) {
         if (!isActive() || paused || excavating) { supportRepair = null; return true; }
+        return allowsSupportRemoval(target, new BuilderSupportDependencies(supportModelForDependencies(), origin,
+                approxPlaceable == null ? Collections.emptyList() : approxPlaceable, blocks, ctx.world()), controllerContinuingSameBlock);
+    }
+
+    private boolean allowsSupportRemoval(BlockPos target, BuilderSupportDependencies policy, boolean controllerContinuingSameBlock) {
         ISchematic full = supportModelForDependencies();
         SupportRepair repair = supportRepair;
-        BlockState repairing = repair != null
-                && (repair.tick() == buildTick || repair.tick() == buildTick - 1 && controllerContinuingSameBlock)
-                && repair.target().equals(target)
-                && repair.world() == ctx.world() && repair.player() == ctx.player() && repair.model() == full
-                ? repair.state() : null;
+        BlockState repairing = selectedSupportRepairState(target, full, ctx.world(), ctx.player(), controllerContinuingSameBlock);
         supportRepair = repairing == null ? null : new SupportRepair(repair.target(), repair.state(), repair.world(),
                 repair.player(), repair.model(), buildTick);
-        BuilderSupportDependencies.Decision decision = new BuilderSupportDependencies(full, origin,
-                approxPlaceable == null ? Collections.emptyList() : approxPlaceable,
-                blocks, ctx.world()).removal(target, repairing);
-        if (!decision.allowed() || repairing != null && blocks.get0(target) != repairing) supportRepair = null;
+        BuilderSupportDependencies.Decision decision = policy.removal(target, repairing);
+        if (!decision.allowed() || repairing != null && ctx.world().getBlockState(target) != repairing) supportRepair = null;
         if (decision.allowed()) {
             lastSupportRefusal = null;
             lastSupportDependent = null;
@@ -13850,6 +13898,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         private final ISchematic schematic;
         /** Unmasked model and original world captured before the path worker starts; excavation opts out. */
         private final BuilderSupportDependencies supportDependencies;
+        private final ModelProtection modelProtection;
         private final int originX;
         private final int originY;
         private final int originZ;
@@ -13916,6 +13965,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             this.originZ = origin.getZ();
             this.supportDependencies = excavating ? null : new BuilderSupportDependencies(
                     supportModelForDependencies(), new Vec3i(originX, originY, originZ), placeable, bsi, ctx.world());
+            this.modelProtection = excavating ? null : new ModelProtection(BuilderProcess.this,
+                    supportModelForDependencies(), new Vec3i(originX, originY, originZ), ctx.world(), ctx.player(), placeable);
             this.excavationBridgeKey = snakeBridgeTarget == null
                     ? Long.MIN_VALUE : snakeBridgeTarget.asLong();
             // THE ONE PLACE THE TWO LANES DIFFER, and it is deliberately the only one: everything else about the
@@ -13976,6 +14027,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // of them is reached by walking on picture that already exists.
             this.allowParkour = lane != Lane.EXCAVATION_PATH && !buildInRows;
         }
+
+        public ModelProtection modelProtection() { return modelProtection; }
 
         private BlockState getSchematic(int x, int y, int z, BlockState current) {
             BlockPos pos = new BlockPos(x, y, z);

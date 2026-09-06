@@ -34,9 +34,9 @@ import princeps.utils.BlockStateInterface;
 
 import java.util.List;
 
-/** Direct Vanilla survival dependencies only; neither a physics simulator nor permission to repair terrain. */
+/** Retains existing model material and direct Vanilla supports; no physics or drop-recovery simulation. */
 final class BuilderSupportDependencies {
-    enum Reason { ALLOWED, REQUIRED_SUPPORT, UNKNOWN_WORLD }
+    enum Reason { ALLOWED, MODEL_BLOCK, REQUIRED_SUPPORT, UNKNOWN_WORLD }
     record Decision(Reason reason, BlockPos dependent) {
         boolean allowed() { return reason == Reason.ALLOWED; }
     }
@@ -55,6 +55,11 @@ final class BuilderSupportDependencies {
         this.before = new View(blocks, ambient, null, null);
     }
 
+    /** Main-thread execution view: loaded live cells, without a path-worker cache or global settings lookup. */
+    static BuilderSupportDependencies currentWorld(ISchematic model, Vec3i origin, List<BlockState> stock, LevelReader world) {
+        return new BuilderSupportDependencies(model, origin, stock, null, world);
+    }
+
     Decision removal(BlockPos removed) {
         return removal(removed, null);
     }
@@ -62,10 +67,18 @@ final class BuilderSupportDependencies {
     /** The caller may supply only this tick's explicitly selected primary repair, never a navigation target. */
     Decision removal(BlockPos removed, BlockState selectedRepairState) {
         // An ordinary builder context always captures a model. Excavation explicitly does not enter this policy.
-        if (!touchesModel(removed)) return ALLOWED;
+        if (!inside(removed) && !touchesModel(removed)) return ALLOWED;
         View after = before.withBlock(removed, Blocks.AIR.defaultBlockState());
         try {
             BlockState primary = before.getBlockState(removed); // Unknown terrain is never cheap mining.
+            BlockState primaryWanted = inside(removed) ? desired(removed, primary) : null;
+            // The working layer can hide an already-built cell. Its full-model material still belongs here:
+            // neither a finite path penalty nor a possible drop proves that we can restore it afterwards.
+            // Wrong properties retain their material too, except for the existing explicitly selected repair.
+            if (primaryWanted != null && !primaryWanted.isAir() && primary.is(primaryWanted.getBlock())
+                    && !(primary == selectedRepairState && primary != primaryWanted)) {
+                return new Decision(Reason.MODEL_BLOCK, removed.immutable());
+            }
             BlockPos repairPartner = primary == selectedRepairState ? pairedRepairPartner(removed, primary) : null;
             for (Direction direction : NEIGHBOURS) {
                 BlockPos neighbour = removed.relative(direction);
@@ -157,15 +170,18 @@ final class BuilderSupportDependencies {
 
         @Override public BlockState getBlockState(BlockPos pos) {
             if (pos.getY() < getMinY() || pos.getY() >= getMinY() + getHeight()) return Blocks.AIR.defaultBlockState();
-            if (!blocks.worldContainsLoadedChunk(pos.getX(), pos.getZ())) throw new UnknownWorld();
-            return pos.equals(replaced) ? replacement : blocks.get0(pos.getX(), pos.getY(), pos.getZ());
+            if (!hasChunk(pos.getX() >> 4, pos.getZ() >> 4)) throw new UnknownWorld();
+            return pos.equals(replaced) ? replacement : blocks == null
+                    ? ambient.getBlockState(pos) : blocks.get0(pos.getX(), pos.getY(), pos.getZ());
         }
         @Override public FluidState getFluidState(BlockPos pos) { return getBlockState(pos).getFluidState(); }
         // Returning a real chunk would bypass the single-block view. Unhandled Vanilla queries are unknown,
         // never permission to mine. The direct block-support predicates use getBlockState/getFluidState.
         @Override public ChunkAccess getChunk(int x, int z, ChunkStatus status, boolean create) { throw new UnknownWorld(); }
         @Override public BlockEntity getBlockEntity(BlockPos pos) { throw new UnknownWorld(); }
-        @Override public boolean hasChunk(int x, int z) { return blocks.worldContainsLoadedChunk(x << 4, z << 4); }
+        @Override public boolean hasChunk(int x, int z) {
+            return blocks == null ? ambient.hasChunk(x, z) : blocks.worldContainsLoadedChunk(x << 4, z << 4);
+        }
         @Override public BlockGetter getChunkForCollisions(int x, int z) {
             if (!hasChunk(x, z)) throw new UnknownWorld();
             return this;

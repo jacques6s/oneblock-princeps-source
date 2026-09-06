@@ -36,6 +36,7 @@ import princeps.pathing.calc.SearchBudget;
 import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.path.PathExecutor;
+import princeps.process.BuilderProcess;
 import princeps.utils.PathRenderer;
 import princeps.utils.PathingCommandContext;
 import princeps.utils.pathing.Favoring;
@@ -526,8 +527,7 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
                 // The licences of the context THIS search ran under, not of whatever the field holds now: by the time
                 // this callback runs, a newer command may already have replaced `context`.
                 Optional<PathExecutor> executor = calcResult.getPath()
-                        .map(p -> new PathExecutor(PathingBehavior.this, p,
-                                context.placementLicence(), context.wadeLicence()));
+                        .map(p -> executorForSearch(p, context));
                 if (current == null) {
                     if (executor.isPresent()) {
                         if (executor.get().getPath().positions().contains(expectedSegmentStart)) {
@@ -573,6 +573,12 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
                 }
             }
         });
+    }
+
+    /** Receives the completed search's local context, never the potentially newer behavior field. */
+    private PathExecutor executorForSearch(IPath path, CalculationContext searchContext) {
+        return new PathExecutor(this, path, searchContext.placementLicence(), searchContext.wadeLicence(),
+                searchContext instanceof BuilderProcess.BuilderCalculationContext builder ? builder.modelProtection() : null);
     }
 
     private AbstractNodeCostSearch createPathfinder(BlockPos start, Goal goal, IPath previous, CalculationContext context) {
