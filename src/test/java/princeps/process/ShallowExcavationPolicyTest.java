@@ -150,44 +150,47 @@ public class ShallowExcavationPolicyTest {
     }
 
     @Test
-    public void failedGenericRouteKeepsARealWetApproachToPartlyCoveredOneHighWork() {
-        var bounds = surface(1, 20, 20);
-        BetterBlockPos feet = new BetterBlockPos(10, 20, 30);
-        BetterBlockPos work = new BetterBlockPos(16, 20, 30);
-        BetterBlockPos next = feet.east();
-        BlockState stone = Blocks.STONE.defaultBlockState();
-        BlockState water = Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL, 2);
-        Map<Long, BlockState> cells = new HashMap<>();
-        cells.put(feet.asLong(), water);
-        cells.put(next.asLong(), water);
-        cells.put(work.asLong(), stone);
-        cells.put(work.above().asLong(), stone);
-        Function<BlockPos, BlockState> read = pos -> cells.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState());
-        boolean covered = ShallowExcavationPolicy.roofBlocksStanding(read.apply(work.above()),
-                EmptyBlockGetter.INSTANCE, work.above());
-        assertTrue(covered);
-        assertEquals("the next body's headroom remains open despite the distant fixed roof", next,
-                ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read));
-        assertFalse("a generic route failure cannot reject an available licensed water step",
-                ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
-                        ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
+    public void failedGenericRouteKeepsARealWetApproachToPartlyCoveredOneHighWork() throws ReflectiveOperationException {
+        try (VanillaWaterTags ignored = new VanillaWaterTags()) {
+            var bounds = surface(1, 20, 20);
+            BetterBlockPos feet = new BetterBlockPos(10, 20, 30);
+            BetterBlockPos work = new BetterBlockPos(16, 20, 30);
+            BetterBlockPos next = feet.east();
+            BlockState stone = Blocks.STONE.defaultBlockState();
+            BlockState water = Blocks.WATER.defaultBlockState().setValue(BlockStateProperties.LEVEL, 2);
+            Map<Long, BlockState> cells = new HashMap<>();
+            cells.put(feet.asLong(), water);
+            cells.put(next.asLong(), water);
+            cells.put(work.asLong(), stone);
+            cells.put(work.above().asLong(), stone);
+            Function<BlockPos, BlockState> read = pos -> cells.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState());
+            boolean covered = ShallowExcavationPolicy.roofBlocksStanding(read.apply(work.above()),
+                    EmptyBlockGetter.INSTANCE, work.above());
+            assertTrue(covered);
+            BetterBlockPos actualStep = ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read);
+            assertNotNull("the next body's headroom remains open despite the distant fixed roof", actualStep);
+            assertEquals(next.asLong(), actualStep.asLong());
+            assertFalse("a generic route failure cannot reject an available licensed water step",
+                    ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
+                            ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
 
-        for (BlockState obstruction : new BlockState[] {stone,
-                Blocks.OAK_SLAB.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED, true)}) {
-            cells.put(next.above().asLong(), obstruction);
-            assertNull(ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read));
-            assertTrue("a blocked body step grants no retry exemption or outside excavation",
+            for (BlockState obstruction : new BlockState[] {stone,
+                    Blocks.OAK_SLAB.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED, true)}) {
+                cells.put(next.above().asLong(), obstruction);
+                assertNull(ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read));
+                assertTrue("a blocked body step grants no retry exemption or outside excavation",
+                        ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
+                                ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
+            }
+            cells.remove(next.above().asLong());
+            assertFalse("removing the obstacle makes the existing step usable again",
+                    ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
+                            ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
+            cells.remove(feet.asLong());
+            cells.remove(next.asLong());
+            assertTrue("ordinary dry navigation has no water-step exemption",
                     ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
                             ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
         }
-        cells.remove(next.above().asLong());
-        assertFalse("removing the obstacle makes the existing step usable again",
-                ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
-                        ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
-        cells.remove(feet.asLong());
-        cells.remove(next.asLong());
-        assertTrue("ordinary dry navigation has no water-step exemption",
-                ShallowExcavationPolicy.stopAfterFailedRoute(true, true, false, covered,
-                        ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, read) != null));
     }
 }
