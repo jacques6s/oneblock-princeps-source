@@ -2,15 +2,26 @@ package princeps.process;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.Holder;
+import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.tags.FluidTags;
+import net.minecraft.tags.TagKey;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.level.material.Fluids;
+import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import princeps.api.utils.BetterBlockPos;
 
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
@@ -19,13 +30,46 @@ import static org.junit.Assert.*;
 public class OrdinaryExcavationWaterTest {
     private static BlockState AIR;
     private static BlockState WATER;
+    private static final Map<Holder.Reference<Fluid>, List<TagKey<Fluid>>> ORIGINAL_TAGS = new HashMap<>();
+    private static Method bindTags;
 
     @BeforeClass
-    public static void bootstrapMinecraft() {
+    public static void bootstrapMinecraft() throws ReflectiveOperationException {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
+        // Headless bootstrap creates the fluids but does not load the vanilla datapack's water tag. Both
+        // still and flowing water must carry it, exactly as they do in the connected client world.
+        bindTags = Holder.Reference.class.getDeclaredMethod("bindTags", Collection.class);
+        bindTags.setAccessible(true);
+        for (Fluid fluid : new Fluid[] {Fluids.WATER, Fluids.FLOWING_WATER}) {
+            Holder.Reference<Fluid> holder = (Holder.Reference<Fluid>) BuiltInRegistries.FLUID.wrapAsHolder(fluid);
+            List<TagKey<Fluid>> original = holder.tags().toList();
+            ORIGINAL_TAGS.put(holder, original);
+            List<TagKey<Fluid>> tagged = new ArrayList<>(original);
+            if (!tagged.contains(FluidTags.WATER)) tagged.add(FluidTags.WATER);
+            bindTags.invoke(holder, tagged);
+        }
         AIR = Blocks.AIR.defaultBlockState();
         WATER = Blocks.WATER.defaultBlockState();
+        for (int level = 0; level <= 15; level++) {
+            assertTrue("water fixture must satisfy the production fluid-tag query at level " + level,
+                    WATER.setValue(BlockStateProperties.LEVEL, level).getFluidState().is(FluidTags.WATER));
+        }
+        assertFalse(Blocks.LAVA.defaultBlockState().getFluidState().is(FluidTags.WATER));
+    }
+
+    @AfterClass
+    public static void restoreFluidTags() throws ReflectiveOperationException {
+        if (bindTags != null) {
+            for (var entry : ORIGINAL_TAGS.entrySet()) bindTags.invoke(entry.getKey(), entry.getValue());
+        }
+    }
+
+    private static void assertStep(BlockPos expected, BlockPos actual) {
+        // BetterBlockPos.toString() loads client settings. A failed headless assertion should report the
+        // missing/wrong step directly instead of replacing it with a missing-Minecraft-instance exception.
+        assertNotNull("expected a licensed water step", actual);
+        assertEquals(expected.asLong(), actual.asLong());
     }
 
     private static ExcavationRepairPolicy.Bounds bounds(int width, int length) {
@@ -70,7 +114,7 @@ public class OrdinaryExcavationWaterTest {
         for (BlockPos wet : new BlockPos[] {feet, feet.above(), next, next.above()}) {
             for (int level = 0; level <= 15; level++) {
                 BlockState fluid = WATER.setValue(BlockStateProperties.LEVEL, level);
-                assertEquals(next, ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work,
+                assertStep(next, ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work,
                         pos -> pos.equals(wet) ? fluid : AIR));
             }
         }
@@ -126,12 +170,12 @@ public class OrdinaryExcavationWaterTest {
         BlockPos work = new BlockPos(10, 23, 36);
         Map<Long, BlockState> changes = new HashMap<>();
         Function<BlockPos, BlockState> world = pos -> changes.getOrDefault(pos.asLong(), WATER);
-        assertEquals(feet.south(), ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, world));
+        assertStep(feet.south(), ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, world));
         changes.put(feet.south().above().asLong(), Blocks.GRAVEL.defaultBlockState());
         assertNull("a falling block changes the next decision back to ordinary clearing",
                 ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, world));
         changes.clear();
-        assertEquals(feet.south(), ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, world));
+        assertStep(feet.south(), ExcavationRepairPolicy.ordinaryWetStep(bounds, feet, work, world));
     }
 
     @Test
