@@ -8975,7 +8975,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (decision == BuilderProgressWatch.Decision.DIAGNOSE && phase == BuilderProgressWatch.Phase.WORK) {
             Goal currentGoal = princeps.getPathingBehavior().getGoal();
             if (currentGoal != null) {
-                return new PathingCommand(currentGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+                return continueCurrentRoute(currentGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
             }
         }
         return null;
@@ -9101,7 +9101,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 && princeps.getPathingBehavior().getInProgress().isEmpty()) {
             return command; // no route to protect
         }
-        return new PathingCommand(inFlight, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        return continueCurrentRoute(inFlight, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+    }
+
+    /** A continuation must retain the route's rules as well as its goal. A plain command makes PathingBehavior
+     * construct a generic context, briefly allowing routes that the next builder tick cannot execute. Preserve
+     * the exact snapshot, including lane A/B and AutoDig's deliberately generic initial approach. New route
+     * commands still choose their own context; without an existing snapshot there is nothing to retain. */
+    private PathingCommand continueCurrentRoute(Goal goal, PathingCommandType type) {
+        CalculationContext context = princeps.getPathingBehavior().secretInternalGetCalculationContext();
+        return context == null ? new PathingCommand(goal, type) : new PathingCommandContext(goal, type, context);
     }
 
     private PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel, int recursions) {
@@ -10025,7 +10034,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // A non-cancellable movement/airborne tick is not a failed placement stance. Preserve the route that is
             // already making the player safe; never fall through to assemble() and replace it with another target.
             Goal activeGoal = princeps.getPathingBehavior().getGoal();
-            return new PathingCommand(activeGoal,
+            return continueCurrentRoute(activeGoal,
                     activeGoal == null ? PathingCommandType.SET_GOAL_AND_PATH
                             : PathingCommandType.REVALIDATE_GOAL_AND_PATH);
         }
