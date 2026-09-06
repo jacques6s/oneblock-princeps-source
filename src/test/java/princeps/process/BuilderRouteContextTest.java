@@ -167,8 +167,8 @@ public class BuilderRouteContextTest {
             }
         }
         assertEquals(Set.of("observeBuilderProgress", "holdStillWithoutTearingUpTheRoute", "onTick",
-                "placementRecoveryCommand", "driveCleanupEscape"), callers);
-        assertEquals(5, calls);
+                "placementRecoveryCommand", "driveCleanupEscape", "advanceHomeRecovery"), callers);
+        assertEquals(6, calls);
     }
 
     @Test public void actualCleanupDriverRetainsItsStrictContextUntilAnAirborneMovementCanCancel() throws Exception {

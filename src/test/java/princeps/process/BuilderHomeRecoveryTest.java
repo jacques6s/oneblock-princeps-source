@@ -80,6 +80,8 @@ public class BuilderHomeRecoveryTest {
         var command = f.b().advanceHomeRecovery(101);
         assertEquals(PathingCommandType.REVALIDATE_GOAL_AND_PATH, command.commandType);
         assertSame(old, f.route.pathing().getCurrent());
+        assertTrue(command instanceof princeps.utils.PathingCommandContext);
+        assertSame(f.route.base().cost, ((princeps.utils.PathingCommandContext) command).desiredCalcContext);
         assertEquals("QUIESCING", f.b().homeRecoveryState());
         assertFalse(f.b().resumeAfterHomeRecovery(f.b().homeRecoveryRequestId()));
     }
@@ -287,6 +289,7 @@ public class BuilderHomeRecoveryTest {
                     case "playerFeet"->new BetterBlockPos(player.position().x,player.position().y,player.position().z);
                     default->throw new AssertionError("unexpected context operation "+m.getName());});
         set(b,"ctx",ctx); set(route.pathing(),"ctx",ctx);set(route.pathing(),"princeps",bot);set(bot,"playerContext",ctx);set(bot,"builderProcess",b);
+        set(route.pathing(),"context",base.cost);
         set(route.pathing(),"pathPlanLock",new Object());set(route.pathing(),"pathCalcLock",new Object());set(route.pathing(),"toDispatch",new LinkedBlockingQueue<>());
         set(route.input(),"ctx",ctx);set(route.input(),"inputForceStateMap",new HashMap<Input,Boolean>());
         set(player,"input",allocate(net.minecraft.client.player.ClientInput.class));

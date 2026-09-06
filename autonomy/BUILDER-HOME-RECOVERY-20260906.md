@@ -92,6 +92,12 @@ too strict about JUnit `ComparisonFailure`, which extends `AssertionError`; the
 original XML/log and this distinction are preserved. Sources were restored
 byte-for-byte in `finally` before the final related/full verification.
 
+The first full run had one structural assertion failure: the existing route
+continuation caller list still named five sites. It now includes the new sixth
+Home continuation, with an actual Home-command context-identity assertion. Its
+other 932 results and failed XML/log remain separate from the final full build;
+no production change was needed for this test-contract update.
+
 Evidence is under `build/home-recovery-evidence`. Final full-suite totals,
 source/archive pins, runtime/API hashes and the 187-class API comparison are
 recorded separately in `full/final-artifacts.json`. No live acceptance, release
