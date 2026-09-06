@@ -616,6 +616,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** Die eine lebende Geruestzelle (Weltkoordinate), oder {@code null}. Mehr als eine gibt es nie. */
     private BetterBlockPos scaffoldCell;
     private final BuilderScaffoldLedger navigationScaffolds = new BuilderScaffoldLedger();
+    private final ExcavationFluidPlugs excavationFluidPlugs = new ExcavationFluidPlugs();
+    private ExcavationFluidPlugs.Hazard blockedFluidPlugThisTick;
     private boolean scaffoldCleanupActive;
     private final Set<Long> scaffoldCleanupTargets = new HashSet<>();
     /** Die geparkte Zelle, die sie freimachen soll. */
@@ -2228,6 +2230,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (!isActive() || buildInRows || temporarySupportTargets.containsKey(positionKey(pos))) {
             return;
         }
+        if (excavating && excavationIntegrity && insideSnakeVolume(pos.getX(), pos.getY(), pos.getZ())) {
+            excavationFluidPlugs.record(pos, before, after, buildTick);
+        }
         // Exterior seals/supports must survive completion. Treating the roof seal as disposable navigation
         // scaffold made a completed excavation tunnel up its outside wall just to reopen its own roof.
         // Internal plugs still owe removal; ordinary navigation scaffolds retain their existing lifecycle.
@@ -2252,6 +2257,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
+        excavationFluidPlugs.observe(pos, state);
         boolean wasOwned = navigationScaffolds.contains(pos);
         if (navigationScaffolds.serverChanged(pos, state)) {
             logMechanic("SCAFFOLD-OWNED server confirmed " + pos.toShortString());
@@ -3057,13 +3063,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // that hit is no longer reachable; excavation paths themselves are deliberately forbidden to mine.
         Optional<BetterBlockPos> routeObstruction = ordinaryCleanupRotation.isPresent()
                 ? Optional.empty() : snakeRouteObstruction(bcc);
+        if (routeObstruction.isPresent() && !snakeCleanupCutAllowed(routeObstruction.get(), bcc)) {
+            return Optional.empty();
+        }
         if (routeObstruction.isPresent()) {
             ordinaryCleanupRotation = Optional.empty();
             snakeCleanupTarget = routeObstruction.get();
             snakeCleanupActive = true;
             // Prefer a true single-block tool. If production inventory has none, retain the area tool's exact
             // face-owned rotation instead of handing it a generic ray that could rotate the 3x3 plane.
-            snakeCleanupWithAreaTool = snakeOrdinaryPickSlot(bcc.get(snakeCleanupTarget)) < 0;
+            snakeCleanupWithAreaTool = snakeCleanupMustUseArea(snakeCleanupTarget, bcc);
             snakeCell = snakeCleanupTarget;
             snakeDiagnosis = "t=" + buildTick + " Snake clears refilled route cell="
                     + snakeCleanupTarget.x + "," + snakeCleanupTarget.y + "," + snakeCleanupTarget.z
@@ -3180,6 +3189,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         // interactionClicks >= 0 means the block is right, only its open/delay/mode/note is off — that's
                         // fixed by a right-click (the interaction pass), NEVER by breaking it back to air and re-placing.
                         BetterBlockPos pos = new BetterBlockPos(x, y, z);
+                        if (!excavationMayMinePlug(pos, true)) continue;
                         if (areaSize <= 1) {
                             Optional<Rotation> rot = RotationUtils.reachableForWork(ctx, pos,
                                     ctx.playerController().getBlockReachDistance(), false);
@@ -4056,15 +4066,28 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // pose impossible while the real outline of a leftover remains plainly within ordinary mining reach.
         if (excavating && !snakeEntering) {
             BetterBlockPos retained = snakeCleanupWork.retained(snakeHead, snakeBandTop, bcc::get,
-                    cell -> snakeCellNeedsClear(cell, bcc) && !isCellParked(cell.x, cell.y, cell.z));
-            if (retained != null) return selectSnakeOrdinaryCleanup(retained, bcc);
+                    cell -> snakeCellNeedsClear(cell, bcc) && !isCellParked(cell.x, cell.y, cell.z)
+                            && snakeCleanupCutAllowed(cell, bcc));
+            if (retained != null) return selectSnakeCleanup(retained, bcc);
             Optional<BetterBlockPos> sourceBlock = reachableSnakeSourceBlock(bcc);
             if (sourceBlock.isPresent()) return selectSnakeOrdinaryCleanup(sourceBlock.get(), bcc);
         }
         boolean partialHead = excavating
                 && snakeHeadNeedsIndividualBreak(bcc.get(snakeHead), ctx.world(), snakeHead);
+        // Assess the action we will really execute. A vertical Shard plane may remove the plug's solid support
+        // in the same cut, making the whole cut safe even though mining that plug individually is unsafe.
+        boolean safeAreaHead = excavating && !snakeEntering && !snakeSingleBlockFallback && !partialHead
+                && snakeAreaToolSlot() >= 0 && snakeAreaCutAllowed(snakeHead, snakeExpectedFace());
+        if (centreNeedsClear && !safeAreaHead && !excavationMayMinePlug(snakeHead, true)) {
+            if (!snakeEntering) {
+                Optional<BetterBlockPos> other = reachableSnakeLeftover(bcc);
+                if (other.isPresent()) return selectSnakeCleanup(other.get(), bcc);
+            }
+            snakeWhy("retaining a source plug until its renewing neighbours are sealed", bcc);
+            return null;
+        }
         snakeRequiresOrdinaryTool = excavating
-                && (partialHead || !snakeAreaFootprintInsideSelection(snakeHead, snakeExpectedFace()));
+                && (partialHead || !snakeAreaCutAllowed(snakeHead, snakeExpectedFace()));
         if (snakeRequiresOrdinaryTool && !snakeToolReady(bcc.get(snakeHead), true)) {
             snakeWhy("waiting for an ordinary pickaxe for this individual cut", bcc);
             return null;
@@ -4133,7 +4156,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         snakeCleanupTarget = leftover.get();
         snakeCleanupActive = true;
-        snakeCleanupWithAreaTool = snakeOrdinaryPickSlot(bcc.get(snakeCleanupTarget)) < 0;
+        snakeCleanupWithAreaTool = snakeCleanupMustUseArea(snakeCleanupTarget, bcc);
         if (excavating && !snakeCleanupWithAreaTool) return selectSnakeOrdinaryCleanup(snakeCleanupTarget, bcc);
         if (snakeCleanupWithAreaTool && !snakeReadyToSwing()) {
             snakeWhy("waiting for a safe Shard cleanup pose", bcc);
@@ -4166,6 +4189,27 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         snakeDiagnosis = "t=" + buildTick + " Snake ordinary cleanup target=" + target.toShortString()
                 + " head=" + snakeHead.toShortString() + " hit=" + describeCrosshair();
         return target;
+    }
+
+    private boolean snakeCleanupMustUseArea(BetterBlockPos target, BuilderCalculationContext bcc) {
+        return snakeOrdinaryPickSlot(bcc.get(target)) < 0 || !excavationMayMinePlug(target, false);
+    }
+
+    private boolean snakeCleanupCutAllowed(BetterBlockPos target, BuilderCalculationContext bcc) {
+        if (!excavating) return true;
+        if (!snakeCleanupMustUseArea(target, bcc)) return true;
+        if (snakeAreaToolSlot() >= 0 && snakeCleanupAreaRotation(target).isPresent()) return true;
+        excavationMayMinePlug(target, true);
+        return false;
+    }
+
+    private BetterBlockPos selectSnakeCleanup(BetterBlockPos target, BuilderCalculationContext bcc) {
+        if (!snakeCleanupMustUseArea(target, bcc)) return selectSnakeOrdinaryCleanup(target, bcc);
+        snakeCleanupTarget = target;
+        snakeCleanupActive = true;
+        snakeCleanupWithAreaTool = true;
+        snakeRequiresOrdinaryTool = false;
+        return snakeReadyToSwing() ? target : null;
     }
 
     private Optional<Rotation> snakeOrdinaryCleanupRotation(BetterBlockPos target, BuilderCalculationContext bcc) {
@@ -4236,7 +4280,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     cell = new BetterBlockPos(snakeHead.x + horizontalOrX, snakeHead.y + verticalOrZ,
                             snakeHead.z);
                 }
-                if (cell.equals(snakeHead) || !snakeCellNeedsClear(cell, bcc)) {
+                if (cell.equals(snakeHead) || !snakeCellNeedsClear(cell, bcc)
+                        || !snakeCleanupCutAllowed(cell, bcc)) {
                     continue;
                 }
                 if (RotationUtils.reachableForWork(ctx, cell,
@@ -4782,18 +4827,53 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return excavating && effectiveAreaBreakSize() == 1;
     }
 
-    /** Last-moment guard shared by builder and navigation inputs; no ordinary cut may execute with the Shard. */
+    /** Last-moment guard shared by builder and navigation inputs, including every actual Shard neighbour. */
     public boolean ordinaryExcavationBreakAllowed(BlockPos target) {
-        if (!isActive() || !ordinaryExcavation()) return true;
+        if (!isActive() || !excavating) return true;
         if (paused || abortPending != Ending.RUNNING || !insideSnakeVolume(target.getX(), target.getY(), target.getZ())) {
             return false;
         }
+        boolean areaTool = snakeIsAreaTool(ctx.player().getMainHandItem());
+        Direction face = ctx.objectMouseOver() instanceof BlockHitResult hit ? hit.getDirection() : null;
+        if (areaTool && (face == null || !snakeAreaCutAllowed(target, face))) return false;
+        if (!areaTool && !excavationMayMinePlug(target, false)) return false;
+        if (!ordinaryExcavation()) return true;
         BlockState state = ctx.world().getBlockState(target);
         int x = target.getX() - origin.getX(), y = target.getY() - origin.getY(), z = target.getZ() - origin.getZ();
         BlockState desired = schematic.inSchematic(x, y, z, state)
                 ? schematic.desiredState(x, y, z, state, approxPlaceable) : null;
         return ExcavationRepairPolicy.ordinaryBreakAllowed(true, desired != null && desired.isAir(),
-                snakeIsAreaTool(ctx.player().getMainHandItem()));
+                areaTool);
+    }
+
+    private Optional<ExcavationFluidPlugs.Hazard> excavationPlugHazard(BlockPos target, Direction face,
+                                                                     boolean areaTool) {
+        if (!excavating || target == null || excavationFluidPlugs.size() == 0) return Optional.empty();
+        return excavationFluidPlugs.firstHazard(ExcavationFluidPlugs.footprint(target, face, areaTool), ctx.world(),
+                ExcavationFluidPlugs::vanillaSourceConversion);
+    }
+
+    /** Mining permission only. Work sets and completion censuses must continue to count the retained plug. */
+    private boolean excavationMayMinePlug(BlockPos target, boolean recordBlockedWork) {
+        Optional<ExcavationFluidPlugs.Hazard> hazard = excavationPlugHazard(target, null, false);
+        if (recordBlockedWork && blockedFluidPlugThisTick == null) blockedFluidPlugThisTick = hazard.orElse(null);
+        return hazard.isEmpty();
+    }
+
+    private boolean snakeAreaCutAllowed(BlockPos target, Direction face) {
+        return snakeAreaFootprintInsideSelection(target, face)
+                && (!excavating || snakeAreaFootprintInsideActiveBand(target, face, snakeBandFloor, snakeBandTop))
+                && excavationPlugHazard(target, face, true).isEmpty();
+    }
+
+    static boolean snakeAreaFootprintInsideActiveBand(BlockPos target, Direction face, int bandFloor, int bandTop) {
+        if (target == null || face == null || bandFloor == Integer.MIN_VALUE || bandTop == Integer.MIN_VALUE) {
+            return false;
+        }
+        // Removing a plug's support is a valid simultaneous cut only when that support belongs to this band.
+        // Opening the next band's floor would strand the current route, even though it is inside the selection.
+        int verticalRadius = face.getAxis() == Direction.Axis.Y ? 0 : 1;
+        return target.getY() - verticalRadius >= bandFloor && target.getY() + verticalRadius <= bandTop;
     }
 
     private PathingCommand ordinaryWetApproachCommand(BuilderCalculationContext bcc, boolean safeToCancel) {
@@ -5276,7 +5356,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 Direction.SOUTH, Direction.WEST, Direction.EAST};
         EnumSet<Direction> tried = EnumSet.noneOf(Direction.class);
         for (Direction face : candidates) {
-            if (!tried.add(face) || !snakeAreaFootprintInsideSelection(target, face)) {
+            if (!tried.add(face) || !snakeAreaCutAllowed(target, face)) {
                 continue;
             }
             Vec3 aim = new Vec3(target.x + 0.5D + face.getStepX() * 0.5D,
@@ -8925,6 +9005,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 abortBuild(Ending.PLACEMENT_FAILED, "Build stopped: navigation scaffold placement was not confirmed by the server",
                         unconfirmedScaffolds.stream().map(BlockPos::toShortString).toList());
             }
+            excavationFluidPlugs.unconfirmedBefore(buildTick - 400).ifPresent(pos ->
+                    abortBuild(Ending.PLACEMENT_FAILED,
+                            "AutoDig stopped: fluid plug placement was not confirmed by the server",
+                            List.of("Unconfirmed source plug: " + pos.toShortString(),
+                                    "Repeated requests and old fluid updates do not restart the 400-tick limit.")));
             enforcePlacementTargetDeadline();
             closeAnyContainerScreen();
             narrateIfNoCellHasCompleted();
@@ -9381,12 +9466,29 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
 
         if (buildTick % 40 == 0) { logMechanic("PROBE B tick=" + buildTick + " reached the break call"); }
+        blockedFluidPlugThisTick = null;
         Optional<Tuple<BetterBlockPos, Rotation>> toBreak = toBreakNearPlayer(bcc);
         boolean miningPostureReady = snakeMiningPostureReady(ctx.player().onGround(), ctx.player().isInWater(),
                 ordinaryExcavation() || (excavating && snakeCleanupActive && !snakeCleanupWithAreaTool), snakeEntering);
         if (buildTick % 40 == 0) { logMechanic("PROBE B2 tick=" + buildTick + " toBreak=" + toBreak.isPresent()
                 + " safeToCancel=" + isSafeToCancel + " onGround=" + ctx.player().onGround()
                 + " yieldUntil=" + breakBranchYieldUntilTick + " idle=" + breakBranchIdleTicks); }
+        PathExecutor plugRoute = princeps.getPathingBehavior().getCurrent();
+        if (blockedFluidPlugThisTick != null && plugRoute != null
+                && insideSnakeVolume(ctx.playerFeet().x, ctx.playerFeet().y, ctx.playerFeet().z)) {
+            excavationFluidPlugs.routeProgress(plugRoute, plugRoute.getPosition(), ctx.playerFeet());
+        }
+        // Check before a repair can arm CLICK_RIGHT. First server confirmations anywhere in the current plug
+        // ledger and real, non-repeated route advancement renew this clock; merely aiming or retrying does not.
+        if (excavationFluidPlugs.waitExpired(toBreak.isEmpty() ? blockedFluidPlugThisTick : null, buildTick)) {
+            abortBuild(Ending.LAYER_VERIFICATION_FAILED, "AutoDig cannot safely remove a renewing fluid plug",
+                    java.util.List.of("Retained plug: " + blockedFluidPlugThisTick.plug(),
+                            "Unsealed horizontal sources: " + blockedFluidPlugThisTick.sources(),
+                            "No safe cut, newly confirmed source seal or route advancement for 200 ticks.",
+                            "An additional safe access route is required; the plug was not removed."));
+            finishAbortedBuild();
+            return null;
+        }
         PathingCommand snakeRepair = excavationIntegrityPlacementCommand(bcc, isSafeToCancel);
         if (snakeRepair != null) {
             return snakeRepair;
@@ -13101,6 +13203,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         navigationScaffolds.clear();
+        excavationFluidPlugs.clear();
+        blockedFluidPlugThisTick = null;
         scaffoldCleanupActive = false;
         scaffoldCleanupTargets.clear();
         // Die beiden Listen gehoeren zu EINEM Bauauftrag. Eine PARK-Liste, die einen Auftrag ueberlebt,
@@ -13437,6 +13541,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         private final Lane lane;
         private final boolean rowMode;
         private final boolean ordinaryExcavationMode;
+        private final ExcavationFluidPlugs fluidPlugSnapshot;
         private final boolean rowSweepAlongX;
         private final int rowBandStart;
         private final int rowFrontier;
@@ -13453,6 +13558,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             super(BuilderProcess.this.princeps, true); // wew lad
             this.lane = lane;
             this.ordinaryExcavationMode = ordinaryExcavation();
+            this.fluidPlugSnapshot = excavating ? excavationFluidPlugs.snapshot() : new ExcavationFluidPlugs();
             this.excavationRouteStart = lane == Lane.EXCAVATION_PATH ? ctx.playerFeet() : null;
             this.excavationRouteWaypoint = lane == Lane.EXCAVATION_PATH ? excavationRouteWaypoint : null;
             this.rowMode = buildInRows;
@@ -13775,6 +13881,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if ((!allowBreak && !allowBreakAnyway.contains(current.getBlock())) || isPossiblyProtected(x, y, z)) {
                 return COST_INF;
             }
+            if (fluidPlugSnapshot.size() > 0 && fluidPlugSnapshot.firstHazard(List.of(new BlockPos(x, y, z)),
+                    bsi.access, ExcavationFluidPlugs::vanillaSourceConversion).isPresent()) return COST_INF;
             // The snake itself owns every excavation break, including the exact 3x3 face and its rotation settle.
             // Navigation is only allowed to walk that cleared corridor and bridge its one licensed floor cell. If A*
             // may break here it can tunnel sideways, shave the ceiling, or invent a stair around a ravine; all three
