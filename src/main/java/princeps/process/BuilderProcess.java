@@ -1616,6 +1616,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     @Override
     public void build(String name, ISchematic schematic, Vec3i origin) {
+        resetAutoDigLookProfile();
         // EVERY job starts as "not an excavation". clearArea sets the flag again immediately after calling this,
         // and it must be cleared on THIS path too: this is the overload clearArea itself uses, so a build that
         // followed a dig would otherwise inherit the flag and quietly stop parking -- turning a fix for digging
@@ -5461,6 +5462,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             logMechanic("AutoDig look profile pinned: curved break/place aims, aimHold=false, deterministic steering");
         } else {
             autoDigLookProfile.enforce();
+        }
+    }
+
+    /** A replacement job may start while its predecessor is paused and never receive onLostControl first. */
+    void resetAutoDigLookProfile() {
+        if (autoDigLookProfile != null) {
+            autoDigLookProfile.restore();
+            autoDigLookProfile = null;
         }
     }
 
@@ -13284,10 +13293,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     @Override
     public void onLostControl() {
-        if (autoDigLookProfile != null) {
-            autoDigLookProfile.restore();
-            autoDigLookProfile = null;
-        }
+        resetAutoDigLookProfile();
         // Only if nothing has already claimed the ending: a build that finished, or that aborted for a named
         // reason, passes through here too, and its reason must survive the teardown that reports it.
         if (ending == Ending.RUNNING && schematic != null) {
