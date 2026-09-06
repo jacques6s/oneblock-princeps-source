@@ -1212,6 +1212,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return;
         }
         abortPending = how;
+        supportRepair = null;
         abortPendingHeadline = headline;
         abortPendingDetail = detail == null ? java.util.Collections.emptyList() : new ArrayList<>(detail);
         BuildTrace.cell(buildTick, "ABORT-REQUESTED", origin == null ? 0 : origin.getX(),
@@ -1952,11 +1953,17 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     public void resume() {
+        if (paused && scaffoldMaterialPausedAt != null) {
+            if (scaffoldMaterialTarget != null) scaffoldMaterialWaitStarted += Math.max(0, buildTick - scaffoldMaterialPausedAt);
+            scaffoldMaterialPausedAt = null;
+        }
         paused = false;
     }
 
     public void pause() {
+        if (!paused && scaffoldMaterialTarget != null) scaffoldMaterialPausedAt = buildTick;
         paused = true;
+        supportRepair = null;
         progressWatch.pause();
     }
 
@@ -2046,6 +2053,73 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     @Override
     public boolean isActive() {
         return schematic != null;
+    }
+
+    private BlockPos lastSupportRefusal;
+    private BlockPos lastSupportDependent;
+    private BuilderSupportDependencies.Reason lastSupportRefusalReason;
+    private record SupportRepair(BlockPos target, BlockState state, Object world, Object player,
+                                 ISchematic model, long tick) {}
+    private SupportRepair supportRepair;
+
+    /** A temporary process can take control without onLostControl; its mining is not this repair's continuation. */
+    public void revokeSupportRepair() {
+        supportRepair = null;
+    }
+
+    /** Called only after the ordinary direct repair branch has selected and aimed a break-and-replace action. */
+    void selectSupportRepair(BlockPos target, BlockState current, BlockState wanted) {
+        supportRepair = wanted != null && current != wanted && interactionClicks(current, wanted) < 0
+                ? new SupportRepair(target.immutable(), current, ctx.world(), ctx.player(),
+                        supportModelForDependencies(), buildTick) : null;
+    }
+
+    /** Shared with the navigation cost policy, applied to the real crosshair immediately before mining. */
+    public boolean allowsSupportRemoval(BlockPos target) {
+        if (!isActive() || paused || excavating) { supportRepair = null; return true; }
+        boolean continuing = supportRepair != null && supportRepair.tick() != buildTick
+                && princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock();
+        return allowsSupportRemoval(target, new BlockStateInterface(ctx), continuing);
+    }
+
+    boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks) {
+        return allowsSupportRemoval(target, blocks, false);
+    }
+
+    boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks, boolean controllerContinuingSameBlock) {
+        if (!isActive() || paused || excavating) { supportRepair = null; return true; }
+        ISchematic full = supportModelForDependencies();
+        SupportRepair repair = supportRepair;
+        BlockState repairing = repair != null
+                && (repair.tick() == buildTick || repair.tick() == buildTick - 1 && controllerContinuingSameBlock)
+                && repair.target().equals(target)
+                && repair.world() == ctx.world() && repair.player() == ctx.player() && repair.model() == full
+                ? repair.state() : null;
+        supportRepair = repairing == null ? null : new SupportRepair(repair.target(), repair.state(), repair.world(),
+                repair.player(), repair.model(), buildTick);
+        BuilderSupportDependencies.Decision decision = new BuilderSupportDependencies(full, origin,
+                approxPlaceable == null ? Collections.emptyList() : approxPlaceable,
+                blocks, ctx.world()).removal(target, repairing);
+        if (!decision.allowed() || repairing != null && blocks.get0(target) != repairing) supportRepair = null;
+        if (decision.allowed()) {
+            lastSupportRefusal = null;
+            lastSupportDependent = null;
+            lastSupportRefusalReason = null;
+        }
+        if (!decision.allowed() && (!target.equals(lastSupportRefusal)
+                || decision.reason() != lastSupportRefusalReason
+                || !Objects.equals(decision.dependent(), lastSupportDependent))) {
+            lastSupportRefusal = target.immutable();
+            lastSupportDependent = decision.dependent();
+            lastSupportRefusalReason = decision.reason();
+            BuildTrace.cell(buildTick, "SUPPORT-PROTECTED", target.getX(), target.getY(), target.getZ(),
+                    "reason=" + decision.reason() + " dependent=" + decision.dependent());
+        }
+        return decision.allowed();
+    }
+
+    ISchematic supportModelForDependencies() {
+        return realSchematic == null ? schematic : realSchematic;
     }
 
     public BlockState placeAt(int x, int y, int z, BlockState current) {
@@ -2479,7 +2553,26 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *
      * @return {@code true}, wenn eine Geruestzelle eroeffnet wurde -- dann hat der Bau wieder etwas zu tun
      */
+    private BetterBlockPos scaffoldMaterialTarget;
+    private long scaffoldMaterialWaitStarted;
+    private Long scaffoldMaterialPausedAt;
+    private long scaffoldMaterialAttemptTick = Long.MIN_VALUE;
+    private static final long SCAFFOLD_MATERIAL_WAIT_TICKS = 120;
+
+    /** True means a checked scaffold or its bounded normal material preparation owns this tick. */
     private boolean openScaffoldPhase(BuilderCalculationContext bcc) {
+        if (buildInRows || scaffoldCell != null || parkedCells.isEmpty() || !bcc.hasThrowaway) return false;
+        return openScaffoldPhase(bcc, throwawayBlockState(), this::prepareScaffoldMaterial);
+    }
+
+    boolean openScaffoldPhase(BuilderCalculationContext bcc, BlockState material,
+                              java.util.function.BiPredicate<BetterBlockPos, BlockState> prepareMaterial) {
+        return openScaffoldPhase(bcc, material, prepareMaterial, this::logMechanic);
+    }
+
+    boolean openScaffoldPhase(BuilderCalculationContext bcc, BlockState material,
+                              java.util.function.BiPredicate<BetterBlockPos, BlockState> prepareMaterial,
+                              java.util.function.Consumer<String> mechanics) {
         if (buildInRows || scaffoldCell != null || parkedCells.isEmpty() || !bcc.hasThrowaway) {
             return false;
         }
@@ -2496,10 +2589,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             return false;
         }
-        BlockState material = throwawayBlockState();
         if (material == null) {
             return false;
         }
+        if (scaffoldMaterialTarget != null) {
+            BlockState wanted = bcc.getSchematic(scaffoldMaterialTarget.x, scaffoldMaterialTarget.y,
+                    scaffoldMaterialTarget.z, bcc.bsi.get0(scaffoldMaterialTarget));
+            if (parkedCells.containsKey(positionKey(scaffoldMaterialTarget)) && wanted != null
+                    && !wanted.isAir() && hotbarStackThatPlaces(wanted) == null) {
+                return prepareMaterial.test(scaffoldMaterialTarget, wanted);
+            }
+            scaffoldMaterialTarget = null;
+        }
+        String missingDependency = null;
         BetterBlockPos feet = ctx.playerFeet();
         int wirkungsproben = 0;
         BetterBlockPos besteUngeprueft = null;
@@ -2516,6 +2618,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // hingehoert -- und sie zaehlte am Ende als "cell that could not be built" mit.
             BlockState sollHier = bcc.getSchematic(zelle.x, zelle.y, zelle.z, bcc.bsi.get0(zelle));
             if (sollHier == null || sollHier.isAir()) {
+                continue;
+            }
+            String dependency = scaffoldSupportDiagnostic(bcc, zelle, sollHier, material);
+            if (dependency != null) {
+                if (missingDependency == null) missingDependency = dependency;
                 continue;
             }
             // EIN VERSUCH JE ZELLE, NICHT EINER JE SEITE -- und das ist kein Sparen, sondern Schadensvermeidung.
@@ -2617,18 +2724,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // wird als "nein" gelesen. Es gibt drei Antworten, nicht zwei -- und die dritte darf nichts
                 // entscheiden und nichts merken.
                 if (hotbarStackThatPlaces(sollHier) == null) {
-                    // UNENTSCHIEDEN DARF NICHT EWIG BLOCKIEREN, sonst ist es ein Deadlock und kein Abwarten.
-                    //
-                    // GEMESSEN, Lauf 7baf4b65: 478-mal unentschieden, kein einziges Urteil, kein Geruest, 2750
-                    // Zellen. Die Kette schliesst sich zum Kreis -- der Block kommt nur in die Schnellleiste,
-                    // wenn der Bauer ihn setzen will; der will erst, wenn ein Geruest offen ist; das oeffnet erst,
-                    // wenn die Pruefung urteilt; die kann nicht urteilen, solange der Block nicht in der Leiste
-                    // liegt.
-                    //
-                    // Also wird der Kandidat gemerkt statt verworfen: findet sich am Ende KEIN geprueft guter,
-                    // faellt die Wahl auf den besten ungeprueften. Das ist genau das Verhalten von vorher, und es
-                    // gilt nur dort, wo die Pruefung nichts sagen kann -- sie verschlechtert damit nie etwas,
-                    // sie verbessert nur, wo sie etwas weiss.
+                    // No material for the oracle means preparation is missing, not that a helper is useful.
+                    // Remember one demand, fetch it normally, then evaluate the same unchanged world again.
                     BuildTrace.cell(buildTick, "SCAFFOLD-PROBE", kandidat.x, kandidat.y, kandidat.z,
                             "serves=" + zelle.x + "," + zelle.y + "," + zelle.z
                                     + " oeffnet=unentschieden (" + blockName(sollHier)
@@ -2702,15 +2799,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
         if (beste == null && besteUngeprueft != null) {
-            // Kein geprueft guter Kandidat, aber einer, ueber den die Pruefung nichts sagen konnte. Der bekommt
-            // seine Chance -- sonst waere aus "weiss ich nicht" ein "nein" geworden, und genau das ist der
-            // Fehler, der sich durch diesen ganzen Tag zieht.
-            beste = besteUngeprueft;
-            bestesZiel = bestesZielUngeprueft;
+            return prepareMaterial.test(bestesZielUngeprueft, bcc.getSchematic(
+                    bestesZielUngeprueft.x, bestesZielUngeprueft.y, bestesZielUngeprueft.z,
+                    bcc.bsi.get0(bestesZielUngeprueft)));
         }
         if (beste == null) {
+            if (missingDependency != null) {
+                abortBuild(Ending.LAYER_UNBUILDABLE, "Build stopped: " + missingDependency,
+                        List.of("No helper is authorized while the required survival dependency is missing or unknown."));
+                return true;
+            }
             return false;
         }
+        scaffoldMaterialTarget = null;
         scaffoldCell = beste;
         scaffoldServes = bestesZiel;
         scaffoldWanted = material;
@@ -2741,10 +2842,60 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 "serves=" + bestesZiel.x + "," + bestesZiel.y + "," + bestesZiel.z
                         + " material=" + blockName(material)
                         + " (" + scaffoldsThisLayer + "/" + MAX_SCAFFOLDS_PER_LAYER + " in dieser Ebene)");
-        logMechanic("Nothing else is placeable and " + parkedCells.size() + " cell(s) are parked; placing one"
+        mechanics.accept("Nothing else is placeable and " + parkedCells.size() + " cell(s) are parked; placing one"
                 + " temporary support at " + beste.x + "," + beste.y + "," + beste.z
                 + " to open " + bestesZiel.x + "," + bestesZiel.y + "," + bestesZiel.z
                 + ". It is removed again the moment that cell stands.");
+        return true;
+    }
+
+    String scaffoldSupportDiagnostic(BuilderCalculationContext bcc, BlockPos target,
+                                     BlockState wanted, BlockState material) {
+        ISchematic full = supportModelForDependencies();
+        try {
+            BlockPos support = new BuilderSupportDependencies(full, origin, bcc.placeable, bcc.bsi, ctx.world())
+                    .missingExternalSupport(target, wanted, material);
+            return support == null ? null : "missing permanent support outside the schematic at "
+                    + support.toShortString() + " for " + blockName(wanted) + " at " + target.toShortString();
+        } catch (BuilderSupportDependencies.UnknownWorld ignored) {
+            return "support dependency is unknown because its block view is unavailable at " + target.toShortString();
+        }
+    }
+
+    private boolean prepareScaffoldMaterial(BetterBlockPos target, BlockState wanted) {
+        return prepareScaffoldMaterial(target, wanted, Princeps.settings().allowInventory.value, slot -> {
+            princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
+            return princeps.getInventoryBehavior().attemptToPutOnHotbar(slot, candidate -> false);
+        });
+    }
+
+    boolean prepareScaffoldMaterial(BetterBlockPos target, BlockState wanted, boolean inventoryAllowed,
+                                   java.util.function.IntPredicate requestSwap) {
+        progressHold = true; // Preserve the real cancellation through the existing route-continuation wrapper.
+        if (!target.equals(scaffoldMaterialTarget)) {
+            scaffoldMaterialTarget = target;
+            scaffoldMaterialWaitStarted = buildTick;
+            scaffoldMaterialPausedAt = null;
+            scaffoldMaterialAttemptTick = Long.MIN_VALUE;
+            BuildTrace.cell(buildTick, "SCAFFOLD-WAIT-MATERIAL", target.x, target.y, target.z,
+                    "prepare " + blockName(wanted) + " before evaluating a helper; no helper authorized");
+        }
+        if (buildTick - scaffoldMaterialWaitStarted >= SCAFFOLD_MATERIAL_WAIT_TICKS
+                || !inventoryAllowed) {
+            abortBuild(Ending.MATERIALS_MISSING, "Build stopped: material is not ready on the hotbar for "
+                    + blockName(wanted) + " at " + target.toShortString(),
+                    List.of("No unverified scaffold was placed. Prepare the material before restarting."));
+            return true;
+        }
+        if (scaffoldMaterialAttemptTick != buildTick) {
+            scaffoldMaterialAttemptTick = buildTick;
+            for (int i = 9; i < Math.min(36, approxPlaceable.size()); i++) {
+                if (itemCanPlaceBlock(approxPlaceable.get(i), wanted)) {
+                    requestSwap.test(i);
+                    break;
+                }
+            }
+        }
         return true;
     }
 
@@ -9764,6 +9915,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         || snakeFaceChangeWaitTicks >= SNAKE_FACE_CHANGE_MAX_WAIT_TICKS;
             }
             if (toolReady && breakAimReady && aimReceivedByServer) {
+                selectSupportRepair(pos, breakState, bcc.getSchematic(pos.x, pos.y, pos.z, breakState));
                 progressActions.arm(positionKey(pos), breakState, Blocks.AIR.defaultBlockState());
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
                 if (needsSnakeFaceSettle && swingFace != null) {
@@ -13390,6 +13542,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         resetBreakBranchTracking();
+        scaffoldMaterialTarget = null;
+        scaffoldMaterialPausedAt = null;
+        scaffoldMaterialAttemptTick = Long.MIN_VALUE;
+        lastSupportRefusal = null;
+        lastSupportDependent = null;
+        lastSupportRefusalReason = null;
+        supportRepair = null;
         progressWatch.reset();
         progressActions.clear();
         confirmedProgressRevision = 0;
@@ -13710,6 +13869,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         private final List<BlockState> placeable;
         private final ISchematic schematic;
+        /** Unmasked model and original world captured before the path worker starts; excavation opts out. */
+        private final BuilderSupportDependencies supportDependencies;
         private final int originX;
         private final int originY;
         private final int originZ;
@@ -13774,6 +13935,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             this.originX = origin.getX();
             this.originY = origin.getY();
             this.originZ = origin.getZ();
+            this.supportDependencies = excavating ? null : new BuilderSupportDependencies(
+                    supportModelForDependencies(), new Vec3i(originX, originY, originZ), placeable, bsi, ctx.world());
             this.excavationBridgeKey = snakeBridgeTarget == null
                     ? Long.MIN_VALUE : snakeBridgeTarget.asLong();
             // THE ONE PLACE THE TWO LANES DIFFER, and it is deliberately the only one: everything else about the
@@ -14086,6 +14249,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             if (fluidPlugSnapshot.size() > 0 && fluidPlugSnapshot.firstHazard(List.of(new BlockPos(x, y, z)),
                     bsi.access, ExcavationFluidPlugs::vanillaSourceConversion).isPresent()) return COST_INF;
+            if (supportDependencies != null && !supportDependencies.removal(new BlockPos(x, y, z)).allowed()) {
+                return COST_INF;
+            }
             // The snake itself owns every excavation break, including the exact 3x3 face and its rotation settle.
             // Navigation is only allowed to walk that cleared corridor and bridge its one licensed floor cell. If A*
             // may break here it can tunnel sideways, shave the ceiling, or invent a stair around a ravine; all three

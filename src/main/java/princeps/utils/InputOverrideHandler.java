@@ -56,11 +56,21 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     private final BlockBreakHelper blockBreakHelper;
     private final BlockPlaceHelper blockPlaceHelper;
+    private princeps.process.BuilderProcess supportMiningOwner;
 
     public InputOverrideHandler(Princeps princeps) {
         super(princeps);
-        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext());
+        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext(), target -> {
+            observeMiningOwner(princeps.getPathingControlManager().mostRecentInControl().orElse(null));
+            return supportMiningOwner == null || supportMiningOwner.allowsSupportRemoval(target);
+        });
         this.blockPlaceHelper = new BlockPlaceHelper(princeps);
+    }
+
+    void observeMiningOwner(princeps.api.process.IPrincepsProcess controlling) {
+        princeps.process.BuilderProcess next = controlling instanceof princeps.process.BuilderProcess builder ? builder : null;
+        if (supportMiningOwner != null && supportMiningOwner != next) supportMiningOwner.revokeSupportRepair();
+        supportMiningOwner = next;
     }
 
     /**
@@ -155,6 +165,8 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     @Override
     public final void onTick(TickEvent event) {
+        observeMiningOwner(event.getType() == TickEvent.Type.OUT ? null
+                : princeps.getPathingControlManager().mostRecentInControl().orElse(null));
         if (event.getType() == TickEvent.Type.OUT) {
             return;
         }

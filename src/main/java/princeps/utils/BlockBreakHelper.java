@@ -36,6 +36,7 @@ public final class BlockBreakHelper {
     private static final int BASE_BREAK_DELAY = 1;
 
     private final IPlayerContext ctx;
+    private final java.util.function.Predicate<BlockPos> miningAllowed;
     private boolean wasHitting;
     private int breakDelayTimer = 0;
     // Break timing is execution-only (never replayed in path/reach prediction), so a plain RNG is fine here.
@@ -68,8 +69,9 @@ public final class BlockBreakHelper {
     private int lastColumnAbove;
     private long lastBrokenAtMs;
 
-    BlockBreakHelper(IPlayerContext ctx) {
+    BlockBreakHelper(IPlayerContext ctx, java.util.function.Predicate<BlockPos> miningAllowed) {
         this.ctx = ctx;
+        this.miningAllowed = miningAllowed;
     }
 
     /** True if this block was abandoned as an un-breakable glitch block (re-set itself too many times). */
@@ -169,6 +171,12 @@ public final class BlockBreakHelper {
         this.deterministicThisTick = false;
         HitResult trace = ctx.objectMouseOver();
         boolean isBlockTrace = trace != null && trace.getType() == HitResult.Type.BLOCK;
+        // Check the actual crosshair, not only the route's planned obstruction. A foreground hit or a newly
+        // dependent block must not destroy a schematic support between path costing and the real mining tick.
+        if (isLeftClick && isBlockTrace && !miningAllowed.test(((BlockHitResult) trace).getBlockPos())) {
+            stopBreakingBlock();
+            return;
+        }
         if (rhythmTimer > 0) {
             rhythmTimer--;
         }
