@@ -617,6 +617,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private BetterBlockPos scaffoldCell;
     private final BuilderScaffoldLedger navigationScaffolds = new BuilderScaffoldLedger();
     private final ExcavationFluidPlugs excavationFluidPlugs = new ExcavationFluidPlugs();
+    private final ExcavationActiveClock excavationActiveClock = new ExcavationActiveClock();
+    private final ExcavationRepairAim excavationRepairAim = new ExcavationRepairAim();
+    private String lastExcavationRepairAimTrace;
+    private long lastExcavationRepairAimTraceTick;
     private ExcavationFluidPlugs.Hazard blockedFluidPlugThisTick;
     private boolean scaffoldCleanupActive;
     private final Set<Long> scaffoldCleanupTargets = new HashSet<>();
@@ -2231,7 +2235,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return;
         }
         if (excavating && excavationIntegrity && insideSnakeVolume(pos.getX(), pos.getY(), pos.getZ())) {
-            excavationFluidPlugs.record(pos, before, after, buildTick);
+            excavationFluidPlugs.record(pos, before, after, excavationActiveClock.now());
         }
         // Exterior seals/supports must survive completion. Treating the roof seal as disposable navigation
         // scaffold made a completed excavation tunnel up its outside wall just to reopen its own roof.
@@ -2258,6 +2262,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
         excavationFluidPlugs.observe(pos, state);
+        excavationRepairAim.observe(pos, state);
         boolean wasOwned = navigationScaffolds.contains(pos);
         if (navigationScaffolds.serverChanged(pos, state)) {
             logMechanic("SCAFFOLD-OWNED server confirmed " + pos.toShortString());
@@ -4979,7 +4984,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
             }
         }
-        candidates.sort(Comparator.comparingInt((SnakeRepair repair) -> repair.kind().ordinal())
+        candidates.sort(Comparator.comparingInt((SnakeRepair repair) ->
+                        excavating && excavationRepairAim.heldFace(ctx.world(), repair.pos()).isPresent()
+                                ? -1 : repair.kind().ordinal())
                 .thenComparingInt(SnakeRepair::distanceSq)
                 .thenComparingInt(repair -> repair.pos().y)
                 .thenComparingInt(repair -> repair.pos().x)
@@ -4993,8 +5000,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 + candidate.pos().y + "," + candidate.pos().z));
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
+            ExcavationRepairAim.Face heldFace = excavating
+                    ? excavationRepairAim.heldFace(ctx.world(), candidate.pos()).orElse(null) : null;
+            if (heldFace != null && (!heldFace.targetState().equals(ctx.world().getBlockState(candidate.pos()))
+                    || !heldFace.supportState().equals(ctx.world().getBlockState(BlockPos.of(heldFace.support()))))) {
+                excavationRepairAim.clear();
+                heldFace = null;
+            }
+            // Keep the exact support/face while solving its rotation again from the current sneaking eye.
+            // A different face that happens to sort first is not a reason to abandon a valid ongoing aim.
+            java.util.function.Predicate<Placement> repairFaceFilter = excavating
+                    ? placement -> excavationRepairFaceReady(placement, candidate, bounds, bcc) : null;
             Optional<Placement> option = possibleToPlace(fill, candidate.pos().x, candidate.pos().y,
-                    candidate.pos().z, bcc);
+                    candidate.pos().z, bcc, heldFace, repairFaceFilter);
             if (option.isEmpty()) {
                 Item wanted = fill.getBlock().asItem();
                 boolean alreadyOnHotbar = false;
@@ -5006,14 +5024,50 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 if (!alreadyOnHotbar && princeps.getInventoryBehavior().throwaway(true,
                         stack -> !stack.isEmpty() && stack.getItem() == wanted)) {
-                    // InventoryBehavior may need one packet/tick to swap a main-inventory stack into the hotbar.
+                    // A missing hotbar stack is not loss of the held face. Preserve it across the inventory packet.
                     return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
-                continue;
             }
-            return snakeIntegrityPlacementClick(option.get(), candidate, bcc);
+            if (option.isEmpty() && heldFace != null) {
+                excavationRepairAim.clear();
+                option = possibleToPlace(fill, candidate.pos().x, candidate.pos().y, candidate.pos().z, bcc,
+                        null, repairFaceFilter);
+            }
+            if (option.isPresent()) return snakeIntegrityPlacementClick(option.get(), candidate, bcc);
         }
+        excavationRepairAim.clear();
         return null;
+    }
+
+    private boolean excavationRepairFaceReady(Placement placement, SnakeRepair candidate,
+                                               ExcavationRepairPolicy.Bounds bounds, BuilderCalculationContext bcc) {
+        BlockState liveTarget = ctx.world().getBlockState(candidate.pos());
+        if (ExcavationRepairPolicy.repair(bounds, candidate.pos().x, candidate.pos().y, candidate.pos().z,
+                liveTarget, MovementHelper.isReplaceable(candidate.pos().x, candidate.pos().y, candidate.pos().z,
+                        liveTarget, bcc.bsi), true) != candidate.kind()) {
+            excavationRepairAim.clear();
+            return false;
+        }
+        BlockState liveSupport = ctx.world().getBlockState(placement.placeAgainst);
+        VoxelShape supportShape = liveSupport.getShape(ctx.world(), placement.placeAgainst);
+        ExcavationRepairAim.Face face = new ExcavationRepairAim.Face(candidate.pos().asLong(),
+                placement.placeAgainst.asLong(), placement.side, liveTarget, liveSupport,
+                supportShape.isEmpty() ? null : supportShape.bounds());
+        boolean ready = excavationRepairAim.mayAim(ctx.world(), face, ctx.player().position(), ctx.player().getBbWidth(),
+                ctx.player().isInWater(), !supportShape.isEmpty());
+        traceExcavationRepairAim(ready ? "AIM" : "APPROACH", placement);
+        return ready;
+    }
+
+    private void traceExcavationRepairAim(String phase, Placement placement) {
+        String detail = phase + " support=" + placement.placeAgainst.toShortString() + "/" + placement.side;
+        String identity = placement.target.toShortString() + " " + detail;
+        if (!identity.equals(lastExcavationRepairAimTrace) || buildTick - lastExcavationRepairAimTraceTick >= 20) {
+            BuildTrace.cell(buildTick, "DIG-REPAIR-AIM", placement.target.getX(), placement.target.getY(),
+                    placement.target.getZ(), detail);
+            lastExcavationRepairAimTrace = identity;
+            lastExcavationRepairAimTraceTick = buildTick;
+        }
     }
 
     /** Ordinary mining still owes the same dry, closed boundary before it may descend or finish. */
@@ -7636,9 +7690,17 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc) {
+        return possibleToPlace(toPlace, x, y, z, bcc, null, null);
+    }
+
+    private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
+                                                ExcavationRepairAim.Face requiredFace,
+                                                java.util.function.Predicate<Placement> faceFilter) {
         BlockStateInterface bsi = bcc.bsi;
         for (Direction against : supportDirectionsFor(toPlace)) {
             BetterBlockPos placeAgainstPos = new BetterBlockPos(x, y, z).relative(against);
+            if (requiredFace != null && (placeAgainstPos.asLong() != requiredFace.support()
+                    || against.getOpposite() != requiredFace.side())) continue;
             BlockState placeAgainstState = bsi.get0(placeAgainstPos);
             if (MovementHelper.isReplaceable(placeAgainstPos.x, placeAgainstPos.y, placeAgainstPos.z, placeAgainstState, bsi)) {
                 continue;
@@ -7662,8 +7724,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 if (result != null && result.getType() == HitResult.Type.BLOCK && ((BlockHitResult) result).getBlockPos().equals(placeAgainstPos) && ((BlockHitResult) result).getDirection() == against.getOpposite()) {
                     OptionalInt hotbar = hasAnyItemThatWouldPlace(toPlace, result, actualRot, x, y, z, bcc);
                     if (hotbar.isPresent()) {
-                        return Optional.of(new Placement(hotbar.getAsInt(), placeAgainstPos, against.getOpposite(), rot,
-                                positionKey(ctx.playerFeet()), new BetterBlockPos(x, y, z), toPlace));
+                        Placement option = new Placement(hotbar.getAsInt(), placeAgainstPos, against.getOpposite(), rot,
+                                positionKey(ctx.playerFeet()), new BetterBlockPos(x, y, z), toPlace);
+                        if (faceFilter == null || faceFilter.test(option)) return Optional.of(option);
                     }
                 }
             }
@@ -8996,6 +9059,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         if (recursions == 0) {
             buildTick++;
+            if (excavating) {
+                var survival = princeps.getSurvivalBehavior();
+                excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
+                        survival != null && survival.isConsuming());
+            }
             observePendingPlacementRequest();
             // Runs BEFORE anything can return. Every previous stall guard sat further down onTick, behind a dozen
             // early returns, so the one situation they existed for -- a branch that returns the same command every
@@ -9005,11 +9073,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 abortBuild(Ending.PLACEMENT_FAILED, "Build stopped: navigation scaffold placement was not confirmed by the server",
                         unconfirmedScaffolds.stream().map(BlockPos::toShortString).toList());
             }
-            excavationFluidPlugs.unconfirmedBefore(buildTick - 400).ifPresent(pos ->
+            excavationFluidPlugs.unconfirmedBefore(excavationActiveClock.now() - 400).ifPresent(pos ->
                     abortBuild(Ending.PLACEMENT_FAILED,
                             "AutoDig stopped: fluid plug placement was not confirmed by the server",
                             List.of("Unconfirmed source plug: " + pos.toShortString(),
-                                    "Repeated requests and old fluid updates do not restart the 400-tick limit.")));
+                                    "Repeated requests and old fluid updates do not restart the 400-active-tick limit.")));
             enforcePlacementTargetDeadline();
             closeAnyContainerScreen();
             narrateIfNoCellHasCompleted();
@@ -9474,17 +9542,22 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 + " safeToCancel=" + isSafeToCancel + " onGround=" + ctx.player().onGround()
                 + " yieldUntil=" + breakBranchYieldUntilTick + " idle=" + breakBranchIdleTicks); }
         PathExecutor plugRoute = princeps.getPathingBehavior().getCurrent();
+        var excavationSurvival = princeps.getSurvivalBehavior();
+        boolean excavationHandsBorrowed = excavationSurvival != null
+                && (excavationSurvival.ownsInventory() || excavationSurvival.isConsuming());
         if (blockedFluidPlugThisTick != null && plugRoute != null
+                && !excavationHandsBorrowed
                 && insideSnakeVolume(ctx.playerFeet().x, ctx.playerFeet().y, ctx.playerFeet().z)) {
             excavationFluidPlugs.routeProgress(plugRoute, plugRoute.getPosition(), ctx.playerFeet());
         }
         // Check before a repair can arm CLICK_RIGHT. First server confirmations anywhere in the current plug
         // ledger and real, non-repeated route advancement renew this clock; merely aiming or retrying does not.
-        if (excavationFluidPlugs.waitExpired(toBreak.isEmpty() ? blockedFluidPlugThisTick : null, buildTick)) {
+        if (!excavationHandsBorrowed && excavationFluidPlugs.waitExpired(
+                toBreak.isEmpty() ? blockedFluidPlugThisTick : null, excavationActiveClock.now())) {
             abortBuild(Ending.LAYER_VERIFICATION_FAILED, "AutoDig cannot safely remove a renewing fluid plug",
                     java.util.List.of("Retained plug: " + blockedFluidPlugThisTick.plug(),
                             "Unsealed horizontal sources: " + blockedFluidPlugThisTick.sources(),
-                            "No safe cut, newly confirmed source seal or route advancement for 200 ticks.",
+                            "No safe cut, newly confirmed source seal or route advancement for 200 active ticks.",
                             "An additional safe access route is required; the plug was not removed."));
             finishAbortedBuild();
             return null;
@@ -13204,6 +13277,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private void resetPlacementTracking() {
         navigationScaffolds.clear();
         excavationFluidPlugs.clear();
+        excavationActiveClock.clear();
+        excavationRepairAim.clear();
+        lastExcavationRepairAimTrace = null;
         blockedFluidPlugThisTick = null;
         scaffoldCleanupActive = false;
         scaffoldCleanupTargets.clear();

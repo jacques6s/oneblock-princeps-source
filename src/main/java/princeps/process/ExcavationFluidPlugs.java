@@ -151,8 +151,10 @@ final class ExcavationFluidPlugs {
 
     private static BlockState afterCut(BlockPos pos, Set<Long> removed, BlockGetter world) {
         BlockState current = world.getBlockState(pos);
-        // Fluids are not mined. A mined waterlogged block exposes its source; it does not become dry AIR.
+        // Fluids and unbreakable blocks remain in the real cut. A mined waterlogged block exposes its source;
+        // it does not become dry AIR. In particular, a Shard cannot remove unbreakable source support.
         return removed.contains(pos.asLong()) && !BuilderProcess.snakeTreatAsFluid(current, true)
+                && !(current.getDestroySpeed(world, pos) < 0)
                 ? current.getFluidState().createLegacyBlock() : current;
     }
 }

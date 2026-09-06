@@ -252,6 +252,25 @@ public class ExcavationFluidPlugsTest {
     }
 
     @Test
+    public void aShardCannotUseAnUnbreakableSupportAsIfItHadRemovedIt() {
+        BlockPos target = new BlockPos(10, 22, 30);
+        BlockPos p = target.above().south();
+        List<BlockPos> cut = ExcavationFluidPlugs.footprint(target, Direction.EAST, true);
+        assertTrue(BuilderProcess.snakeAreaFootprintInsideActiveBand(target, Direction.EAST, 21, 23));
+        for (BlockState support : List.of(Blocks.BEDROCK.defaultBlockState(), Blocks.BARRIER.defaultBlockState())) {
+            CellWorld world = sourceCorner(p, p.west(), p.east());
+            ExcavationFluidPlugs plugs = ownedPlug(world, p, WATER);
+            world.put(p.below(), support);
+            assertTrue(support.getDestroySpeed(world, p.below()) < 0);
+            assertTrue(coordinates(cut).contains(p.below().asLong()));
+            assertHazard(plugs, world, cut, p, p.west(), p.east());
+            world.put(p.below(), STONE);
+            assertTrue("breakable support in the identical footprint is actually removed",
+                    plugs.firstHazard(cut, world, VANILLA).isEmpty());
+        }
+    }
+
+    @Test
     public void anApparentlySafeShardCutCannotRemoveTheNextBandsSupportingFloor() {
         BlockPos p = new BlockPos(10, 20, 30);
         CellWorld world = sourceCorner(p, p.west(), p.east());
