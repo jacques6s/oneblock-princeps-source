@@ -229,6 +229,22 @@ public class PlacementTargetLockTest {
     }
 
     @Test
+    public void aMeasuredDetourKeepsTheSameStancePastTheFormerHardDeadline() {
+        PlacementTargetLock<String> lock = new PlacementTargetLock<>(7, 11, 37);
+        lock.acquireForRecovery(1L, 2L);
+        lock.planStance(3L, 10L);
+        for (int tick = 0; tick < 1200; tick++) {
+            assertEquals(PlacementTargetLock.RouteDecision.KEEP_MOVING, lock.routeTick(10L + tick, false, true));
+        }
+        assertTrue(lock.owns(1L));
+        assertEquals(3L, lock.plannedStanceKey());
+        for (int tick = 0; tick < 10; tick++) {
+            assertEquals(PlacementTargetLock.RouteDecision.KEEP_MOVING, lock.routeTick(2000L, false, false));
+        }
+        assertEquals(PlacementTargetLock.RouteDecision.RETRY_STANCE, lock.routeTick(2000L, false, false));
+    }
+
+    @Test
     public void randomizedTargetFlappingNeverBreaksOwnershipInvariant() {
         Random random = new Random(0x5C4E6A71CL);
         PlacementTargetLock<Integer> lock = new PlacementTargetLock<>(7, 11, 37);

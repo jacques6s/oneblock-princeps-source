@@ -27,6 +27,7 @@ public interface IPlayerControllerMP {
 
     BlockPos getCurrentBlock();
 
+    /** Read-only vanilla mining fraction for distinguishing a slow break from a repeated input. */
     float getDestroyProgress();
 
     void callSyncCurrentPlayItem();

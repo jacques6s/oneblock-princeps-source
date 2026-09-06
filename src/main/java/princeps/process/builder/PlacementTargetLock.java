@@ -240,6 +240,11 @@ public final class PlacementTargetLock<A> {
 
     /** Progress is distance improvement, not merely another path calculation or movement input. */
     public RouteDecision routeTick(long currentDistanceSquared, boolean arrived) {
+        return routeTick(currentDistanceSquared, arrived, false);
+    }
+
+    /** A proven path can initially lead away from its target; advancing its nodes is real progress too. */
+    public RouteDecision routeTick(long currentDistanceSquared, boolean arrived, boolean routeAdvanced) {
         if (!hasPlannedStance()) {
             throw new IllegalStateException("no recovery stance is planned");
         }
@@ -247,8 +252,8 @@ public final class PlacementTargetLock<A> {
         if (arrived) {
             return RouteDecision.ARRIVED;
         }
-        if (currentDistanceSquared < bestDistanceSquared) {
-            bestDistanceSquared = currentDistanceSquared;
+        if (currentDistanceSquared < bestDistanceSquared || routeAdvanced) {
+            bestDistanceSquared = Math.min(bestDistanceSquared, currentDistanceSquared);
             routeNoCloserTicks = 0;
             // The deadline bounds a stalled/detouring segment, not a long route that is still measurably advancing.
             routeTicks = 0;

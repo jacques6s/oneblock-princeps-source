@@ -52,6 +52,8 @@ import princeps.process.builder.BlockItemPlacementHelper;
 import princeps.process.builder.ActionJournal;
 import princeps.process.builder.BuildTrace;
 import princeps.process.builder.CellWatch;
+import princeps.process.builder.BuilderProgressWatch;
+import princeps.process.builder.ConfirmedBuildActions;
 
 import princeps.process.builder.PlacementTargetLock;
 import net.minecraft.world.level.pathfinder.PathComputationType;
@@ -729,10 +731,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  target-bound stance recovery; another cell cannot steal ownership and reset the recovery history. */
     private final PlacementTargetLock<Placement> placementTargetLock =
             new PlacementTargetLock<>(AIM_RECOVERY_TICKS, ROUTE_NO_CLOSER_TICKS, ROUTE_DEADLINE_TICKS);
-    /** Build tick the current placement target was committed on, for {@link #TARGET_LOCK_MAX_HELD_TICKS}. */
-    private long placementTargetAcquiredTick = -1L;
     /** Build tick a cell most recently became correct — the one clock a stuck builder cannot stop. */
     private long lastCellCompletedTick;
+
+    private final BuilderProgressWatch progressWatch = new BuilderProgressWatch(
+            java.util.concurrent.TimeUnit.SECONDS.toNanos(5), java.util.concurrent.TimeUnit.SECONDS.toNanos(60), 2.0);
+    private long confirmedProgressRevision;
+    private final ConfirmedBuildActions<BlockState> progressActions = new ConfirmedBuildActions<>((state, expected) -> valid(state, expected, false));
+    private PathExecutor progressExecutor;
+    private Object progressRoute;
+    private Long progressRouteTarget;
+    private List<BetterBlockPos> progressRoutePositions = java.util.List.of();
+    private int progressRoutePosition = -1;
+    private BuilderProgressWatch.Phase progressPhase;
+    private boolean progressHold;
+    private Goal electedGoal;
 
     /**
      * The block the builder most recently had to take back out, so the reserved tool slot can hold the right tool.
@@ -1476,20 +1489,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** How many search passes a cell is held back for sealing a hanging neighbour before the wall wins anyway. */
     private static final int SEAL_HOLD_TICKS = 200;
     /**
-     * Hard ceiling on how long ONE cell may own the placement lock before the lock is torn off it.
-     *
-     * <p>This is a backstop, not a schedule. Every individual phase inside {@link PlacementTargetLock} is already
-     * bounded -- aim, route, centering -- and yet the builder still froze for 1740 ticks on a lighthouse wall with not
-     * one line of log output, because a path that returned {@code CANCEL_AND_SET_GOAL} every tick charged none of
-     * those counters and never reached the code that reports a stall. Bounding each phase is not the same as bounding
-     * the whole, and only the whole is what a user experiences.
-     *
-     * <p>So: no matter which branch is spinning, no matter what future branch is added, a target that has not produced
-     * a placement in this many ticks loses the lock and the cell is deferred. Generous on purpose -- a legitimate walk
-     * across a large schematic must never trip it -- but finite, which is the entire point.
-     */
-    private static final int TARGET_LOCK_MAX_HELD_TICKS = 400;
-    /**
      * Deferrals one cell gets before it is retired for this sweep.
      *
      * <p>Six, and this number is measured rather than reasoned. Dropping it to three (with a 150-tick lock deadline) to
@@ -1958,6 +1957,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     public void pause() {
         paused = true;
+        progressWatch.pause();
     }
 
     @Override
@@ -2250,6 +2250,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     public void recordNavigationScaffold(BlockPos pos, BlockState before, BlockState after,
                                          boolean excavationIntegrity) {
+        if (isActive()) progressActions.arm(positionKey(pos), before, after);
         if (!isActive() || buildInRows || temporarySupportTargets.containsKey(positionKey(pos))) {
             return;
         }
@@ -2282,6 +2283,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
         excavationFluidPlugs.observe(pos, state);
         excavationRepairAim.observe(pos, state);
+        if (isActive() && progressActions.serverChanged(positionKey(pos), state)) {
+            confirmedProgressRevision++;
+        }
         boolean wasOwned = navigationScaffolds.contains(pos);
         if (navigationScaffolds.serverChanged(pos, state)) {
             logMechanic("SCAFFOLD-OWNED server confirmed " + pos.toShortString());
@@ -3364,16 +3368,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private final BreakBranchProgress breakBranchProgress =
             new BreakBranchProgress(BREAK_BRANCH_STARVATION_TICKS, BREAK_BRANCH_YIELD_TICKS);
     private final BreakTargetObservation breakTargetObservation = new BreakTargetObservation();
-
-    /** Doing absolutely nothing for this long is a livelock, not thinking. Five seconds. */
-    private static final int STALL_NUDGE_AFTER_TICKS = 100;
-
-    /** How long a nudge owns the pathing command before the ordinary loop gets it back. */
-    private static final int STALL_NUDGE_HOLD_TICKS = 60;
-
-    private Goal stallNudgeGoal;
-    private int stallNudgeTicksLeft;
-    private long lastStallNudgeTick = Long.MIN_VALUE;
 
     /** Consecutive ticks a committed placement has been held back because the hand held the wrong block. */
     private int wrongItemInHandTicks;
@@ -5982,6 +5976,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         } else if (placementTargetLock.isActive()) {
             placementTargetLock.release();
         }
+        if (electedCell != null) {
+            BlockState current = bcc.bsi.get0(electedCell);
+            BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, current);
+            if (wanted == null || valid(current, wanted, false) || isCellParked(electedCell.x, electedCell.y, electedCell.z)) {
+                clearElectedTarget();
+            } else {
+                desirableOnHotbar.add(wanted);
+                if (blocksActivePath(activePathCells(), electedCell.x, electedCell.y, electedCell.z, wanted)) {
+                    return Optional.empty();
+                }
+                Optional<Placement> chosen = possibleToPlace(wanted, electedCell.x, electedCell.y, electedCell.z, bcc);
+                chosen.ifPresent(this::acquirePlacementTarget);
+                return chosen; // one chosen build cell owns preparation, walking and the eventual click
+            }
+        }
         Optional<Placement> fresh = searchForPlacables(bcc, desirableOnHotbar);
         fresh.ifPresent(this::acquirePlacementTarget);
         return fresh;
@@ -5990,6 +5999,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private void acquirePlacementTarget(Placement placement) {
         long key = positionKey(placement.target);
         if (placementTargetLock.acquire(key, placement)) {
+            if (!placement.target.equals(electedCell)) electedGoal = null;
+            electedCell = new BetterBlockPos(placement.target);
             BuildTrace.cell(buildTick, "PICK",
                     placement.target.getX(), placement.target.getY(), placement.target.getZ(),
                     "want=" + blockName(placement.desired)
@@ -5998,46 +6009,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                             + " rot=" + String.format(java.util.Locale.ROOT, "%.1f,%.1f",
                                     placement.rot.getYaw(), placement.rot.getPitch()));
             committedPlaceTarget = new BetterBlockPos(placement.target);
-            placementTargetAcquiredTick = buildTick;
         }
-    }
-
-    /**
-     * Tears the placement lock off a cell that has held it too long, whatever it thinks it is doing.
-     *
-     * <p>The lock's own timeouts each bound one phase and assume the phase advances. The lighthouse stall is the
-     * counterexample: at the planned stance but not centred, with a path still present, the recovery path returned
-     * {@code CANCEL_AND_SET_GOAL} on every tick and deliberately did not charge the centering counter (a cancel is
-     * supposed to take effect next tick). It never did, so nothing counted, nothing logged, and the bot stood still
-     * for 1740 ticks until the bench timed the run out.
-     *
-     * <p>A per-phase bound cannot catch that; only a bound on the whole can. This one is deliberately dumb: it does
-     * not care why the cell is stuck, which is exactly what makes it hold for stalls nobody has thought of yet.
-     */
-    private void enforcePlacementTargetDeadline() {
-        if (paused || !placementTargetLock.isActive() || placementTargetAcquiredTick < 0) {
-            return;
-        }
-        long held = buildTick - placementTargetAcquiredTick;
-        if (held < TARGET_LOCK_MAX_HELD_TICKS) {
-            return;
-        }
-        BetterBlockPos stuck = committedPlaceTarget;
-        if (stuck == null) {
-            releasePlacementTarget();
-            return;
-        }
-        logMechanic("Placement target " + stuck.x + "," + stuck.y + "," + stuck.z + " held the lock for " + held
-                + " ticks without placing anything; taking it away and deferring the cell"
-                + " (recovering=" + placementTargetLock.isRecovering()
-                + ", plannedStance=" + (plannedPlacementStance == null ? "none"
-                        : plannedPlacementStance.x + "," + plannedPlacementStance.y + "," + plannedPlacementStance.z)
-                + ", rejectedStances=" + placementTargetLock.rejectedStanceCount()
-                + ", centeringTicks=" + placementCenteringTicks
-                + ", onGround=" + ctx.player().onGround() + ")");
-        // deferCell releases the lock itself when it owns the cell, and escalates toward retirement.
-        deferCell(stuck, "held the placement lock for " + held + " ticks without producing a placement");
-        releasePlacementTarget();
     }
 
     /**
@@ -6100,92 +6072,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 + "/" + (incorrectPositions == null ? 0 : incorrectPositions.size()) + ")");
     }
 
-    /**
-     * Steps the body one block off a spot it has argued with itself about for five seconds.
-     *
-     * <p>MEASURED, map art at 91% on 2026-08-18 16:37:41. The builder finished a five-wide slice, then produced
-     * nothing whatsoever for ninety seconds: 1517 cells outstanding, {@code parked=0}, {@code retired=0},
-     * {@code cellsWithoutAVerdict=1517/1517} -- not one cell carried so much as a negative verdict --
-     * {@code lockActive=false, target=none, goal=none, pathing=false}. The body never moved: feet
-     * 57887,96,47315 in every census. The operator shoved it three blocks by hand and it resumed instantly, and
-     * did that repeatedly over one picture.
-     *
-     * <p>The pathfinder was not idle during those ninety seconds. It logged "reached goal after 5 nodes, 88
-     * movements" about ten times a second, without pause: a goal was being set and thrown away every tick. The
-     * thrower is {@link #abandonAGoalAlreadySatisfiedWhereWeStand()}, correctly -- the stance the election keeps
-     * choosing is the one the body is ALREADY standing in, so the goal is satisfied on arrival and cleared, the
-     * next tick elects the same cell, and round it goes. A goal that is already reached and a placement that
-     * cannot be made from there are individually reasonable and jointly a livelock.
-     *
-     * <p>Fixing the disagreement between the stance search and {@code possibleToPlace} is the real repair and it
-     * is not a five-line change. This is the escape, and it is deliberately the operator's own remedy: when the
-     * builder has been completely inert -- nothing committed, nothing routed, nothing moving -- for five seconds,
-     * step one block and let the ordinary loop try again from somewhere else. Everything about the geometry that
-     * caused the tie is a function of where the body stands, so moving it is what breaks the tie.
-     *
-     * <p>Only ever onto ground the bot is already entitled to stand on: a candidate is taken only if the block
-     * under it is walkable and the two cells the body would occupy are clear. If nothing around passes, nothing
-     * happens -- the watchdog keeps narrating and no nudge invents a step into the air.
-     */
-    private Goal nudgeOffAStallSpot() {
-        if (paused || incorrectPositions == null || incorrectPositions.isEmpty()) {
-            return null;
-        }
-        if (stallNudgeTicksLeft > 0) {
-            stallNudgeTicksLeft--;
-            return stallNudgeGoal;
-        }
-        if (buildTick - lastCellCompletedTick < STALL_NUDGE_AFTER_TICKS) {
-            return null; // work is happening
-        }
-        // NEVER IS A SENTINEL, NOT A NUMBER. Left as plain arithmetic, buildTick - Long.MIN_VALUE overflows to a
-        // large NEGATIVE value, which is always below the threshold -- so this net never caught anything, not once,
-        // in any run. The explicit "has it ever fired" test is the same idiom the missing-centre counter uses.
-        if (lastStallNudgeTick != Long.MIN_VALUE && buildTick - lastStallNudgeTick < STALL_NUDGE_AFTER_TICKS) {
-            return null; // one nudge per episode, not one per tick
-        }
-        // Inert means ALL of these at once. Any single one of them alone is ordinary: a committed target is work,
-        // a live path is work, and a running calculation is about to become work.
-        if (placementTargetLock.isActive()
-                || princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock()
-                || princeps.getPathingBehavior().isPathing()
-                || princeps.getPathingBehavior().getCurrent() != null) {
-            return null;
-        }
-        BetterBlockPos feet = ctx.playerFeet();
-        BuilderCalculationContext bcc = new BuilderCalculationContext();
-        // Backwards first -- away from the frontier is where the finished picture is, so it is both the safest
-        // footing and the angle the bot needs to see the cell it is standing on top of. The sideways steps are
-        // the fallbacks for a bot in a corner.
-        int[][] offsets = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
-        for (int[] offset : offsets) {
-            int x = feet.x + offset[0];
-            int z = feet.z + offset[1];
-            if (!MovementHelper.canWalkOn(bcc.bsi, x, feet.y - 1, z)) {
-                continue; // never step onto nothing
-            }
-            if (!MovementHelper.canWalkThrough(bcc.bsi, x, feet.y, z)
-                    || !MovementHelper.canWalkThrough(bcc.bsi, x, feet.y + 1, z)) {
-                continue; // the body would not fit
-            }
-            stallNudgeGoal = new GoalBlock(new BetterBlockPos(x, feet.y, z));
-            stallNudgeTicksLeft = STALL_NUDGE_HOLD_TICKS;
-            lastStallNudgeTick = buildTick;
-            logMechanic("Nothing has been committed, routed or moved for "
-                    + (buildTick - lastCellCompletedTick) + " ticks at " + feet.x + "," + feet.y + "," + feet.z
-                    + " -- stepping to " + x + "," + feet.y + "," + z + " so the next tick decides from a"
-                    + " different place. See nudgeOffAStallSpot.");
-            return stallNudgeGoal;
-        }
-        lastStallNudgeTick = buildTick;
-        logMechanic("Nothing has been committed, routed or moved for "
-                + (buildTick - lastCellCompletedTick) + " ticks at " + feet.x + "," + feet.y + "," + feet.z
-                + ", and there is no solid neighbour to step onto -- staying put.");
-        return null;
-    }
-
     /** Called wherever a cell is observed to satisfy the schematic — the watchdog's only source of truth. */
-    private void noteCellCompleted() {
+    private void noteCellCompleted(BetterBlockPos completedCell) {
         breakBranchProgress.observedProgress();
         consecutivePathFailures = 0;
         lastCellCompletedTick = buildTick;
@@ -6194,8 +6082,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         scaffoldVetoTicks = 0;
         scaffoldVetoUnstickTried = false;
         // The latched target is released here and only for real reasons -- a placement is the most real of them.
-        electedCell = null;
-        scaffoldPassAllowed = false;
+        if (completedCell.equals(electedCell)) {
+            clearElectedTarget();
+        }
         // A PLACED BLOCK IS A NEW WORLD, SO EVERY CELL GETS ANOTHER LOOK. The owner's rule, and it turns the deferral
         // backoff from a memory into what it should always have been: "how often has this failed SINCE anything last
         // succeeded". Nothing that was judged before the world changed keeps its verdict.
@@ -8963,40 +8852,137 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return BlockPos.asLong(x, y, z);
     }
 
-    /**
-     * True only for observable route advancement. A non-null PathExecutor is work, not proof of progress: a bot
-     * stationary at one node or pacing through already-seen cells must eventually enter recovery.
-     */
-    private boolean navigationMadeProgress(BetterBlockPos feet, Goal activeGoal, boolean calcFailed) {
-        if (calcFailed || activeGoal == null || activeGoal.isInGoal(feet)) {
-            return false;
-        }
-        PathExecutor current = princeps.getPathingBehavior().getCurrent();
-        if (!Objects.equals(observedNavigationGoal, activeGoal)) {
-            observedNavigationGoal = activeGoal;
-            observedNavigationExecutor = current;
-            bestObservedPathPosition = current == null ? -1 : current.getPosition();
-            bestObservedGoalHeuristic = activeGoal.heuristic(feet.x, feet.y, feet.z);
-            navigationVisitedCells.clear();
-            navigationVisitedCells.add(positionKey(feet));
-            return true; // one grace tick for a genuinely new route/calculation
-        }
+    /** A completed/invalid target releases both the cell and its last usable navigation goal. */
+    private void clearElectedTarget() {
+        electedCell = null;
+        electedGoal = null;
+        scaffoldPassAllowed = false;
+    }
 
-        navigationVisitedCells.add(positionKey(feet)); // diagnostic history; new territory alone is not goal progress
-        boolean advanced = false;
-        double heuristic = activeGoal.heuristic(feet.x, feet.y, feet.z);
-        if (heuristic + 0.01D < bestObservedGoalHeuristic) {
-            bestObservedGoalHeuristic = heuristic;
-            advanced = true;
+    /** Unknown is a missing observation, not permission to select a different build cell. */
+    Goal acceptElectedVerdict(CellUrteil verdict) {
+        if (verdict instanceof CellUrteil.Setzen setzen) electedGoal = setzen.ziel();
+        else if (verdict instanceof CellUrteil.Parken) clearElectedTarget();
+        return electedGoal;
+    }
+
+    /** Stable across equivalent Goal/PathExecutor reconstruction; no coordinates are retained per route. */
+    private record ProgressRoute(Long target, long hash, int length) { }
+
+    static int progressPathPosition(PathExecutor path) {
+        if (path == null || path.failed() || path.finished()) return -1;
+        int position = path.getPosition();
+        return position >= 0 && position < path.getPath().positions().size() ? position : -1;
+    }
+
+    private PathingCommand observeBuilderProgress() {
+        progressHold = false;
+        if (schematic == null) {
+            progressWatch.reset();
+            return null;
         }
-        if (current != observedNavigationExecutor) {
-            observedNavigationExecutor = current;
-            bestObservedPathPosition = current == null ? -1 : current.getPosition();
-        } else if (current != null && current.getPosition() > bestObservedPathPosition) {
-            bestObservedPathPosition = current.getPosition();
-            advanced = true;
+        BuilderProgressWatch.Phase phase = BuilderProgressWatch.Phase.WORK;
+        BetterBlockPos target = committedPlaceTarget != null ? committedPlaceTarget : electedCell;
+        Long targetKey = target == null ? null : positionKey(target);
+        double distance = 0;
+        Object route = null;
+        int routePosition = -1;
+        Long miningTarget = null;
+        double miningProgress = 0;
+        if (paused) {
+            phase = BuilderProgressWatch.Phase.PAUSED;
+        } else if (ctx.world() == null || ctx.player() == null
+                || !ctx.world().getChunkSource().hasChunk(ctx.playerFeet().x >> 4, ctx.playerFeet().z >> 4)
+                || target != null && !ctx.world().getChunkSource().hasChunk(target.x >> 4, target.z >> 4)) {
+            phase = BuilderProgressWatch.Phase.WAIT_CHUNK;
+        } else {
+            if (target != null) {
+                distance = Math.sqrt(ctx.player().position().distanceToSqr(target.x + 0.5, target.y, target.z + 0.5));
+                BuilderCalculationContext bcc = new BuilderCalculationContext();
+                BlockState wanted = bcc.getSchematic(target.x, target.y, target.z, bcc.bsi.get0(target));
+                BlockState currentState = bcc.bsi.get0(target);
+                if (wanted != null && !wanted.isAir() && !containsBlockState(approxPlaceable(36), wanted)
+                        && !valid(currentState, wanted, false)
+                        && MovementHelper.isReplaceable(target.x, target.y, target.z, currentState, bcc.bsi)) {
+                    phase = BuilderProgressWatch.Phase.WAIT_MATERIAL;
+                }
+            }
+            if (phase == BuilderProgressWatch.Phase.WORK) {
+                var controller = (princeps.utils.accessor.IPlayerControllerMP) ctx.minecraft().gameMode;
+                BlockPos breaking = controller.getCurrentBlock();
+                if (controller.isHittingBlock() && breaking != null && !ctx.world().getBlockState(breaking).isAir()) {
+                    phase = BuilderProgressWatch.Phase.MINING;
+                    progressActions.arm(positionKey(breaking), ctx.world().getBlockState(breaking), Blocks.AIR.defaultBlockState());
+                    miningTarget = positionKey(breaking);
+                    miningProgress = Math.max(0, controller.getDestroyProgress());
+                } else if (lastPlacedCell != null || pendingPlacementRequest != null) {
+                    phase = BuilderProgressWatch.Phase.WAIT_CONFIRMATION;
+                }
+            }
+            PathExecutor current = princeps.getPathingBehavior().getCurrent();
+            int currentPosition = progressPathPosition(current);
+            if (currentPosition >= 0) {
+                if (current != progressExecutor || !Objects.equals(targetKey, progressRouteTarget)) {
+                    Object previousRoute = progressRoute;
+                    int reachedPreviousNode = Objects.equals(targetKey, progressRouteTarget)
+                            ? progressRoutePositions.indexOf(ctx.playerFeet()) : -1;
+                    long hash = 0xcbf29ce484222325L;
+                    for (BetterBlockPos pos : current.getPath().positions()) {
+                        hash = (hash ^ positionKey(pos)) * 0x100000001b3L;
+                    }
+                    progressRoute = new ProgressRoute(targetKey, hash, current.getPath().positions().size());
+                    progressWatch.beginRoute(progressRoute, currentPosition);
+                    // A shortened/replanned path starts at node zero again. Credit the physical feet reaching a
+                    // later node of its predecessor, never the replacement executor's creation or cancel sentinel.
+                    route = reachedPreviousNode > progressRoutePosition ? previousRoute : progressRoute;
+                    routePosition = reachedPreviousNode > progressRoutePosition ? reachedPreviousNode : currentPosition;
+                    progressExecutor = current;
+                    progressRouteTarget = targetKey;
+                    progressRoutePositions = java.util.List.copyOf(current.getPath().positions());
+                    progressRoutePosition = currentPosition;
+                } else {
+                    route = progressRoute;
+                    routePosition = currentPosition;
+                    progressRoutePosition = Math.max(progressRoutePosition, currentPosition);
+                }
+            }
         }
-        return advanced;
+        BuilderProgressWatch.Decision decision = progressWatch.observe(System.nanoTime(), new BuilderProgressWatch.Sample(
+                phase, targetKey, distance, route, routePosition, confirmedProgressRevision, miningTarget, miningProgress));
+        if (phase != progressPhase || decision != BuilderProgressWatch.Decision.CONTINUE) {
+            progressPhase = phase;
+            String detail = "phase=" + phase + " target=" + (target == null ? "none" : target.toShortString())
+                    + " quietSeconds=" + java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(progressWatch.quietNanos())
+                    + " distance=" + String.format(java.util.Locale.ROOT, "%.2f", distance)
+                    + " pathNode=" + routePosition + " confirmedWorldChanges=" + confirmedProgressRevision;
+            BuildTrace.cell(buildTick, "PROGRESS-" + decision, target == null ? 0 : target.x,
+                    target == null ? 0 : target.y, target == null ? 0 : target.z, detail);
+            logMechanic("Builder progress: " + detail);
+            if (decision == BuilderProgressWatch.Decision.STOP) {
+                progressHold = true;
+                abortBuild(phase == BuilderProgressWatch.Phase.WAIT_MATERIAL ? Ending.MATERIALS_MISSING : Ending.PLACEMENT_FAILED,
+                        "Build stopped: no confirmed world action or route progress for 60 active seconds",
+                        java.util.List.of(detail, "All unresolved cells are retained; no automatic restart was requested."));
+                princeps.getInputOverrideHandler().clearAllKeys();
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+        }
+        if (phase == BuilderProgressWatch.Phase.WAIT_CHUNK || phase == BuilderProgressWatch.Phase.WAIT_MATERIAL) {
+            progressHold = true;
+            princeps.getInputOverrideHandler().clearAllKeys();
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        if (decision == BuilderProgressWatch.Decision.DIAGNOSE && phase == BuilderProgressWatch.Phase.WORK) {
+            Goal currentGoal = princeps.getPathingBehavior().getGoal();
+            if (currentGoal != null) {
+                return new PathingCommand(currentGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+            }
+        }
+        return null;
+    }
+
+    private boolean navigationMadeProgress(BetterBlockPos feet, Goal activeGoal, boolean calcFailed) {
+        return !calcFailed && progressWatch.advancedLastSample();
     }
 
     private void resetNavigationProgressTracking() {
@@ -9102,7 +9088,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 || command.goal != null) {
             return command; // not an idle hold -- leave it exactly as it is
         }
-        if (paused || incorrectPositions == null || incorrectPositions.isEmpty()) {
+        if (paused || progressHold || incorrectPositions == null || incorrectPositions.isEmpty()) {
             return command; // nothing owed, so cancelling is the right answer
         }
         if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
@@ -9157,7 +9143,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                             "AutoDig stopped: fluid plug placement was not confirmed by the server",
                             List.of("Unconfirmed source plug: " + pos.toShortString(),
                                     "Repeated requests and old fluid updates do not restart the 400-active-tick limit.")));
-            enforcePlacementTargetDeadline();
+            PathingCommand progressDecision = observeBuilderProgress();
+            if (progressDecision != null) {
+                return progressDecision;
+            }
             closeAnyContainerScreen();
             narrateIfNoCellHasCompleted();
             trackAimMovement();
@@ -9184,10 +9173,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // once acted on one; a picture at 91% sat inert for ninety seconds while it wrote the same line nine
             // times. Placed here, in the block that runs ahead of every early return, for the same reason the
             // narration is: a livelock is precisely the state in which the rest of onTick never gets reached.
-            Goal nudge = nudgeOffAStallSpot();
-            if (nudge != null) {
-                return new PathingCommand(nudge, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH);
-            }
+            // Progress decisions never invent a nearby movement. The elected target owns the route.
         }
         orientedGoalCache.clear(); // the standing-position search is memoized per target for the duration of one tick
         orientedSearchesThisTick = 0;
@@ -9769,6 +9755,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         || snakeFaceChangeWaitTicks >= SNAKE_FACE_CHANGE_MAX_WAIT_TICKS;
             }
             if (toolReady && breakAimReady && aimReceivedByServer) {
+                progressActions.arm(positionKey(pos), breakState, Blocks.AIR.defaultBlockState());
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
                 if (needsSnakeFaceSettle && swingFace != null) {
                     snakeLastSwungFace = swingFace;
@@ -9990,6 +9977,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 + " side=" + placement.side);
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
                 pendingPlacementRequest = placement;
+                progressActions.arm(positionKey(placement.target), ctx.world().getBlockState(placement.target), placement.desired);
                 pendingPlacementItem = expectedItem;
                 pendingPlacementRequestSerial = observedBlockClickSerial;
                 // DIE DROSSELUNG IST KEIN FEHLSCHLAG, und ab dem scharfen P5 ist dieser Unterschied ein Bauabbruch
@@ -10122,6 +10110,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (ticks <= 0 && lookingAtInteraction && !ctx.player().isCrouching()) {
                 BuildTrace.intendWorldChange("interact", pos.x, pos.y, pos.z,
                         "stepping the state, " + clicksLeft + " click(s) left");
+                progressActions.arm(positionKey(pos), bcc.bsi.get0(pos), bcc.getSchematic(pos.x, pos.y, pos.z, bcc.bsi.get0(pos)));
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
                 ticks = 5; // one click per few ticks so each registers as a single state step
             }
@@ -10133,6 +10122,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // the work set that are starving for a material sitting in the backpack. See appendStarvedWorkSetMaterials.
             List<BlockState> hotbarDemand = new ArrayList<>(desirableOnHotbar);
             appendStarvedWorkSetMaterials(bcc, hotbarDemand);
+            if (electedCell != null) {
+                BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, bcc.bsi.get0(electedCell));
+                if (wanted != null) {
+                    hotbarDemand.clear();
+                    hotbarDemand.add(wanted);
+                }
+            }
             ArrayList<Integer> usefulSlots = new ArrayList<>();
             List<BlockState> noValidHotbarOption = new ArrayList<>();
             outer:
@@ -10417,7 +10413,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         && !MovementHelper.isReplaceable(
                         committedPlaceTarget.x, committedPlaceTarget.y, committedPlaceTarget.z,
                         bcc.bsi.get0(committedPlaceTarget), bcc.bsi)
-                        && ((calcFailed && noProgressTicks >= UNSTICK_AT_TICKS) || noProgressTicks >= 120);
+                        && calcFailed && noProgressTicks >= UNSTICK_AT_TICKS;
                 if (committedWrongBlockRouteFailed) {
                     BetterBlockPos stalled = new BetterBlockPos(committedPlaceTarget);
                     deferCell(stalled, calcFailed
@@ -10427,7 +10423,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     resetNavigationProgressTracking();
                     return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
-                boolean rotateFailedRoute = !placementTargetLock.isActive()
+                boolean rotateFailedRoute = electedCell == null && !placementTargetLock.isActive()
                         && ((calcFailed && noProgressTicks >= UNSTICK_AT_TICKS) || noProgressTicks >= 120);
                 if (rotateFailedRoute) {
                     BetterBlockPos stalled = nearestRoutableUnresolved(feet, bcc);
@@ -10547,7 +10543,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 finishWith(Ending.MATERIALS_MISSING, "Unable to continue: " + resourceBlocker,
                         java.util.Collections.singletonList("The build is paused; supply the material and start it again."));
-                paused = true;
+                pause();
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
         }
@@ -10695,7 +10691,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     releasePlacementTarget();
                 }
                 if (laneProbeCell.equals(electedCell)) {
-                    electedCell = null;
+                    clearElectedTarget();
                 }
                 laneEscalatedCell = null;
                 laneProbeCell = null;
@@ -10902,7 +10898,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 activeCells.remove(pos);
                                 parkedCells.remove(positionKey(x, y, z));
                                 watchmanAfterChangeAt(x, y, z);
-                                noteCellCompleted();
+                                noteCellCompleted(pos);
                                 if (walkTargetKey == positionKey(pos)) {
                                     walksEndedInPlacement++;   // that walk was worth taking
                                     walkTargetKey = -1L;
@@ -11383,15 +11379,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 .thenComparingInt(p -> p.x).thenComparingInt(p -> p.y).thenComparingInt(p -> p.z));
         // The latched cell is tried FIRST, whatever the distances now say.
         if (electedCell != null) {
-            if (!offered.contains(electedCell) || isCellParked(electedCell.x, electedCell.y, electedCell.z)) {
-                electedCell = null;
+            if (!incorrectPositions.contains(electedCell) || isCellParked(electedCell.x, electedCell.y, electedCell.z)) {
+                clearElectedTarget();
             } else {
-                Goal held = placementGoal(electedCell, bcc);
-                if (held != null) {
-                    toPlace.add(held);
+                BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, bcc.bsi.get0(electedCell));
+                // A hotbar swap or an exhausted per-tick search budget is not a world invalidation.
+                Goal rowGoal = mapArtPlacementGoal(electedCell, bcc);
+                CellUrteil verdict = wanted != null && hotbarStackThatPlaces(wanted) == null
+                        ? new CellUrteil.Unbekannt("waiting for the chosen material on the hotbar")
+                        : rowGoal != null ? new CellUrteil.Setzen(rowGoal) : urteileUeber(electedCell, bcc);
+                Goal held = acceptElectedVerdict(verdict);
+                if (electedCell != null) {
+                    if (held != null) toPlace.add(held);
                     byDistance = java.util.Collections.emptyList();
-                } else {
-                    electedCell = null;
                 }
             }
         }
@@ -11412,6 +11412,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 if (!pos.equals(electedCell)) {
                     electedCell = pos;
+                    electedGoal = goal;
                     // Every new target starts in the walk-only pass. Permission is never inherited.
                     scaffoldPassAllowed = false;
                     BuildTrace.cell(buildTick, "ELECT", pos.x, pos.y, pos.z,
@@ -12391,7 +12392,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         placementTargetLock.startRecovery();
         committedPlaceTarget = new BetterBlockPos(target);
-        placementTargetAcquiredTick = buildTick;
         plannedPlacementStance = null;
         logMechanic("Recovering placement at " + target.x + "," + target.y + "," + target.z
                 + " from a different stance (" + reason + ")");
@@ -12732,7 +12732,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 if (!rejectedDuringCentering) {
                     PlacementTargetLock.RouteDecision decision =
-                            placementTargetLock.routeTick(distanceSquared, distanceSquared == 0);
+                            placementTargetLock.routeTick(distanceSquared, distanceSquared == 0, progressWatch.advancedLastSample());
                     if (decision == PlacementTargetLock.RouteDecision.KEEP_MOVING) {
                         return new PathingCommandContext(new GoalBlock(plannedPlacementStance),
                                 PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
@@ -12867,6 +12867,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * den dieses Repo schon dreimal bezahlt hat (siehe die Notiz an {@code aimPointsOnFace}).
      */
     private Goal placementGoal(BlockPos pos, BuilderCalculationContext bcc) {
+        Goal rowGoal = mapArtPlacementGoal(pos, bcc);
+        return rowGoal != null ? rowGoal
+                : urteileUeber(pos, bcc) instanceof CellUrteil.Setzen setzen ? setzen.ziel() : null;
+    }
+
+    private Goal mapArtPlacementGoal(BlockPos pos, BuilderCalculationContext bcc) {
         if (buildInRows) {
             BlockState current = bcc.bsi.get0(pos);
             BlockState wanted = bcc.getSchematic(pos.getX(), pos.getY(), pos.getZ(), current);
@@ -12883,7 +12889,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return new GoalBlock(pos.above());
             }
         }
-        return urteileUeber(pos, bcc) instanceof CellUrteil.Setzen setzen ? setzen.ziel() : null;
+        return null;
     }
 
     /**
@@ -13361,6 +13367,17 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         resetBreakBranchTracking();
+        progressWatch.reset();
+        progressActions.clear();
+        confirmedProgressRevision = 0;
+        progressExecutor = null;
+        progressRoute = null;
+        progressRouteTarget = null;
+        progressRoutePositions = java.util.List.of();
+        progressRoutePosition = -1;
+        progressPhase = null;
+        progressHold = false;
+        clearElectedTarget();
         navigationScaffolds.clear();
         excavationFluidPlugs.clear();
         excavationActiveClock.clear();
@@ -13406,7 +13423,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         sealHolds.clear();
         interactGiveUps = null;
         hotbarFetchRefusedTicks = 0;
-        placementTargetAcquiredTick = -1L;
         buildTick = 0;
         lastFullRecalcTick = Long.MIN_VALUE / 2;
         lastCellCompletedTick = 0;
