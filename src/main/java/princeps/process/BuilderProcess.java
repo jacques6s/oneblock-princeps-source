@@ -9822,6 +9822,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 if (!paused) enforceAutoDigLookProfile();
                 excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
                         survival != null && survival.isConsuming());
+                if (paused || (survival != null && (survival.ownsInventory() || survival.isConsuming()))) {
+                    excavationFluidPlugs.suspendRouteProgress();
+                }
             }
             if (calcFailed) {
                 homeFailedRoute = princeps.getPathingBehavior().getGoal();
@@ -10226,10 +10229,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         var excavationSurvival = princeps.getSurvivalBehavior();
         boolean excavationHandsBorrowed = excavationSurvival != null
                 && (excavationSurvival.ownsInventory() || excavationSurvival.isConsuming());
-        if (blockedFluidPlugThisTick != null && plugRoute != null
+        if (blockedFluidPlugThisTick != null
                 && !excavationHandsBorrowed
                 && insideSnakeVolume(ctx.playerFeet().x, ctx.playerFeet().y, ctx.playerFeet().z)) {
-            excavationFluidPlugs.routeProgress(plugRoute, plugRoute.getPosition(), ctx.playerFeet());
+            excavationFluidPlugs.observeRouteProgress(plugRoute, ctx.playerFeet());
         }
         // Check before a repair can arm CLICK_RIGHT. First server confirmations anywhere in the current plug
         // ledger and real, non-repeated route advancement renew this clock; merely aiming or retrying does not.

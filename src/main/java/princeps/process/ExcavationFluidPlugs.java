@@ -9,6 +9,7 @@ import net.minecraft.world.level.gamerules.GameRules;
 import net.minecraft.world.level.material.Fluid;
 import net.minecraft.world.level.material.Fluids;
 import net.minecraft.world.phys.shapes.Shapes;
+import princeps.pathing.path.PathExecutor;
 
 import java.util.ArrayList;
 import java.util.Collection;
@@ -31,6 +32,8 @@ final class ExcavationFluidPlugs {
     private Object route;
     private int routePosition;
     private final Set<Long> reachedRouteCells = new HashSet<>();
+    private record FinishingStep(PathExecutor executor, BlockPos destination) { }
+    private FinishingStep finishingStep;
 
     /** Called only for the current excavation's explicitly scoped, in-selection integrity placement. */
     void record(BlockPos pos, BlockState before, BlockState after) {
@@ -74,6 +77,39 @@ final class ExcavationFluidPlugs {
     /** A confirmed new seal or a newly reached route node, never a click or repeated acknowledgement. */
     void progress() { improvement++; }
 
+    /**
+     * The builder runs before path execution; PathingBehavior removes finished executors in that same path tick.
+     * A one-edge route goes from index zero to absent between builder observations, so retain its completion proof.
+     */
+    void observeRouteProgress(PathExecutor currentRoute, BlockPos feet) {
+        if (finishingStep != null && (finishingStep.executor() != currentRoute
+                || finishingStep.executor().finished() || finishingStep.executor().failed())) {
+            FinishingStep previous = finishingStep;
+            finishingStep = null;
+            if (previous.executor().finished() && !previous.executor().failed()
+                    && previous.destination().equals(feet)) {
+                routeProgress(previous.executor(), previous.executor().getPosition(), feet);
+            }
+        }
+        if (currentRoute == null || currentRoute.failed() || currentRoute.finished()) return;
+        routeProgress(currentRoute, currentRoute.getPosition(), feet);
+        if (finishingStep == null) finishingStep = finishingStep(currentRoute, feet);
+    }
+
+    private static FinishingStep finishingStep(PathExecutor executor, BlockPos feet) {
+        var positions = executor.getPath().positions();
+        if (positions.size() != 2 || executor.getPosition() != 0 || !positions.get(0).equals(feet)) return null;
+        BlockPos destination = positions.get(1);
+        if (feet.getY() != destination.getY()
+                || Math.abs(feet.getX() - destination.getX()) + Math.abs(feet.getZ() - destination.getZ()) != 1) {
+            return null;
+        }
+        for (BlockPos body : new BlockPos[] {feet, feet.above(), destination, destination.above()}) {
+            if (!executor.wadeLicence().permitsWading(body)) return null;
+        }
+        return new FinishingStep(executor, destination.immutable());
+    }
+
     /** A new path alone is not progress; an advanced node must also reach a cell not already credited. */
     void routeProgress(Object currentRoute, int position, BlockPos feet) {
         if (currentRoute == null) return;
@@ -87,7 +123,10 @@ final class ExcavationFluidPlugs {
         }
     }
 
-    private void resetRoute() { route = null; reachedRouteCells.clear(); }
+    /** Borrowed hands or a pause discard pending execution evidence without forgiving the blocked episode. */
+    void suspendRouteProgress() { route = null; finishingStep = null; }
+
+    private void resetRoute() { suspendRouteProgress(); reachedRouteCells.clear(); }
 
     boolean waitExpired(Hazard hazard, long tick) {
         if (hazard == null) { waitingFor = null; resetRoute(); return false; }
