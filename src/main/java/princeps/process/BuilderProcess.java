@@ -67,6 +67,7 @@ import princeps.utils.BlockStateInterface;
 import princeps.utils.PathingCommandContext;
 import princeps.utils.AreaTool;
 import princeps.utils.ToolSet;
+import princeps.utils.ExcavationFiller;
 import princeps.utils.schematic.MapArtSchematic;
 import princeps.utils.schematic.SchematicSystem;
 import princeps.utils.schematic.SelectionSchematic;
@@ -895,6 +896,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * parks nothing at all; the owner's ruling is to dig exactly as the bench does.
      */
     private boolean excavating;
+    private boolean excavationExternalInventoryOwned;
     /** Build tick of the last dry-window park release, so the retry happens once a tick and not per recursion. */
     private long lastParkSweepTick = Long.MIN_VALUE;
     private long cellsParked;
@@ -1652,6 +1654,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     @Override
     public void build(String name, ISchematic schematic, Vec3i origin, boolean inRows) {
         excavating = false;
+        excavationExternalInventoryOwned = false;
         this.nextBuildInRows = inRows;
         build(name, schematic, origin);
     }
@@ -1664,6 +1667,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // followed a dig would otherwise inherit the flag and quietly stop parking -- turning a fix for digging
         // into a behaviour change for building, which is exactly what it must not be.
         excavating = false;
+        excavationExternalInventoryOwned = false;
         // The trace is opened here rather than lazily, so its first line is the first tick of the build and a cell's
         // record can never begin mid-life. Off unless princeps.buildtrace is set; the bench sets it for every run.
         if (Boolean.getBoolean("princeps.buildtrace")) {
@@ -2283,6 +2287,34 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     @Override
     public boolean isActive() {
         return schematic != null;
+    }
+
+    /** The excavation session reserves one filler slot even while an external inventory owner pauses it. */
+    public boolean ownsExcavationInventory() {
+        return excavating && isActive() && abortPending == Ending.RUNNING;
+    }
+
+    /** Stable across bands, replaced by every new build; queued inventory swaps must retain this exact owner. */
+    public Object excavationInventorySession() {
+        return ownsExcavationInventory() ? supportModelForDependencies() : null;
+    }
+
+    /** Read before an external supply controller pauses the builder, so an owned click finishes first. */
+    public boolean isExcavationPlacementPending() {
+        if (!ownsExcavationInventory() || paused
+                || princeps.getPathingControlManager().mostRecentInControl().orElse(null) != this) return false;
+        var inputs = princeps.getInputOverrideHandler();
+        return inputs.isInputForcedDown(Input.CLICK_RIGHT) || inputs.getBlockPlaceHelper().hasExpectedPlacement()
+                || pendingPlacementRequest != null
+                || navigationScaffolds.awaitingServer();
+    }
+
+    public void setExcavationExternalInventoryOwned(boolean owned) {
+        excavationExternalInventoryOwned = owned && ownsExcavationInventory();
+    }
+
+    public boolean isExcavationExternalInventoryOwned() {
+        return excavationExternalInventoryOwned && ownsExcavationInventory();
     }
 
     private BlockPos lastSupportRefusal;
@@ -5514,9 +5546,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 PathingCommandType.SET_GOAL_AND_PATH, context);
     }
 
-    /** An already reachable working cut ends initial travel even when no entry route was needed. */
+    /** A cut seen from outside is still access work; only arrival ends an already committed journey. */
     void noteExcavationWorkCut(BlockPos target) {
-        if (excavating && insideSnakeVolume(target.getX(), target.getY(), target.getZ())) excavationApproach.clear();
+        BetterBlockPos feet = ctx.playerFeet();
+        if (excavating && excavationApproach.entry() == null
+                && insideSnakeVolume(feet.x, feet.y, feet.z)
+                && insideSnakeVolume(target.getX(), target.getY(), target.getZ())) excavationApproach.clear();
     }
 
     private Optional<ExcavationFluidPlugs.Hazard> excavationPlugHazard(BlockPos target, Direction face,
@@ -5671,6 +5706,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         "AutoDig needs a full throwaway block to seal fluids and excavation walls",
                         java.util.List.of("First unresolved cell: " + candidate.pos().x + ","
                                 + candidate.pos().y + "," + candidate.pos().z));
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+            if (excavating && !princeps.getInventoryBehavior().throwaway(true,
+                    stack -> stack.getItem() == fill.getBlock().asItem())) {
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
             ExcavationRepairAim.Face heldFace = excavating
@@ -5838,6 +5877,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private BlockState snakeIntegrityBlockState(BlockPos at) {
+        if (excavating) return excavationFillerState(at);
         if (approxPlaceable == null) {
             return null;
         }
@@ -5851,6 +5891,24 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
         return null;
+    }
+
+    public BlockState excavationFillerState(BlockPos at) {
+        return excavationFillerState(at, Princeps.settings().acceptableThrowawayItems.value,
+                Princeps.settings().allowInventory.value);
+    }
+
+    BlockState excavationFillerState(BlockPos at, List<Item> allowed, boolean allowInventory) {
+        var stock = ctx.player().getInventory().getNonEquipmentItems();
+        int source = ExcavationFiller.source(stock, stack -> {
+            if (!(stack.getItem() instanceof BlockItem item)
+                    || !allowed.contains(item)) return false;
+            BlockState state = item.getBlock().defaultBlockState();
+            return !(item.getBlock() instanceof FallingBlock)
+                    && state.isCollisionShapeFullBlock(ctx.world(), at)
+                    && (state.is(Blocks.DEEPSLATE) || !placementStateIsGeometrySensitive(state));
+        }, allowInventory);
+        return source < 0 ? null : ((BlockItem) stock.get(source).getItem()).getBlock().defaultBlockState();
     }
 
     private PathingCommand snakeIntegrityPlacementClick(Placement placement, SnakeRepair repair,
@@ -8389,6 +8447,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private OptionalInt hasAnyItemThatWouldPlace(BlockState desired, HitResult result, Rotation rot,
                                                  int x, int y, int z, BuilderCalculationContext bcc) {
         for (int i = 0; i < 9; i++) {
+            if (excavating && i != ExcavationFiller.SLOT) continue;
             ItemStack stack = ctx.player().getInventory().getNonEquipmentItems().get(i);
             BlockState wouldBePlaced = simulatePlacement(stack, (BlockHitResult) result, rot);
             if (placementResultAccepted(wouldBePlaced, desired, x, y, z, bcc)) {
@@ -8405,10 +8464,18 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  identical prevents another special block from being routeable by one simulation but rejected by another. */
     private boolean placementResultAccepted(BlockState result, BlockState desired, int x, int y, int z,
                                             BuilderCalculationContext bcc) {
+        // Deepslate's axis changes its texture, never the full-cube seal. Ordinary blueprints still require
+        // their exact orientation; only excavation filler accepts the axis chosen by the actual support face.
+        if (axisIndependentExcavationFiller(excavating, result, desired)) return true;
         return result != null
                 && (valid(result, desired, true)
                 || isPendingChestPairHalf(result, desired, x, y, z, bcc)
                 || interactionClicks(result, desired) >= 0);
+    }
+
+    static boolean axisIndependentExcavationFiller(boolean excavation, BlockState result, BlockState desired) {
+        return excavation && result != null && desired != null
+                && desired.is(Blocks.DEEPSLATE) && result.is(Blocks.DEEPSLATE);
     }
 
     /** A placement lock may hand ownership to chest-pair completion or the interaction pass as well as exact match. */
@@ -9794,6 +9861,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
                 || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT)) {
+            CalculationContext context = princeps.getPathingBehavior().secretInternalGetCalculationContext();
+            PathExecutor route = princeps.getPathingBehavior().getCurrent();
+            if (excavating && context != null
+                    && excavationApproach.owns(context.excavationApproachToken(),
+                            route == null ? context.excavationApproachToken() : route.excavationApproachToken())) {
+                // A builder-owned access cut stops the body, not its journey. A plain CANCEL would make the
+                // next tick mistake this same owner's click for a foreign command and release dry-shell priority.
+                return new PathingCommandContext(null, command.commandType, context);
+            }
             return command; // a real click this tick: hold the body still, that is what the cancel is for
         }
         Goal inFlight = princeps.getPathingBehavior().getGoal();
@@ -13901,6 +13977,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     java.util.List.of("First missing floor cell: " + floor.x + "," + floor.y + "," + floor.z));
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
+        if (excavating && !princeps.getInventoryBehavior().throwaway(true,
+                stack -> stack.getItem() == fill.getBlock().asItem())) {
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
         Optional<Placement> option = possibleToPlace(fill, floor.x, floor.y, floor.z, bcc);
         if (option.isEmpty()) {
             Item wanted = fill.getBlock().asItem();
@@ -14832,6 +14912,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         resetBreakBranchTracking();
+        excavationExternalInventoryOwned = false;
         excavationApproach.clear();
         excavationApproachToolChangedTick = Long.MIN_VALUE;
         homeRecoveryEnabled = false;

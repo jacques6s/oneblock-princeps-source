@@ -23,6 +23,7 @@ import princeps.api.utils.Helper;
 import princeps.api.utils.input.Input;
 import princeps.utils.AreaTool;
 import princeps.utils.ToolSet;
+import princeps.utils.ExcavationFiller;
 import princeps.process.BuilderProcess;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.core.Direction;
@@ -51,6 +52,7 @@ public final class InventoryBehavior extends Behavior implements Helper {
 
     int ticksSinceLastInventoryMove;
     int[] lastTickRequestedMove; // not everything asks every tick, so remember the request while coming to a halt
+    private Object excavationFetchSession;
 
     /**
      * Why the last swap request was refused, in words, for whoever has to explain the stall.
@@ -109,6 +111,7 @@ public final class InventoryBehavior extends Behavior implements Helper {
 
     @Override
     public void onTick(TickEvent event) {
+        discardInactiveExcavationFetch();
         if (!Princeps.settings().allowInventory.value) {
             lastTickSkipReason = "allowInventory is off";
             return;
@@ -143,7 +146,23 @@ public final class InventoryBehavior extends Behavior implements Helper {
         if (slot9TotemProtected && lastTickRequestedMove != null && lastTickRequestedMove[1] == 8) {
             lastTickRequestedMove = null;
         }
-        if (!slot9TotemProtected) {
+        if (excavationBuilder() != null && lastTickRequestedMove != null
+                && (lastTickRequestedMove[1] == MOVEMENT_FETCH_SLOT || lastTickRequestedMove[1] == 8)) {
+            lastTickRequestedMove = null;
+        }
+        if (excavationFetchSession != null && lastTickRequestedMove != null
+                && lastTickRequestedMove[1] == ExcavationFiller.SLOT) {
+            BuilderProcess builder = excavationBuilder();
+            BlockState preferred = builder == null ? null : builder.excavationFillerState(ctx.playerFeet());
+            if (!ExcavationFiller.currentSession(excavationFetchSession,
+                    builder == null ? null : builder.excavationInventorySession(), builder != null && builder.isPaused())
+                    || preferred == null || !ExcavationFiller.currentFetch(ctx.player().getInventory().getNonEquipmentItems(),
+                    lastTickRequestedMove[0], preferred.getBlock().asItem())) {
+                lastTickRequestedMove = null;
+                excavationFetchSession = null;
+            }
+        }
+        if (!slot9TotemProtected && excavationBuilder() == null) {
             final int firstThrowaway = firstValidThrowaway();
             if (firstThrowaway >= 9) {
                 requestSwapWithHotBar(firstThrowaway, 8);
@@ -173,6 +192,10 @@ public final class InventoryBehavior extends Behavior implements Helper {
      * on the same grounds next tick, and the next, forever. Silence about doing nothing is worse than failing.
      */
     public boolean attemptToPutOnHotbar(int inMainInvy, Predicate<Integer> disallowedHotbar) {
+        if (excavationBuilder() != null
+                && ctx.player().getInventory().getItem(inMainInvy).getItem() instanceof BlockItem) {
+            return requestSwapWithHotBar(inMainInvy, ExcavationFiller.SLOT);
+        }
         OptionalInt destination = getTempHotbarSlot(disallowedHotbar);
         if (!destination.isPresent()) {
             lastSwapRefusal = "every hotbar slot 1-7 is protected as still-needed, so there is nowhere to put it";
@@ -259,6 +282,17 @@ public final class InventoryBehavior extends Behavior implements Helper {
             }
             return false;
         }
+        BuilderProcess excavation = excavationBuilder();
+        if (inHotbar == ExcavationFiller.SLOT && excavation != null
+                && (excavation.isPaused() || excavation.isExcavationExternalInventoryOwned()
+                || !Princeps.settings().allowInventory.value)) {
+            lastSwapRefusal = "excavation filler inventory is paused";
+            lastTickRequestedMove = null;
+            excavationFetchSession = null;
+            return false;
+        }
+        excavationFetchSession = inHotbar == ExcavationFiller.SLOT && excavation != null
+                ? excavation.excavationInventorySession() : null;
         lastTickRequestedMove = new int[]{inInventory, inHotbar};
         if (ticksSinceLastInventoryMove < Princeps.settings().ticksBetweenInventoryMoves.value) {
             lastSwapRefusal = "rate limited: " + ticksSinceLastInventoryMove + " tick(s) since the last move, "
@@ -279,6 +313,7 @@ public final class InventoryBehavior extends Behavior implements Helper {
         }
         ticksSinceLastInventoryMove = 0;
         lastTickRequestedMove = null;
+        excavationFetchSession = null;
         return true;
     }
 
@@ -404,6 +439,11 @@ public final class InventoryBehavior extends Behavior implements Helper {
     }
 
     public boolean selectThrowawayForLocation(boolean select, int x, int y, int z) {
+        BuilderProcess excavation = excavationBuilder();
+        if (excavation != null) {
+            BlockState fill = excavation.excavationFillerState(new net.minecraft.core.BlockPos(x, y, z));
+            return fill != null && throwaway(select, stack -> stack.getItem() == fill.getBlock().asItem());
+        }
         Predicate<? super ItemStack> template = templateBlockChooserAt(x, y, z);
         if (template != null) {
             return throwaway(select, template);
@@ -429,6 +469,11 @@ public final class InventoryBehavior extends Behavior implements Helper {
         final SurvivalBehavior survival = princeps.getSurvivalBehavior();
         final boolean handsOwned = survival != null && survival.ownsInventory();
         NonNullList<ItemStack> inv = p.getInventory().getNonEquipmentItems();
+        if (excavationBuilder() != null) {
+            return ExcavationFiller.select(inv, desired, allowInventory, select,
+                    handsOwned || excavationBuilder().isPaused(),
+                    source -> requestSwapWithHotBar(source, ExcavationFiller.SLOT), p.getInventory()::setSelectedSlot);
+        }
         for (int i = 0; i < 9; i++) {
             ItemStack item = inv.get(i);
             // this usage of settings() is okay because it's only called once during pathing
@@ -519,5 +564,25 @@ public final class InventoryBehavior extends Behavior implements Helper {
         }
 
         return false;
+    }
+
+    private BuilderProcess excavationBuilder() {
+        return princeps.getBuilderProcess() instanceof BuilderProcess builder && builder.ownsExcavationInventory()
+                ? builder : null;
+    }
+
+    /** Runs even while external automation disables inventory upkeep; a later resume cannot revive this write. */
+    private void discardInactiveExcavationFetch() {
+        if (lastTickRequestedMove == null) return;
+        BuilderProcess builder = excavationBuilder();
+        if (excavationFetchSession == null) {
+            if (builder != null && lastTickRequestedMove[1] == ExcavationFiller.SLOT) lastTickRequestedMove = null;
+            return;
+        }
+        if (!ExcavationFiller.currentSession(excavationFetchSession,
+                builder == null ? null : builder.excavationInventorySession(), builder != null && builder.isPaused())) {
+            lastTickRequestedMove = null;
+            excavationFetchSession = null;
+        }
     }
 }

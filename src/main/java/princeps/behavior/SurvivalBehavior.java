@@ -169,6 +169,11 @@ public final class SurvivalBehavior extends Behavior {
             return;
         }
 
+        // A client supply transaction acquired the excavation pause after existing consumers finished.
+        // Let its swap and acknowledgement finish before starting another hand/inventory action.
+        if (princeps.getBuilderProcess() instanceof princeps.process.BuilderProcess builder
+                && (builder.isExcavationExternalInventoryOwned() || builder.isExcavationPlacementPending())) return;
+
         // A repair session owns the hands (tool in offhand, XP in main hand) until it finishes.
         if (p.isUsingItem()) {
             return; // some other use (e.g. the user) is in progress
