@@ -2173,6 +2173,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         supportRepair = null;
         progressActions.clear();
+        // A confirmed relocation ends the old break branch's yield/damage/claim history, not a world action.
+        resetBreakBranchTracking();
         resetNavigationProgressTracking();
         progressExecutor = null;
         progressRoute = null;

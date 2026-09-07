@@ -363,6 +363,7 @@ public class BuilderSupportDependenciesTest {
         set(owner,"ctx",ctx); set(owner,"origin",TARGET); set(owner,"schematic",model); set(owner,"realSchematic",model);
         set(owner,"approxPlaceable",Collections.emptyList());
         var cost = allocate(BuilderProcess.BuilderCalculationContext.class);
+        set(cost, "fluidPlugSnapshot", new ExcavationFluidPlugs());
         set(cost,"this$0",owner); set(cost,"originX",TARGET.getX()); set(cost,"originY",TARGET.getY()); set(cost,"originZ",TARGET.getZ());
         set(cost,"schematic",model);
         set(cost,"supportDependencies",new BuilderSupportDependencies(model,TARGET,List.of(),blocks,world));

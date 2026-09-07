@@ -236,6 +236,9 @@ public class BuilderCommitmentTest {
 
     private static BuilderProcess fixture() throws Exception {
         BuilderProcess process = allocate(BuilderProcess.class);
+        set(process, "breakBranchProgress", new BreakBranchProgress(120, 100));
+        set(process, "excavationFluidPlugs", new ExcavationFluidPlugs());
+        set(process, "excavationRepairAim", new ExcavationRepairAim());
         field("buildTick").setLong(process, 77L);
         field("stanceFailures").set(process, new Long2ObjectOpenHashMap<>());
         field("stanceEndorsed").set(process, new Long2ObjectOpenHashMap<>());

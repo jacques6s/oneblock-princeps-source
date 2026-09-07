@@ -287,6 +287,28 @@ public class BuilderHomeRecoveryTest {
         assertFalse(f.b().resumeAfterHomeRecovery(f.b().homeRecoveryRequestId()));
     }
 
+    @Test public void homeHoldFreezes222BreakYieldAndResumeDiscardsOnlyItsDepartureHistory() throws Exception {
+        F f = fixture();
+        BreakBranchProgress progress = (BreakBranchProgress) get(f.b(), "breakBranchProgress");
+        BreakTargetObservation observation = (BreakTargetObservation) get(f.b(), "breakTargetObservation");
+        observation.claim(f.world, TARGET, Blocks.STONE.defaultBlockState());
+        for (int tick = 0; tick < 121; tick++) {
+            progress.beginTick(false, false, false);
+            progress.shouldYield(true, TARGET, Float.NaN);
+        }
+        assertEquals(100, progress.yieldRemaining());
+        f.enable(); assertTrue(f.begin()); f.ready();
+        long active = progress.activeTick();
+        f.b().advanceHomeRecovery(12_000_000_000L);
+        assertEquals(active, progress.activeTick());
+        assertEquals(100, progress.yieldRemaining());
+        assertTrue(f.b().resumeAfterHomeRecovery(f.b().homeRecoveryRequestId()));
+        assertEquals("the old departure's yield is not a new route's evidence", 0, progress.yieldRemaining());
+        assertFalse(observation.observe(f.world, p -> true, p -> Blocks.AIR.defaultBlockState()));
+        assertEquals("relocation is not a confirmed build action", 0L, get(f.b(), "confirmedProgressRevision"));
+        f.failed(); assertFalse("relocation must not rearm another Home attempt", f.begin());
+    }
+
     private static F fixture() throws Exception {
         var base = BuilderModelRestorationTest.fixture(Blocks.GLASS.defaultBlockState(), false);
         var route = BuilderModelRouteProtectionTest.route(base);
@@ -320,6 +342,8 @@ public class BuilderHomeRecoveryTest {
         set(b,"ending",princeps.api.process.IBuilderProcess.Ending.RUNNING);
         set(b,"abortPending",princeps.api.process.IBuilderProcess.Ending.RUNNING);
         set(b,"progressWatch",new BuilderProgressWatch(5_000_000_000L,60_000_000_000L,2));
+        set(b,"breakBranchProgress",new BreakBranchProgress(120,100));
+        set(b,"breakTargetObservation",new BreakTargetObservation());
         ConfirmedBuildActions<net.minecraft.world.level.block.state.BlockState> actions=new ConfirmedBuildActions<>((a,c)->a.equals(c));set(b,"progressActions",actions);
         set(b,"homeRecoveryAttemptRevision",Long.MIN_VALUE);set(b,"placementTargetLock",new PlacementTargetLock<>(10,10,10));
         set(b,"laneProbe",new PathProbe("home-test"));set(b,"navigationVisitedCells",new LongOpenHashSet());set(b,"orientedGoalCache",new HashMap<>());

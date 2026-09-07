@@ -74,6 +74,45 @@ public class MovementPlatformBackplaceTest {
         f.hit=new BlockHitResult(new Vec3(12,20.5,10.5),Direction.EAST,TARGET,false);
         assertTrue(input(next.updateBackplace(running()),Input.CLICK_RIGHT));assertEquals(0,f.world.writes);
     }
+    @Test public void extractedActorStillArms222IntegrityAndRejectsItsReplacedRoute()throws Exception{
+        var f=edge(); f.hit=hit();
+        var engine=allocate(princeps.Princeps.class);set(engine,"playerContext",f.ctx);set(engine,"pathingBehavior",f.pathing);f.bot=engine;
+        var inputs=allocate(princeps.utils.InputOverrideHandler.class);set(engine,"inputOverrideHandler",inputs);
+        var helper=allocate(princeps.utils.BlockPlaceHelper.class);set(helper,"ctx",f.ctx);set(helper,"princeps",engine);set(inputs,"blockPlaceHelper",helper);
+        var executor=allocate(princeps.pathing.path.PathExecutor.class);
+        var licence=princeps.api.pathing.PlacementLicence.excavationBridge(TARGET.asLong());
+        set(executor,"placementLicence",licence);set(f.pathing,"current",executor);
+        f.inventory.setSelectedSlot(1);
+        var equipment=new net.minecraft.world.entity.EntityEquipment();set(f.player,"equipment",equipment);
+        equipment.set(net.minecraft.world.entity.EquipmentSlot.MAINHAND,f.inventory.getItem(1));
+        assertTrue(input(movement(f).updateBackplace(running()),Input.CLICK_RIGHT));
+        Object expectation=get(helper,"expectedPlacement");assertNotNull(expectation);
+        assertEquals(true,get(expectation,"excavationIntegrity"));assertEquals(TARGET,get(expectation,"target"));
+        var stillCorrect=(java.util.function.BooleanSupplier)get(expectation,"stillCorrect");
+        set(executor,"placementLicence",princeps.api.pathing.PlacementLicence.excavationBridge(TARGET.asLong()));
+        assertFalse("same coordinate on a new licence is not the armed route",stillCorrect.getAsBoolean());
+        helper.clearExpectedPlacement();set(helper,"rightClickTimer",1);
+        assertFalse(input(movement(f).updateBackplace(running()),Input.CLICK_RIGHT));assertNull(get(helper,"expectedPlacement"));
+        set(helper,"rightClickTimer",0);f.inventory.setSelectedSlot(0);
+        equipment.set(net.minecraft.world.entity.EquipmentSlot.MAINHAND,net.minecraft.world.item.ItemStack.EMPTY);
+        assertFalse(input(movement(f).updateBackplace(running()),Input.CLICK_RIGHT));assertNull(get(helper,"expectedPlacement"));
+    }
+
+    @Test public void bothRealTraversePlacementBranchesRetain222IntegrityGate()throws Exception{
+        var calls=new java.util.HashMap<String,Integer>();
+        try(var bytes=MovementTraverse.class.getResourceAsStream("MovementTraverse.class")){
+            new org.objectweb.asm.ClassReader(bytes).accept(new org.objectweb.asm.ClassVisitor(org.objectweb.asm.Opcodes.ASM9){
+                @Override public org.objectweb.asm.MethodVisitor visitMethod(int access,String name,String desc,String signature,String[] exceptions){
+                    return new org.objectweb.asm.MethodVisitor(org.objectweb.asm.Opcodes.ASM9){
+                        @Override public void visitMethodInsn(int opcode,String owner,String method,String descriptor,boolean itf){
+                            if(owner.equals("princeps/pathing/movement/movements/MovementTraverse")&&method.equals("armExcavationBridgeClick"))calls.merge(name,1,Integer::sum);
+                        }
+                    };
+                }
+            },org.objectweb.asm.ClassReader.SKIP_DEBUG);
+        }
+        assertEquals(java.util.Map.of("updateState",1,"updateBackplace",1),calls);
+    }
     private static PlatformTraverseFixture edge()throws Exception{
         var f=new PlatformTraverseFixture();f.player.pos=new Vec3(11.2,21,10.5);return f;
     }

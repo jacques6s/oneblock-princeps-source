@@ -178,6 +178,8 @@ public class BuilderModelRestorationTest {
             @Override protected boolean partOfMask(int x, int y, int z, BlockState current) { return y == 0; }
         } : f.full;
         f.owner = allocate(BuilderProcess.class);
+        set(f.owner, "excavationFluidPlugs", new ExcavationFluidPlugs());
+        set(f.owner, "excavationRepairAim", new ExcavationRepairAim());
         LocalPlayer player = allocate(LocalPlayer.class);
         Inventory inventory = new Inventory(player, new EntityEquipment());
         set(player, "inventory", inventory);
@@ -186,7 +188,7 @@ public class BuilderModelRestorationTest {
         assertFalse(allocate(ToolSet.class).hasSilkTouch(inventory.getItem(0)));
         for (int i = 1; i < 36; i++) assertTrue(inventory.getItem(i).isEmpty());
         Minecraft minecraft = allocate(Minecraft.class);
-        GameMode gameMode = allocate(GameMode.class); gameMode.target = TARGET;
+        GameMode gameMode = allocate(GameMode.class); gameMode.target = TARGET; gameMode.damage = 0.25F;
         set(minecraft, "gameMode", gameMode);
         IPlayerController controller = (IPlayerController) Proxy.newProxyInstance(IPlayerController.class.getClassLoader(),
                 new Class<?>[]{IPlayerController.class}, (proxy, method, args) -> switch (method.getName()) {
@@ -210,6 +212,7 @@ public class BuilderModelRestorationTest {
         set(f.owner, "schematic", f.active); set(f.owner, "realSchematic", f.full);
         set(f.owner, "approxPlaceable", List.of());
         f.cost = allocate(BuilderProcess.BuilderCalculationContext.class);
+        set(f.cost, "fluidPlugSnapshot", new ExcavationFluidPlugs());
         set(f.cost, "this$0", f.owner); set(f.cost, "originX", ORIGIN.getX());
         set(f.cost, "originY", ORIGIN.getY()); set(f.cost, "originZ", ORIGIN.getZ());
         set(f.cost, "schematic", f.active); set(f.cost, "placeable", List.of());
@@ -247,10 +250,11 @@ public class BuilderModelRestorationTest {
     }
     private static class GameMode extends MultiPlayerGameMode implements IPlayerControllerMP {
         BlockPos target;
+        float damage;
         GameMode() { super(null,null); }
         @Override public BlockPos getCurrentBlock() { return target; }
         @Override public boolean isHittingBlock() { return true; }
-        @Override public float getDestroyProgress() { return 0.25F; }
+        @Override public float getDestroyProgress() { return damage; }
         @Override public void setIsHittingBlock(boolean value) { throw new AssertionError("accessor mutation"); }
         @Override public void callSyncCurrentPlayItem() { throw new AssertionError("accessor mutation"); }
         @Override public void setDestroyDelay(int delay) { throw new AssertionError("accessor mutation"); }

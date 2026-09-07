@@ -75,9 +75,11 @@ public final class PlatformTraverseFixture {
         });
         bot=proxy(IPrinceps.class,(name,args)->{
             if(name.equals("getPlayerContext")) return ctx;
+            if(name.equals("getPathingBehavior")) return pathing;
             throw new AssertionError("No other process: "+name);
         });
         builder=allocate(BuilderProcess.class);set(builder,"ctx",ctx);
+        set(builder,"breakBranchProgress",new BreakBranchProgress(120,100));
         pathing=allocate(princeps.behavior.PathingBehavior.class);
         var engine=allocate(princeps.Princeps.class);set(engine,"pathingBehavior",pathing);set(builder,"princeps",engine);
         var model=new AbstractSchematic(3,1,1) {

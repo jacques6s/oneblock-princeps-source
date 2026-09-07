@@ -112,8 +112,28 @@ public class BuilderCleanupOwnershipExecutionTest {
         assertEquals(BuilderCleanupDebt.State.REQUESTED, f.debt.state());
     }
 
+    @Test public void fourArgument222CallbackKeepsDebtFenceAndFansOutOneServerConfirmation() throws Exception {
+        Fixture f = fixture();
+        // This is the signature used by the unchanged 222 BlockPlaceHelper. The flag alone cannot adopt debt.
+        f.builder.recordNavigationScaffold(HELPER, Blocks.AIR.defaultBlockState(), Blocks.DIRT.defaultBlockState(), true);
+        assertFalse(f.ledger.awaitingServer());
+        ExcavationFluidPlugs plugs = (ExcavationFluidPlugs) read(f.builder, "excavationFluidPlugs");
+        plugs.record(HELPER, Blocks.WATER.defaultBlockState(), Blocks.DIRT.defaultBlockState(), 0);
+        assertTrue(plugs.unconfirmedBefore(1).isPresent());
+        f.builder.observeScaffoldServerChange(HELPER, Blocks.DIRT.defaultBlockState());
+        assertTrue(plugs.unconfirmedBefore(1).isEmpty());
+        assertEquals(1, plugs.size());
+        assertEquals(1L, read(f.builder, "confirmedProgressRevision"));
+        assertEquals(BuilderCleanupDebt.State.REQUESTED, f.debt.state());
+        assertFalse(f.ledger.owns(HELPER, Blocks.DIRT.defaultBlockState()));
+        f.builder.observeScaffoldServerChange(HELPER, Blocks.DIRT.defaultBlockState());
+        assertEquals("duplicate packets cannot rearm Home", 1L, read(f.builder, "confirmedProgressRevision"));
+    }
+
     private static Fixture fixture() throws Exception {
         BuilderProcess builder = allocate(BuilderProcess.class);
+        set(builder, "excavationFluidPlugs", new ExcavationFluidPlugs());
+        set(builder, "excavationRepairAim", new ExcavationRepairAim());
         Princeps owner = allocate(Princeps.class);
         ClientLevel world = allocate(ClientLevel.class);
         Object episode = allocator.allocateInstance(episodeType);
@@ -143,6 +163,7 @@ public class BuilderCleanupOwnershipExecutionTest {
         };
         set(builder, "schematic", model);
         var context = allocate(BuilderProcess.CleanupEscapeContext.class);
+        set(context, "fluidPlugSnapshot", new ExcavationFluidPlugs());
         set(context, "this$0", builder); set(context, "mineOnly", HELPER); set(context, "mineState", Blocks.DIRT.defaultBlockState());
         Field superclassOwner = BuilderProcess.BuilderCalculationContext.class.getDeclaredField("this$0");
         superclassOwner.setAccessible(true); superclassOwner.set(context, builder);
