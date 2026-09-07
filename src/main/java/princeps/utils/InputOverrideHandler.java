@@ -20,6 +20,8 @@ package princeps.utils;
 import princeps.Princeps;
 import princeps.api.PrincepsAPI;
 import princeps.api.event.events.TickEvent;
+import princeps.api.event.events.BlockChangeEvent;
+import princeps.api.event.events.WorldEvent;
 import princeps.api.utils.BetterBlockPos;
 import princeps.api.utils.IInputOverrideHandler;
 import princeps.api.utils.input.Input;
@@ -61,7 +63,9 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     public InputOverrideHandler(Princeps princeps) {
         super(princeps);
-        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext(), this::allowsMining);
+        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext(), this::allowsMining,
+                () -> princeps.getBuilderProcess() instanceof BuilderProcess builder
+                        && builder.mayRetryExcavationBreak());
         this.blockPlaceHelper = new BlockPlaceHelper(princeps);
     }
 
@@ -173,6 +177,17 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
     }
 
     @Override
+    public void onBlockChange(BlockChangeEvent event) {
+        event.getBlocks().forEach(change -> blockBreakHelper.observeServerChange(change.first(), change.second()));
+    }
+
+    @Override
+    public void onWorldEvent(WorldEvent event) {
+        blockBreakHelper.stopBreakingBlock();
+        blockBreakHelper.clearBlacklist();
+    }
+
+    @Override
     public final void onTick(TickEvent event) {
         observeMiningOwner(event.getType() == TickEvent.Type.OUT ? null
                 : princeps.getPathingControlManager().mostRecentInControl().orElse(null));
@@ -182,11 +197,11 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
         if (isInputForcedDown(Input.CLICK_LEFT)) {
             setInputForceState(Input.CLICK_RIGHT, false);
         }
-        // A blacklisted glitch block (kept re-appearing after breaking): stop forcing the attack so we never
-        // hammer it, AND so the bot's stuck detection (forcing forward but NOT attacking) can fire and route /
-        // RTP away instead of pinning against an unbreakable block forever.
+        // Suppress repeated server-restored blocks during their bounded cooldown. The guard reopens itself
+        // for a retry or an authoritative changed block, even when the builder retains the same target.
         if (isInputForcedDown(Input.CLICK_LEFT) && blockBreakHelper.isAimingAtBlacklisted()) {
             setInputForceState(Input.CLICK_LEFT, false);
+            blockBreakHelper.stopBreakingBlock();
         }
         // Pause block-breaking while auto-survival is consuming (eating / mending-repair): switching the main
         // hand to food or XP while the forced attack keeps hitting a block is the "mine and eat at once" glitch.

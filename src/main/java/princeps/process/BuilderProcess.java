@@ -4639,7 +4639,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 + ",sources=" + snakeFluidSourcesPlugged
                 + ",shell=" + snakeShellRepairs
                 + ",verificationPasses=" + snakeVerificationPasses
-                + ",verifiedBands=" + snakeVerifiedBands + "}";
+                + ",verifiedBands=" + snakeVerifiedBands + "} breakRetry={"
+                + princeps.getInputOverrideHandler().getBlockBreakHelper().breakRetryDiagnosis() + "}";
+    }
+
+    /** Bounded helper retries belong to the active excavation, never to a subsequent construction action. */
+    public boolean mayRetryExcavationBreak() {
+        return isActive() && excavating && !paused && abortPending == Ending.RUNNING
+                && princeps.getPathingControlManager().mostRecentInControl().orElse(null) == this;
     }
 
     /**
