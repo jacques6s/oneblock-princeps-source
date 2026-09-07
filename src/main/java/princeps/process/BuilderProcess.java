@@ -5708,10 +5708,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 + candidate.pos().y + "," + candidate.pos().z));
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
-            if (excavating && !princeps.getInventoryBehavior().throwaway(true,
-                    stack -> stack.getItem() == fill.getBlock().asItem())) {
-                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
-            }
             ExcavationRepairAim.Face heldFace = excavating
                     ? excavationRepairAim.heldFace(ctx.world(), candidate.pos()).orElse(null) : null;
             if (heldFace != null && (!heldFace.targetState().equals(ctx.world().getBlockState(candidate.pos()))
@@ -5723,9 +5719,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // A different face that happens to sort first is not a reason to abandon a valid ongoing aim.
             java.util.function.Predicate<Placement> repairFaceFilter = excavating
                     ? placement -> excavationRepairFaceReady(placement, candidate, bounds, bcc) : null;
-            Optional<Placement> option = possibleToPlace(fill, candidate.pos().x, candidate.pos().y,
-                    candidate.pos().z, bcc, heldFace, repairFaceFilter);
-            if (option.isEmpty()) {
+            Optional<Placement> option = possibleIntegrityPlacement(fill, candidate.pos(), bcc, heldFace, repairFaceFilter);
+            if (!excavating && option.isEmpty()) {
                 Item wanted = fill.getBlock().asItem();
                 boolean alreadyOnHotbar = false;
                 for (int slot = 0; slot < 9; slot++) {
@@ -5742,13 +5737,37 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             if (option.isEmpty() && heldFace != null) {
                 excavationRepairAim.clear();
-                option = possibleToPlace(fill, candidate.pos().x, candidate.pos().y, candidate.pos().z, bcc,
-                        null, repairFaceFilter);
+                option = possibleIntegrityPlacement(fill, candidate.pos(), bcc, null, repairFaceFilter);
             }
-            if (option.isPresent()) return snakeIntegrityPlacementClick(option.get(), candidate, bcc);
+            if (option.isPresent()) {
+                // The scan may encounter a shell gap before it is placeable. Only an admitted repair owns the
+                // hand: selecting filler on a failed candidate then falling through makes mining reselect its
+                // pickaxe every tick and trips the tool-conflict watchdog against our own repair scan.
+                if (excavating && !princeps.getInventoryBehavior().throwaway(true,
+                        stack -> stack.getItem() == fill.getBlock().asItem())) {
+                    return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+                }
+                return snakeIntegrityPlacementClick(option.get(), candidate, bcc);
+            }
         }
         excavationRepairAim.clear();
         return null;
+    }
+
+    /** Prove the actual placement with available stock before borrowing the hand or refilling slot six. */
+    private Optional<Placement> possibleIntegrityPlacement(BlockState fill, BetterBlockPos target,
+                                                           BuilderCalculationContext bcc,
+                                                           ExcavationRepairAim.Face requiredFace,
+                                                           java.util.function.Predicate<Placement> faceFilter) {
+        if (!excavating) return possibleToPlace(fill, target.x, target.y, target.z, bcc, requiredFace, faceFilter);
+        var stock = ctx.player().getInventory().getNonEquipmentItems();
+        int source = ExcavationFiller.source(stock, stack -> stack.getItem() == fill.getBlock().asItem(),
+                Princeps.settings().allowInventory.value);
+        if (source < 0) return Optional.empty();
+        // This planned slot is executable only after throwaway verifies the real swap/stack. The geometry uses
+        // the same vanilla item simulation and live face filter as ordinary placement; no world rule is bypassed.
+        return possibleToPlace(fill, target.x, target.y, target.z, bcc, requiredFace, faceFilter, null,
+                stock.get(source));
     }
 
     private boolean excavationRepairFaceReady(Placement placement, SnakeRepair candidate,
@@ -8399,6 +8418,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
                                                 ExcavationRepairAim.Face requiredFace,
                                                 java.util.function.Predicate<Placement> faceFilter, int[] rejected) {
+        return possibleToPlace(toPlace, x, y, z, bcc, requiredFace, faceFilter, rejected, null);
+    }
+
+    private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
+                                                ExcavationRepairAim.Face requiredFace,
+                                                java.util.function.Predicate<Placement> faceFilter, int[] rejected,
+                                                ItemStack plannedFiller) {
         BlockStateInterface bsi = bcc.bsi;
         for (Direction against : supportDirectionsFor(toPlace)) {
             BetterBlockPos placeAgainstPos = new BetterBlockPos(x, y, z).relative(against);
@@ -8429,7 +8455,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 Rotation actualRot = princeps.getLookBehavior().getAimProcessor().peekRotationExact(rot);
                 HitResult result = RayTraceUtils.rayTraceTowards(ctx.player(), actualRot, ctx.playerController().getBlockReachDistance(), true);
                 if (result != null && result.getType() == HitResult.Type.BLOCK && ((BlockHitResult) result).getBlockPos().equals(placeAgainstPos) && ((BlockHitResult) result).getDirection() == against.getOpposite()) {
-                    OptionalInt hotbar = hasAnyItemThatWouldPlace(toPlace, result, actualRot, x, y, z, bcc);
+                    OptionalInt hotbar = plannedFiller == null
+                            ? hasAnyItemThatWouldPlace(toPlace, result, actualRot, x, y, z, bcc)
+                            : placementResultAccepted(simulatePlacement(plannedFiller, (BlockHitResult) result, actualRot),
+                                    toPlace, x, y, z, bcc) ? OptionalInt.of(ExcavationFiller.SLOT) : OptionalInt.empty();
                     if (hotbar.isPresent()) {
                         Placement option = new Placement(hotbar.getAsInt(), placeAgainstPos, against.getOpposite(), rot,
                                 positionKey(ctx.playerFeet()), new BetterBlockPos(x, y, z), toPlace);
@@ -13977,11 +14006,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     java.util.List.of("First missing floor cell: " + floor.x + "," + floor.y + "," + floor.z));
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
-        if (excavating && !princeps.getInventoryBehavior().throwaway(true,
-                stack -> stack.getItem() == fill.getBlock().asItem())) {
-            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
-        }
-        Optional<Placement> option = possibleToPlace(fill, floor.x, floor.y, floor.z, bcc);
+        Optional<Placement> option = possibleIntegrityPlacement(fill, floor, bcc, null, null);
         if (option.isEmpty()) {
             Item wanted = fill.getBlock().asItem();
             boolean alreadyOnHotbar = false;
@@ -13991,12 +14016,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     break;
                 }
             }
-            if (!alreadyOnHotbar) {
+            if (!excavating && !alreadyOnHotbar) {
                 princeps.getInventoryBehavior().throwaway(true,
                         stack -> !stack.isEmpty() && stack.getItem() == wanted);
             }
             snakeDiagnosis = "t=" + buildTick + " AutoDig waits to bridge " + floor.x + "," + floor.y + ","
                     + floor.z + " from the current corridor edge";
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        if (excavating && !princeps.getInventoryBehavior().throwaway(true,
+                stack -> stack.getItem() == fill.getBlock().asItem())) {
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
         return snakeIntegrityPlacementClick(option.get(),
