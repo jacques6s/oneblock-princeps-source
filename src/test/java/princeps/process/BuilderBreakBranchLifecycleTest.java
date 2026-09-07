@@ -23,6 +23,7 @@ public class BuilderBreakBranchLifecycleTest {
     @Test
     public void replacingAPausedJobDropsItsYieldAndUnobservedRemoval() throws Exception {
         BuilderProcess builder = headlessBuilder();
+        install(builder, "progressWatch", new princeps.process.builder.BuilderProgressWatch(5, 60, 2));
         BreakBranchProgress progress = new BreakBranchProgress(120, 100);
         BreakTargetObservation observation = new BreakTargetObservation();
         install(builder, "breakBranchProgress", progress);
@@ -63,6 +64,29 @@ public class BuilderBreakBranchLifecycleTest {
         assertFalse(progress.shouldYield(true, BlockPos.ZERO, 0.6F));
         assertEquals("the next job must acquire its own consecutive damage history", 1,
                 progress.nonProgressTicks());
+    }
+
+    @Test public void realDamageSamplingStillPassesThroughModelGuardBeforeThe222Watchdog() throws Exception {
+        BuilderModelRestorationTest.bootstrap();
+        var f=BuilderModelRestorationTest.fixture(Blocks.AIR.defaultBlockState(),false);
+        var target=BuilderModelRestorationTest.TARGET;
+        f.world.states.put(target.asLong(),Blocks.DIRT.defaultBlockState());
+        BreakBranchProgress progress=new BreakBranchProgress(2,4);
+        for(int i=0;i<4;i++){
+            BuilderModelRestorationTest.set(f.ctx.minecraft().gameMode,"damage",0.2F+i*0.2F);
+            f.tickMining();progress.beginTick(false,false,false);
+            float actual=f.mining.breakingProgressAt(target);
+            assertEquals(0.2F+i*0.2F,actual,0.0001F);
+            assertFalse(progress.shouldYield(true,target,actual));
+        }
+        assertEquals(4,f.damage.get());
+        assertEquals(1,progress.nonProgressTicks());
+        f.world.unloaded=true;
+        assertTrue(Float.isNaN(f.mining.breakingProgressAt(target)));
+        var protectedCell=BuilderModelRestorationTest.fixture(Blocks.GLASS.defaultBlockState(),true);
+        protectedCell.tickMining();
+        assertEquals(0,protectedCell.damage.get());
+        assertTrue(Float.isNaN(protectedCell.mining.breakingProgressAt(target)));
     }
 
     private static void install(BuilderProcess builder, String name, Object value) throws Exception {

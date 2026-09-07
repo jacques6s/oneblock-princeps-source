@@ -107,6 +107,8 @@ public final class SurvivalBehavior extends Behavior {
             return;
         }
 
+        if (suspendForBuilderHome(p)) return;
+
         final boolean navigationActive = princeps.getPathingBehavior().isPathing()
                 || princeps.getPathingControlManager().mostRecentInControl()
                         .map(process -> process.isActive()).orElse(false);
@@ -252,6 +254,17 @@ public final class SurvivalBehavior extends Behavior {
      */
     public boolean isConsuming() {
         return this.eatRestoreSlot >= 0 || this.repairing;
+    }
+
+    /** Suspend only this builder's owned Home transaction; ordinary supply pauses and other owners are unchanged. */
+    boolean suspendForBuilderHome(LocalPlayer player) {
+        if (!(princeps.getPathingControlManager().mostRecentInControl().orElse(null)
+                instanceof princeps.process.BuilderProcess builder)
+                || !builder.homeRecoveryHoldsUse()) return false;
+        if (eatRestoreSlot >= 0) finishEat(player, player == eatPlayer);
+        if (repairing) cancelRepair(player);
+        holdUseKey(false);
+        return true;
     }
 
     // ─────────────────────────────────────── TOTEM ───────────────────────────────────────

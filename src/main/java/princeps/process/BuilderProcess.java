@@ -47,11 +47,15 @@ import princeps.pathing.movement.CalculationContext;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.MovementOption;
+import princeps.pathing.movement.movements.MovementDownward;
+import princeps.pathing.movement.movements.MovementTraverse;
 import princeps.pathing.path.PathExecutor;
 import princeps.process.builder.BlockItemPlacementHelper;
 import princeps.process.builder.ActionJournal;
 import princeps.process.builder.BuildTrace;
 import princeps.process.builder.CellWatch;
+import princeps.process.builder.BuilderProgressWatch;
+import princeps.process.builder.ConfirmedBuildActions;
 
 import princeps.process.builder.PlacementTargetLock;
 import net.minecraft.world.level.pathfinder.PathComputationType;
@@ -622,7 +626,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private String lastExcavationRepairAimTrace;
     private long lastExcavationRepairAimTraceTick;
     private ExcavationFluidPlugs.Hazard blockedFluidPlugThisTick;
+    private volatile CleanupEscape cleanupEscape;
+    /** Retained on stop/new job: clearing working sets is not server-confirmed removal. */
+    private volatile BuilderCleanupDebt cleanupEscapeDebt;
+    /** Local observation fence for the existing server-packet callback, not a claim of a protocol action id. */
+    private long cleanupServerUpdateSequence;
+    private final Set<Long> cleanupEscapeAttemptedOwners = new HashSet<>();
     private boolean scaffoldCleanupActive;
+    /** Uses the existing cleanup target ledger while retaining the ordinary working layer mask. */
+    private boolean layerCleanupActive;
     private final Set<Long> scaffoldCleanupTargets = new HashSet<>();
     /** Die geparkte Zelle, die sie freimachen soll. */
     private BetterBlockPos scaffoldServes;
@@ -729,10 +741,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  target-bound stance recovery; another cell cannot steal ownership and reset the recovery history. */
     private final PlacementTargetLock<Placement> placementTargetLock =
             new PlacementTargetLock<>(AIM_RECOVERY_TICKS, ROUTE_NO_CLOSER_TICKS, ROUTE_DEADLINE_TICKS);
-    /** Build tick the current placement target was committed on, for {@link #TARGET_LOCK_MAX_HELD_TICKS}. */
-    private long placementTargetAcquiredTick = -1L;
     /** Build tick a cell most recently became correct — the one clock a stuck builder cannot stop. */
     private long lastCellCompletedTick;
+
+    private final BuilderProgressWatch progressWatch = new BuilderProgressWatch(
+            java.util.concurrent.TimeUnit.SECONDS.toNanos(5), java.util.concurrent.TimeUnit.SECONDS.toNanos(60), 2.0);
+    private long confirmedProgressRevision;
+    private final ConfirmedBuildActions<BlockState> progressActions = new ConfirmedBuildActions<>((state, expected) -> valid(state, expected, false));
+    private PathExecutor progressExecutor;
+    private Object progressRoute;
+    private Long progressRouteTarget;
+    private List<BetterBlockPos> progressRoutePositions = java.util.List.of();
+    private int progressRoutePosition = -1;
+    private BuilderProgressWatch.Phase progressPhase;
+    private boolean progressHold;
+    private Goal electedGoal;
 
     /**
      * The block the builder most recently had to take back out, so the reserved tool slot can hold the right tool.
@@ -904,6 +927,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         BuildTrace.cell(buildTick, "PARK", pos.x, pos.y, pos.z, "reason=" + reason);
     }
 
+    /** The active window has run dry; release its parks for the existing recalculation path. */
+    private void releaseParkedCellsForRetry() {
+        for (long key : parkedCells.keySet()) {
+            forgetCellVerdict(key);
+        }
+        parkedCells.clear();
+    }
+
+    /** A released cell must not keep a negative memo or a cached failed stance from its old park. */
+    private void forgetCellVerdict(long key) {
+        cellVerdicts.remove(key);
+        orientedGoalCache.remove(key);
+    }
+
     /**
      * Der Waechter. Laeuft nach JEDER erfolgreichen Platzierung und weckt die geparkten Nachbarn der Zelle, die
      * sich gerade veraendert hat -- in beide Richtungen, denn "weggefallen" zaehlt genauso wie "neu entstanden".
@@ -937,6 +974,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     continue;
                 }
                 it.remove();
+                forgetCellVerdict(positionKey(parked.pos));
                 activeCells.add(parked.pos);
                 released++;
                 cellsWokenByWatchman++;
@@ -955,10 +993,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 continue;
             }
             long now = clickableFaceMask(nx, ny, nz);
-            if (now == parked.faceMaskWhenParked) {
-                continue;   // der Nachbar hat sich geaendert, die Flaechenlage dieser Zelle aber nicht
+            if (now == parked.faceMaskWhenParked && parked.reason != ParkReason.NO_FACE) {
+                continue;   // the geometry verdict still has the same face set
             }
+            // Missing support can become usable without changing the coarse face mask
+            // (for example a non-supporting neighbour replaced by a supporting block).
             parkedCells.remove(key);
+            forgetCellVerdict(key);
             // Einfach zurueck in die Menge. Wo sie landet, entscheidet der Abstand bei der naechsten Auswahl --
             // siehe activeCells. Kein Vordraengeln, keine Sonderbehandlung.
             activeCells.add(parked.pos);
@@ -982,7 +1023,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     parkedCells.remove(key);
                     // The face mask may be identical even though a new floor/stance appeared. Without removing the
                     // paired memo, searchForPlacables immediately skips the just-woken cell as the old verdict.
-                    cellVerdicts.remove(key);
+                    forgetCellVerdict(key);
                     activeCells.add(parked.pos);
                     cellsWokenByWatchman++;
                     BuildTrace.cell(buildTick, "WAKE-ROW-STANCE", parked.pos.x, parked.pos.y, parked.pos.z,
@@ -1181,6 +1222,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return;
         }
         abortPending = how;
+        supportRepair = null;
         abortPendingHeadline = headline;
         abortPendingDetail = detail == null ? java.util.Collections.emptyList() : new ArrayList<>(detail);
         BuildTrace.cell(buildTick, "ABORT-REQUESTED", origin == null ? 0 : origin.getX(),
@@ -1262,6 +1304,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** Ticks spent waiting for the aim to settle on the current placement, so the wait can never be unbounded. */
     private int aimSettleWaitTicks;
     private BetterBlockPos plannedPlacementStance;
+    /** One existing platform, one permanent target; retained while the sneak step crosses the cell boundary. */
+    private PlatformTraverseApproach platformTraverseApproach;
+
+    private record PlatformTraverseApproach(Object world, Object player, ISchematic model, Vec3i origin,
+                                             BetterBlockPos from, BetterBlockPos target,
+                                             BlockState support, BlockState wanted, Goal goal) { }
+    /** Travels with the actual immutable path, even while a newer command is cancelling that path. */
+    private static final class PlatformTraverseGoal extends GoalBlock {
+        private PlatformTraverseGoal(BlockPos destination) { super(destination); }
+    }
     private int placementCenteringTicks;
     private int placementCenterSettleTicks;
     private Placement pendingPlacementRequest;
@@ -1310,6 +1362,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * proven stance -- never by the bot having moved.
      */
     private BetterBlockPos electedCell;
+    /** Removal work owns navigation too, but never asks the placement/hotbar oracle to place AIR. */
+    private boolean electedBreak;
     /**
      * TWO PASSES, and this is which one we are in: false = walk only, true = building permitted.
      *
@@ -1457,20 +1511,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private static final int MAX_STANCES_EVALUATED_PER_CALL = 145;
     /** How many search passes a cell is held back for sealing a hanging neighbour before the wall wins anyway. */
     private static final int SEAL_HOLD_TICKS = 200;
-    /**
-     * Hard ceiling on how long ONE cell may own the placement lock before the lock is torn off it.
-     *
-     * <p>This is a backstop, not a schedule. Every individual phase inside {@link PlacementTargetLock} is already
-     * bounded -- aim, route, centering -- and yet the builder still froze for 1740 ticks on a lighthouse wall with not
-     * one line of log output, because a path that returned {@code CANCEL_AND_SET_GOAL} every tick charged none of
-     * those counters and never reached the code that reports a stall. Bounding each phase is not the same as bounding
-     * the whole, and only the whole is what a user experiences.
-     *
-     * <p>So: no matter which branch is spinning, no matter what future branch is added, a target that has not produced
-     * a placement in this many ticks loses the lock and the cell is deferred. Generous on purpose -- a legitimate walk
-     * across a large schematic must never trip it -- but finite, which is the entire point.
-     */
-    private static final int TARGET_LOCK_MAX_HELD_TICKS = 400;
     /**
      * Deferrals one cell gets before it is retired for this sweep.
      *
@@ -1935,16 +1975,226 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     public void resume() {
+        // A token-owned hold may only be resumed through its validated relocation boundary.
+        if (homeRecovery != null) return;
+        if (paused && scaffoldMaterialPausedAt != null) {
+            if (scaffoldMaterialTarget != null) scaffoldMaterialWaitStarted += Math.max(0, buildTick - scaffoldMaterialPausedAt);
+            scaffoldMaterialPausedAt = null;
+        }
         paused = false;
     }
 
     public void pause() {
+        if (!paused && scaffoldMaterialTarget != null) scaffoldMaterialPausedAt = buildTick;
         paused = true;
+        platformTraverseApproach = null;
+        supportRepair = null;
+        progressWatch.pause();
     }
 
     @Override
     public boolean isPaused() {
         return paused;
+    }
+
+    // Optional concrete capability; it deliberately adds nothing to the shared release API.
+    private boolean homeRecoveryEnabled;
+    private long homeRecoverySequence;
+    private long homeRecoveryAttemptRevision = Long.MIN_VALUE;
+    private HomeRecovery homeRecovery;
+    private Goal homeFailedRoute;
+    private BetterBlockPos homeFailedTarget;
+    private long homeFailedRevision = Long.MIN_VALUE;
+    private static final long HOME_QUIESCE_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+
+    private final class HomeRecovery {
+        final long id = ++homeRecoverySequence;
+        final Object world = ctx.world(), player = ctx.player();
+        final ISchematic model = supportModelForDependencies();
+        final Vec3i buildOrigin = new Vec3i(origin.getX(), origin.getY(), origin.getZ());
+        final long deadline;
+        String state = "QUIESCING";
+        boolean initiallyQuiesced;
+        Vec3 restingPosition;
+        int restingTicks;
+        HomeRecovery(long now) { deadline = now + HOME_QUIESCE_NANOS; }
+        boolean current() {
+            return isActive() && !excavating && !buildInRows && world == ctx.world() && player == ctx.player()
+                    && model == supportModelForDependencies() && buildOrigin.equals(origin);
+        }
+    }
+
+    public void setHomeRecoveryEnabled(boolean enabled) {
+        homeRecoveryEnabled = enabled;
+        if (!enabled && homeRecovery != null) failHomeRecovery(homeRecovery.id);
+    }
+
+    public String homeRecoveryState() {
+        HomeRecovery hold = homeRecovery;
+        if (hold != null && (!hold.current() || !homeRecoveryOwnsPlayer())) hold.state = "FAILED";
+        return hold == null ? (homeRecoveryEnabled ? "IDLE" : "DISABLED") : hold.state;
+    }
+
+    public long homeRecoveryRequestId() { return homeRecovery == null ? 0 : homeRecovery.id; }
+
+    public void failHomeRecovery(long id) {
+        HomeRecovery hold = homeRecovery;
+        if (hold == null || hold.id != id) return;
+        hold.state = "FAILED";
+        if (hold.current()) pause(); // no teardown, no release of the attempt budget
+    }
+
+    /** Exact current-owner boundary also used by SurvivalBehavior; never suppress another process's use. */
+    public boolean homeRecoveryHoldsUse() {
+        return homeRecovery != null && homeRecovery.current() && homeRecoveryOwnsPlayer();
+    }
+
+    private boolean homeRecoveryOwnsPlayer() {
+        return princeps.getPathingControlManager().mostRecentInControl().orElse(null) == this;
+    }
+
+    private boolean homeRecoveryHasAcknowledgement() {
+        return pendingPlacementRequest != null || lastPlacedCell != null || navigationScaffolds.awaitingServer()
+                || scaffoldCleanupAwaitingServer()
+                || cleanupEscapeDebt != null && !cleanupEscapeDebt.discharged();
+    }
+
+    private boolean exhaustedUnplacedCleanup() {
+        return cleanupEscape != null && cleanupEscape.stage == CleanupStage.BLOCKED && !cleanupEscape.placed
+                && "finite helper candidates exhausted".equals(cleanupEscape.blockedReason)
+                && !cleanupEscape.probe.isRunning();
+    }
+
+    /** Invoked only by this process's real STOP decision, before its ordinary terminal teardown. */
+    boolean beginHomeRecovery(BuilderProgressWatch.Phase phase, long now) {
+        if (!homeRecoveryEnabled || homeRecovery != null || paused || !isActive() || excavating || buildInRows
+                || phase != BuilderProgressWatch.Phase.WORK || homeRecoveryHasAcknowledgement()
+                || scaffoldMaterialTarget != null
+                || homeRecoveryAttemptRevision == confirmedProgressRevision || ctx.world() == null || ctx.player() == null
+                || !ctx.world().hasChunkAt(ctx.playerFeet())) return false;
+        boolean exhausted = exhaustedUnplacedCleanup();
+        if (cleanupEscape != null && !exhausted) return false;
+        Goal actualGoal = princeps.getPathingBehavior().getGoal();
+        BetterBlockPos actualTarget = committedPlaceTarget != null ? committedPlaceTarget : electedCell;
+        boolean failedRoute = homeFailedRoute != null && homeFailedRevision == confirmedProgressRevision
+                && Objects.equals(homeFailedRoute, actualGoal) && Objects.equals(homeFailedTarget, actualTarget);
+        boolean negativeLane = laneAProof != null && laneQuestionCurrent(laneAProof, electedGoal, true);
+        if (!exhausted && !failedRoute && !negativeLane) return false;
+        if (actualTarget != null && !ctx.world().hasChunkAt(actualTarget)) return false;
+        if (exhausted) {
+            cleanupEscape.probe.cancel();
+            cleanupEscape = null; // only a terminal, unplaced episode; retain attempted owners and every debt/ledger
+        }
+        homeRecoveryAttemptRevision = confirmedProgressRevision;
+        homeRecovery = new HomeRecovery(now);
+        pause();
+        discardLaneQuestion();
+        laneAProof = null;
+        laneEscalatedCell = null;
+        laneBAnswered = false;
+        supportRepair = null;
+        BuildTrace.cell(buildTick, "HOME-QUIESCING", origin.getX(), origin.getY(), origin.getZ(),
+                "id=" + homeRecovery.id + " confirmedWorldChanges=" + confirmedProgressRevision);
+        return true;
+    }
+
+    private boolean homeRouteEmpty() {
+        var pathing = princeps.getPathingBehavior();
+        return pathing.getCurrent() == null && pathing.getNext() == null && pathing.getInProgress().isEmpty();
+    }
+
+    private boolean homeBodyAtRest() {
+        var player = ctx.player();
+        BetterBlockPos feet = ctx.playerFeet();
+        return ctx.world().hasChunkAt(feet) && ctx.world().hasChunkAt(feet.below())
+                && ctx.world().hasChunkAt(feet.above()) && player.onGround() && !player.isUsingItem()
+                && !player.isInWater() && !player.isInLava() && !player.isPassenger() && !player.isFallFlying()
+                && player.getDeltaMovement().horizontalDistanceSqr() < 0.000001
+                && Math.abs(player.getDeltaMovement().y) < 0.1
+                && ctx.world().noCollision(player);
+    }
+
+    /** Actual owned tick: an unsafe movement may finish, but READY never exposes that unfinished movement. */
+    PathingCommand advanceHomeRecovery(long now) {
+        HomeRecovery hold = homeRecovery;
+        if (hold == null) return null;
+        progressHold = true;
+        if (!hold.current()) { hold.state = "FAILED"; return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL); }
+        if (!hold.initiallyQuiesced && now >= hold.deadline) hold.state = "FAILED";
+        var pathing = princeps.getPathingBehavior();
+        if (!pathing.cancelSegmentIfSafe()) {
+            return continueCurrentRoute(pathing.getGoal(), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        }
+        var input = princeps.getInputOverrideHandler();
+        input.clearAllKeys();
+        input.getBlockBreakHelper().stopBreakingBlock();
+        input.getBlockPlaceHelper().clearExpectedPlacement();
+        // Survival runs later under the actual selected owner. READY requires that teardown to have completed.
+        if (!homeRouteEmpty() || homeRecoveryHasAcknowledgement()
+                || princeps.getSurvivalBehavior().isConsuming() || !homeBodyAtRest()
+                || ctx.minecraft().options.keyUse.isDown() || ctx.minecraft().options.keyAttack.isDown()) {
+            hold.restingTicks = 0;
+            hold.restingPosition = null;
+            if ("READY".equals(hold.state)) hold.state = "QUIESCING";
+        } else if (!"FAILED".equals(hold.state)) {
+            Vec3 position = ctx.player().position();
+            hold.restingTicks = hold.restingPosition != null && hold.restingPosition.distanceToSqr(position) < 0.000001
+                    ? hold.restingTicks + 1 : 1;
+            hold.restingPosition = position;
+            if (hold.restingTicks >= 2) {
+                hold.initiallyQuiesced = true;
+                hold.state = "READY";
+            }
+        }
+        return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+    }
+
+    public boolean resumeAfterHomeRecovery(long id) {
+        HomeRecovery hold = homeRecovery;
+        if (hold == null || hold.id != id || !homeRecoveryEnabled || !"READY".equals(homeRecoveryState())
+                || !hold.current() || !homeRecoveryOwnsPlayer() || !homeRouteEmpty() || !homeBodyAtRest()
+                || princeps.getSurvivalBehavior().isConsuming() || homeRecoveryHasAcknowledgement()
+                || ctx.minecraft().options.keyUse.isDown() || ctx.minecraft().options.keyAttack.isDown()) return false;
+        // Client has established the server-confirmed landing. Invalidate executable permissions, not the build.
+        releasePlacementTarget();
+        discardLaneQuestion();
+        laneAProof = null;
+        laneEscalatedCell = null;
+        laneBAnswered = false;
+        electedGoal = null;
+        orientedGoalCache.clear();
+        // A negative route search was about the departure position. Local support/stance facts still apply.
+        var parks = parkedCells.entrySet().iterator();
+        while (parks.hasNext()) {
+            var entry = parks.next();
+            if (entry.getValue().reason != ParkReason.UNREACHABLE) continue;
+            BetterBlockPos pos = entry.getValue().pos;
+            forgetCellVerdict(entry.getKey());
+            parks.remove();
+            activeCells.add(pos);
+            if (incorrectPositions != null) incorrectPositions.add(pos);
+        }
+        supportRepair = null;
+        progressActions.clear();
+        // A confirmed relocation ends the old break branch's yield/damage/claim history, not a world action.
+        resetBreakBranchTracking();
+        resetNavigationProgressTracking();
+        progressExecutor = null;
+        progressRoute = null;
+        progressRouteTarget = null;
+        progressRoutePositions = List.of();
+        progressRoutePosition = -1;
+        homeFailedRoute = null;
+        homeFailedTarget = null;
+        // One explicit relocation grace period. It grants no confirmed world revision and cannot rearm Home.
+        progressWatch.reset();
+        homeRecoveryAttemptRevision = confirmedProgressRevision;
+        homeRecovery = null;
+        resume();
+        progressHold = false;
+        BuildTrace.cell(buildTick, "HOME-RESUMED", origin.getX(), origin.getY(), origin.getZ(),
+                "id=" + id + " fresh route required; confirmedWorldChanges=" + confirmedProgressRevision);
+        return true;
     }
 
     @Override
@@ -2028,6 +2278,130 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     @Override
     public boolean isActive() {
         return schematic != null;
+    }
+
+    private BlockPos lastSupportRefusal;
+    private BlockPos lastSupportDependent;
+    private BuilderSupportDependencies.Reason lastSupportRefusalReason;
+    private record SupportRepair(BlockPos target, BlockState state, Object world, Object player,
+                                 ISchematic model, long tick) {}
+    private SupportRepair supportRepair;
+
+    /** The full model bound to a particular search, retained by its executor even after pause/owner handover. */
+    public static final class ModelProtection {
+        private final BuilderProcess owner;
+        private final ISchematic model;
+        private final Vec3i origin;
+        private final Object world, player;
+        private final List<BlockState> stock;
+
+        ModelProtection(BuilderProcess owner, ISchematic model, Vec3i origin,
+                        Object world, Object player, List<BlockState> stock) {
+            this.owner = owner;
+            this.model = model;
+            this.origin = new Vec3i(origin.getX(), origin.getY(), origin.getZ());
+            this.world = world;
+            this.player = player;
+            this.stock = List.copyOf(stock);
+        }
+
+        public boolean sameBinding(ModelProtection other) {
+            return other != null && owner == other.owner && model == other.model
+                    && origin.equals(other.origin) && world == other.world && player == other.player && stock.equals(other.stock);
+        }
+
+        public boolean allowsRemoval(BlockPos target, princeps.api.utils.IPlayerContext context,
+                                     princeps.api.process.IPrincepsProcess controlling,
+                                     java.util.function.BooleanSupplier continuing) {
+            if (context.world() != world || context.player() != player) return false;
+            BlockState repairing = null;
+            if (controlling == owner && owner.isActive() && !owner.paused && !owner.excavating
+                    && owner.supportModelForDependencies() == model && origin.equals(owner.origin)) {
+                SupportRepair repair = owner.supportRepair;
+                boolean held = repair != null && repair.tick() != owner.buildTick && continuing.getAsBoolean();
+                repairing = owner.selectedSupportRepairState(target, model, world, player, held);
+            }
+            // A planning BSI is a snapshot. Re-read the actual world at the final crosshair boundary.
+            return BuilderSupportDependencies.currentWorld(model, origin, stock, context.world())
+                    .removal(target, repairing).allowed();
+        }
+    }
+
+    private BlockState selectedSupportRepairState(BlockPos target, ISchematic model,
+                                                  Object world, Object player, boolean continuing) {
+        SupportRepair repair = supportRepair;
+        return repair != null && (repair.tick() == buildTick || repair.tick() == buildTick - 1 && continuing)
+                && repair.target().equals(target) && repair.world() == world && repair.player() == player
+                && repair.model() == model ? repair.state() : null;
+    }
+
+    /** A temporary process can take control without onLostControl; its mining is not this repair's continuation. */
+    public void revokeSupportRepair() {
+        supportRepair = null;
+        if (homeRecovery != null) failHomeRecovery(homeRecovery.id);
+    }
+
+    /** Called only after the ordinary direct repair branch has selected and aimed a break-and-replace action. */
+    void selectSupportRepair(BlockPos target, BlockState current, BlockState wanted) {
+        supportRepair = wanted != null && current != wanted && interactionClicks(current, wanted) < 0
+                ? new SupportRepair(target.immutable(), current, ctx.world(), ctx.player(),
+                        supportModelForDependencies(), buildTick) : null;
+    }
+
+    /** Shared with the navigation cost policy, applied to the real crosshair immediately before mining. */
+    public boolean allowsSupportRemoval(BlockPos target) {
+        if (platformRouteForbidsMining(princeps.getPathingBehavior().getCurrent())) return false;
+        if (!isActive() || paused || excavating) { supportRepair = null; return true; }
+        if (platformTraverseApproach != null) return false; // same no-break contract as the one-step route
+        boolean continuing = supportRepair != null && supportRepair.tick() != buildTick
+                && princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock();
+        return allowsSupportRemoval(target, BuilderSupportDependencies.currentWorld(supportModelForDependencies(), origin,
+                approxPlaceable == null ? Collections.emptyList() : approxPlaceable, ctx.world()), continuing);
+    }
+
+    /** An unsafe-to-cancel edge route can outlive its owner; its no-mining contract lasts until that route ends. */
+    public static boolean platformRouteForbidsMining(PathExecutor executing) {
+        return executing != null && executing.getPath().getGoal() instanceof PlatformTraverseGoal;
+    }
+
+    boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks) {
+        return allowsSupportRemoval(target, blocks, false);
+    }
+
+    boolean allowsSupportRemoval(BlockPos target, BlockStateInterface blocks, boolean controllerContinuingSameBlock) {
+        if (!isActive() || paused || excavating) { supportRepair = null; return true; }
+        return allowsSupportRemoval(target, new BuilderSupportDependencies(supportModelForDependencies(), origin,
+                approxPlaceable == null ? Collections.emptyList() : approxPlaceable, blocks, ctx.world()), controllerContinuingSameBlock);
+    }
+
+    private boolean allowsSupportRemoval(BlockPos target, BuilderSupportDependencies policy, boolean controllerContinuingSameBlock) {
+        if (platformTraverseApproach != null) return false;
+        ISchematic full = supportModelForDependencies();
+        SupportRepair repair = supportRepair;
+        BlockState repairing = selectedSupportRepairState(target, full, ctx.world(), ctx.player(), controllerContinuingSameBlock);
+        supportRepair = repairing == null ? null : new SupportRepair(repair.target(), repair.state(), repair.world(),
+                repair.player(), repair.model(), buildTick);
+        BuilderSupportDependencies.Decision decision = policy.removal(target, repairing);
+        if (!decision.allowed() || repairing != null && ctx.world().getBlockState(target) != repairing) supportRepair = null;
+        if (decision.allowed()) {
+            lastSupportRefusal = null;
+            lastSupportDependent = null;
+            lastSupportRefusalReason = null;
+        }
+        if (!decision.allowed() && (!target.equals(lastSupportRefusal)
+                || decision.reason() != lastSupportRefusalReason
+                || !Objects.equals(decision.dependent(), lastSupportDependent))) {
+            lastSupportRefusal = target.immutable();
+            lastSupportDependent = decision.dependent();
+            lastSupportRefusalReason = decision.reason();
+            BuildTrace.cell(buildTick, "SUPPORT-PROTECTED", target.getX(), target.getY(), target.getZ(),
+                    "reason=" + decision.reason() + " dependent=" + decision.dependent());
+        }
+        return decision.allowed();
+    }
+
+    ISchematic supportModelForDependencies() {
+        return realSchematic == null ? schematic : realSchematic;
     }
 
     public BlockState placeAt(int x, int y, int z, BlockState current) {
@@ -2232,6 +2606,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     public void recordNavigationScaffold(BlockPos pos, BlockState before, BlockState after,
                                          boolean excavationIntegrity) {
+        if (isActive()) progressActions.arm(positionKey(pos), before, after);
+        // BlockPlaceHelper calls here at local SUCCESS, before publishing its receipt. The escape's OWNED
+        // phase alone transfers this one request to the ordinary ledger after both observations agree.
+        BuilderCleanupDebt debt = cleanupEscapeDebt;
+        if (cleanupEscape != null && debt != null && debt.episode == cleanupEscape
+                && debt.world == ctx.world() && debt.pos.equals(pos)) return;
         if (!isActive() || buildInRows || temporarySupportTargets.containsKey(positionKey(pos))) {
             return;
         }
@@ -2264,6 +2644,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     public void observeScaffoldServerChange(BlockPos pos, BlockState state) {
         excavationFluidPlugs.observe(pos, state);
         excavationRepairAim.observe(pos, state);
+        long sequence = ++cleanupServerUpdateSequence;
+        if (cleanupEscapeDebt != null) cleanupEscapeDebt.serverChanged(ctx.world(), pos, state, sequence, System.nanoTime());
+        if (cleanupEscape != null) cleanupEscape.serverChanged(pos, state);
+        if (isActive() && progressActions.serverChanged(positionKey(pos), state)) {
+            confirmedProgressRevision++;
+        }
         boolean wasOwned = navigationScaffolds.contains(pos);
         if (navigationScaffolds.serverChanged(pos, state)) {
             logMechanic("SCAFFOLD-OWNED server confirmed " + pos.toShortString());
@@ -2279,6 +2665,134 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             remaining.add(new BetterBlockPos(pos));
         }
         return remaining;
+    }
+
+    /** A local disappearance/replacement is not the server event that releases our ledger entry. */
+    boolean scaffoldCleanupAwaitingServer() {
+        if (!layerCleanupActive && !scaffoldCleanupActive) return false;
+        for (long key : scaffoldCleanupTargets) {
+            BlockPos pos = BlockPos.of(key);
+            if (navigationScaffolds.contains(pos) && !navigationScaffolds.owns(pos, ctx.world().getBlockState(pos))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Queue only this boundary's owned debt, without replacing the working layer by the full model. */
+    boolean prepareLayerCleanup(BuilderCalculationContext bcc, boolean topDown) {
+        if (excavating || buildInRows) return false;
+        if (platformTraverseApproach != null) return true;
+        scaffoldCleanupTargets.removeIf(key -> !navigationScaffolds.contains(BlockPos.of(key)));
+        Set<Long> runnable = new HashSet<>();
+        List<String> protectedHelpers = new ArrayList<>();
+        boolean waiting = navigationScaffolds.awaitingServer();
+        for (BlockPos pos : navigationScaffolds.positions()) {
+            int localY = pos.getY() - origin.getY();
+            if (!scaffoldCleanupTargets.contains(pos.asLong())
+                    && (topDown ? localY < bandMinYLocal : localY > bandMaxYLocal)) continue;
+            if (!bcc.bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())) {
+                waiting = true;
+                continue;
+            }
+            BlockState current = bcc.bsi.get0(pos);
+            if (!navigationScaffolds.owns(pos, current)) {
+                // Includes Cobble -> WATER: wait for that exact server observation, never demand an AIR frame.
+                scaffoldCleanupTargets.add(pos.asLong());
+                waiting = true;
+                continue;
+            }
+            String anchorDependency = layerCleanupAnchorDependency(pos, bcc);
+            if (anchorDependency != null) {
+                protectedHelpers.add(anchorDependency);
+                continue;
+            }
+            BuilderSupportDependencies.Decision protection = bcc.supportDependencies.removal(pos);
+            if (!protection.allowed()) {
+                if (protection.reason() == BuilderSupportDependencies.Reason.UNKNOWN_WORLD) {
+                    waiting = true;
+                } else {
+                    protectedHelpers.add(pos.toShortString() + ": " + protection.reason()
+                            + " dependent=" + protection.dependent());
+                }
+                continue;
+            }
+            runnable.add(pos.asLong());
+        }
+        // A confirmed click anchor can be excluded from the navigation ledger while it serves its target.
+        // Name a dependency on an unfinished later layer instead of waiting for that layer behind this gate.
+        for (long key : temporarySupportTargets.keySet().toLongArray()) {
+            BlockPos pos = BlockPos.of(key);
+            int localY = pos.getY() - origin.getY();
+            if ((topDown ? localY >= bandMinYLocal : localY <= bandMaxYLocal) && !bcc.bsi.get0(pos).isAir()) {
+                String dependency = layerCleanupAnchorDependency(pos, bcc);
+                if (dependency != null && !protectedHelpers.contains(dependency)) protectedHelpers.add(dependency);
+            }
+        }
+        if (!runnable.isEmpty()) {
+            layerCleanupActive = true;
+            if (scaffoldCleanupTargets.addAll(runnable)) incorrectPositions = null;
+            return true;
+        }
+        if (waiting) {
+            layerCleanupActive = true;
+            return true;
+        }
+        if (!protectedHelpers.isEmpty()) {
+            abortBuild(Ending.LAYER_UNBUILDABLE,
+                    "Layer " + layer + " cleanup needs a protected support; layer was not advanced", protectedHelpers);
+            return true;
+        }
+        scaffoldCleanupTargets.clear();
+        layerCleanupActive = false;
+        return false;
+    }
+
+    private String layerCleanupAnchorDependency(BlockPos support, BuilderCalculationContext bcc) {
+        long key = positionKey(support);
+        if (!temporarySupportTargets.containsKey(key)) return null;
+        BlockPos target = BlockPos.of(temporarySupportTargets.get(key));
+        ISchematic full = supportModelForDependencies();
+        int x = target.getX() - origin.getX(), y = target.getY() - origin.getY(), z = target.getZ() - origin.getZ();
+        BlockState current = bcc.bsi.get0(target);
+        if (bcc.bsi.worldContainsLoadedChunk(target.getX(), target.getZ())
+                && full.inSchematic(x, y, z, current)
+                // A click anchor is discharged by the promised placement identity. Neighbour/redstone changes
+                // and a remaining interaction do not need another placement; orientation and waterlogging still do.
+                && matchesExceptInteraction(current, full.desiredState(x, y, z, current, approxPlaceable))) {
+            temporarySupportTargets.remove(key);
+            return null;
+        }
+        return support.toShortString() + " is the click anchor for unfinished target " + target.toShortString();
+    }
+
+    /** The actual onTick layer transition; a local removal cannot bypass either the server ledger or S10. */
+    boolean advanceLayerIfClean(BuilderCalculationContext bcc, boolean topDown, java.util.function.Consumer<String> log) {
+        if (!verifyLayerBeforeLeaving(bcc, log) || prepareLayerCleanup(bcc, topDown)) return false;
+        layer++;
+        scaffoldsThisLayer = 0;
+        scaffoldFailed.clear();
+        scaffoldProbeCache.clear();
+        return true;
+    }
+
+    private boolean verifyLayerBeforeLeaving(BuilderCalculationContext bcc, java.util.function.Consumer<String> log) {
+        LayerAudit audit = auditLayer(bcc);
+        log.accept("S10 " + audit.headline());
+        if (audit.wrong().isEmpty()) return true;
+        List<String> report = new ArrayList<>();
+        report.add(audit.headline());
+        report.add("The work set was empty and nothing is parked, so the builder believed this layer was"
+                + " finished. It is not.");
+        report.addAll(LayerAudit.name("missing or wrong", audit.wrong(), 12));
+        if (audit.unverified() > 0) {
+            report.add(audit.unverified() + " further cell(s) could not be checked (chunk not loaded);"
+                    + " they are NOT counted as failures.");
+        }
+        abortBuild(Ending.LAYER_VERIFICATION_FAILED,
+                "Build stopped: layer " + layer + " did not verify (" + audit.wrong().size()
+                        + " cell(s) missing or wrong)", report);
+        return false;
     }
 
     private boolean isScaffoldLeftBehind(int x, int y, int z, BuilderCalculationContext bcc) {
@@ -2457,7 +2971,26 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *
      * @return {@code true}, wenn eine Geruestzelle eroeffnet wurde -- dann hat der Bau wieder etwas zu tun
      */
+    private BetterBlockPos scaffoldMaterialTarget;
+    private long scaffoldMaterialWaitStarted;
+    private Long scaffoldMaterialPausedAt;
+    private long scaffoldMaterialAttemptTick = Long.MIN_VALUE;
+    private static final long SCAFFOLD_MATERIAL_WAIT_TICKS = 120;
+
+    /** True means a checked scaffold or its bounded normal material preparation owns this tick. */
     private boolean openScaffoldPhase(BuilderCalculationContext bcc) {
+        if (buildInRows || scaffoldCell != null || parkedCells.isEmpty() || !bcc.hasThrowaway) return false;
+        return openScaffoldPhase(bcc, throwawayBlockState(), this::prepareScaffoldMaterial);
+    }
+
+    boolean openScaffoldPhase(BuilderCalculationContext bcc, BlockState material,
+                              java.util.function.BiPredicate<BetterBlockPos, BlockState> prepareMaterial) {
+        return openScaffoldPhase(bcc, material, prepareMaterial, this::logMechanic);
+    }
+
+    boolean openScaffoldPhase(BuilderCalculationContext bcc, BlockState material,
+                              java.util.function.BiPredicate<BetterBlockPos, BlockState> prepareMaterial,
+                              java.util.function.Consumer<String> mechanics) {
         if (buildInRows || scaffoldCell != null || parkedCells.isEmpty() || !bcc.hasThrowaway) {
             return false;
         }
@@ -2474,10 +3007,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             return false;
         }
-        BlockState material = throwawayBlockState();
         if (material == null) {
             return false;
         }
+        if (scaffoldMaterialTarget != null) {
+            BlockState wanted = bcc.getSchematic(scaffoldMaterialTarget.x, scaffoldMaterialTarget.y,
+                    scaffoldMaterialTarget.z, bcc.bsi.get0(scaffoldMaterialTarget));
+            if (parkedCells.containsKey(positionKey(scaffoldMaterialTarget)) && wanted != null
+                    && !wanted.isAir() && hotbarStackThatPlaces(wanted) == null) {
+                return prepareMaterial.test(scaffoldMaterialTarget, wanted);
+            }
+            scaffoldMaterialTarget = null;
+        }
+        String missingDependency = null;
         BetterBlockPos feet = ctx.playerFeet();
         int wirkungsproben = 0;
         BetterBlockPos besteUngeprueft = null;
@@ -2494,6 +3036,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // hingehoert -- und sie zaehlte am Ende als "cell that could not be built" mit.
             BlockState sollHier = bcc.getSchematic(zelle.x, zelle.y, zelle.z, bcc.bsi.get0(zelle));
             if (sollHier == null || sollHier.isAir()) {
+                continue;
+            }
+            String dependency = scaffoldSupportDiagnostic(bcc, zelle, sollHier, material);
+            if (dependency != null) {
+                if (missingDependency == null) missingDependency = dependency;
                 continue;
             }
             // EIN VERSUCH JE ZELLE, NICHT EINER JE SEITE -- und das ist kein Sparen, sondern Schadensvermeidung.
@@ -2595,18 +3142,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // wird als "nein" gelesen. Es gibt drei Antworten, nicht zwei -- und die dritte darf nichts
                 // entscheiden und nichts merken.
                 if (hotbarStackThatPlaces(sollHier) == null) {
-                    // UNENTSCHIEDEN DARF NICHT EWIG BLOCKIEREN, sonst ist es ein Deadlock und kein Abwarten.
-                    //
-                    // GEMESSEN, Lauf 7baf4b65: 478-mal unentschieden, kein einziges Urteil, kein Geruest, 2750
-                    // Zellen. Die Kette schliesst sich zum Kreis -- der Block kommt nur in die Schnellleiste,
-                    // wenn der Bauer ihn setzen will; der will erst, wenn ein Geruest offen ist; das oeffnet erst,
-                    // wenn die Pruefung urteilt; die kann nicht urteilen, solange der Block nicht in der Leiste
-                    // liegt.
-                    //
-                    // Also wird der Kandidat gemerkt statt verworfen: findet sich am Ende KEIN geprueft guter,
-                    // faellt die Wahl auf den besten ungeprueften. Das ist genau das Verhalten von vorher, und es
-                    // gilt nur dort, wo die Pruefung nichts sagen kann -- sie verschlechtert damit nie etwas,
-                    // sie verbessert nur, wo sie etwas weiss.
+                    // No material for the oracle means preparation is missing, not that a helper is useful.
+                    // Remember one demand, fetch it normally, then evaluate the same unchanged world again.
                     BuildTrace.cell(buildTick, "SCAFFOLD-PROBE", kandidat.x, kandidat.y, kandidat.z,
                             "serves=" + zelle.x + "," + zelle.y + "," + zelle.z
                                     + " oeffnet=unentschieden (" + blockName(sollHier)
@@ -2680,15 +3217,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
         if (beste == null && besteUngeprueft != null) {
-            // Kein geprueft guter Kandidat, aber einer, ueber den die Pruefung nichts sagen konnte. Der bekommt
-            // seine Chance -- sonst waere aus "weiss ich nicht" ein "nein" geworden, und genau das ist der
-            // Fehler, der sich durch diesen ganzen Tag zieht.
-            beste = besteUngeprueft;
-            bestesZiel = bestesZielUngeprueft;
+            return prepareMaterial.test(bestesZielUngeprueft, bcc.getSchematic(
+                    bestesZielUngeprueft.x, bestesZielUngeprueft.y, bestesZielUngeprueft.z,
+                    bcc.bsi.get0(bestesZielUngeprueft)));
         }
         if (beste == null) {
+            if (missingDependency != null) {
+                abortBuild(Ending.LAYER_UNBUILDABLE, "Build stopped: " + missingDependency,
+                        List.of("No helper is authorized while the required survival dependency is missing or unknown."));
+                return true;
+            }
             return false;
         }
+        scaffoldMaterialTarget = null;
         scaffoldCell = beste;
         scaffoldServes = bestesZiel;
         scaffoldWanted = material;
@@ -2719,10 +3260,60 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 "serves=" + bestesZiel.x + "," + bestesZiel.y + "," + bestesZiel.z
                         + " material=" + blockName(material)
                         + " (" + scaffoldsThisLayer + "/" + MAX_SCAFFOLDS_PER_LAYER + " in dieser Ebene)");
-        logMechanic("Nothing else is placeable and " + parkedCells.size() + " cell(s) are parked; placing one"
+        mechanics.accept("Nothing else is placeable and " + parkedCells.size() + " cell(s) are parked; placing one"
                 + " temporary support at " + beste.x + "," + beste.y + "," + beste.z
                 + " to open " + bestesZiel.x + "," + bestesZiel.y + "," + bestesZiel.z
                 + ". It is removed again the moment that cell stands.");
+        return true;
+    }
+
+    String scaffoldSupportDiagnostic(BuilderCalculationContext bcc, BlockPos target,
+                                     BlockState wanted, BlockState material) {
+        ISchematic full = supportModelForDependencies();
+        try {
+            BlockPos support = new BuilderSupportDependencies(full, origin, bcc.placeable, bcc.bsi, ctx.world())
+                    .missingExternalSupport(target, wanted, material);
+            return support == null ? null : "missing permanent support outside the schematic at "
+                    + support.toShortString() + " for " + blockName(wanted) + " at " + target.toShortString();
+        } catch (BuilderSupportDependencies.UnknownWorld ignored) {
+            return "support dependency is unknown because its block view is unavailable at " + target.toShortString();
+        }
+    }
+
+    private boolean prepareScaffoldMaterial(BetterBlockPos target, BlockState wanted) {
+        return prepareScaffoldMaterial(target, wanted, Princeps.settings().allowInventory.value, slot -> {
+            princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, false);
+            return princeps.getInventoryBehavior().attemptToPutOnHotbar(slot, candidate -> false);
+        });
+    }
+
+    boolean prepareScaffoldMaterial(BetterBlockPos target, BlockState wanted, boolean inventoryAllowed,
+                                   java.util.function.IntPredicate requestSwap) {
+        progressHold = true; // Preserve the real cancellation through the existing route-continuation wrapper.
+        if (!target.equals(scaffoldMaterialTarget)) {
+            scaffoldMaterialTarget = target;
+            scaffoldMaterialWaitStarted = buildTick;
+            scaffoldMaterialPausedAt = null;
+            scaffoldMaterialAttemptTick = Long.MIN_VALUE;
+            BuildTrace.cell(buildTick, "SCAFFOLD-WAIT-MATERIAL", target.x, target.y, target.z,
+                    "prepare " + blockName(wanted) + " before evaluating a helper; no helper authorized");
+        }
+        if (buildTick - scaffoldMaterialWaitStarted >= SCAFFOLD_MATERIAL_WAIT_TICKS
+                || !inventoryAllowed) {
+            abortBuild(Ending.MATERIALS_MISSING, "Build stopped: material is not ready on the hotbar for "
+                    + blockName(wanted) + " at " + target.toShortString(),
+                    List.of("No unverified scaffold was placed. Prepare the material before restarting."));
+            return true;
+        }
+        if (scaffoldMaterialAttemptTick != buildTick) {
+            scaffoldMaterialAttemptTick = buildTick;
+            for (int i = 9; i < Math.min(36, approxPlaceable.size()); i++) {
+                if (itemCanPlaceBlock(approxPlaceable.get(i), wanted)) {
+                    requestSwap.test(i);
+                    break;
+                }
+            }
+        }
         return true;
     }
 
@@ -3346,16 +3937,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private final BreakBranchProgress breakBranchProgress =
             new BreakBranchProgress(BREAK_BRANCH_STARVATION_TICKS, BREAK_BRANCH_YIELD_TICKS);
     private final BreakTargetObservation breakTargetObservation = new BreakTargetObservation();
-
-    /** Doing absolutely nothing for this long is a livelock, not thinking. Five seconds. */
-    private static final int STALL_NUDGE_AFTER_TICKS = 100;
-
-    /** How long a nudge owns the pathing command before the ordinary loop gets it back. */
-    private static final int STALL_NUDGE_HOLD_TICKS = 60;
-
-    private Goal stallNudgeGoal;
-    private int stallNudgeTicksLeft;
-    private long lastStallNudgeTick = Long.MIN_VALUE;
 
     /** Consecutive ticks a committed placement has been held back because the hand held the wrong block. */
     private int wrongItemInHandTicks;
@@ -5883,6 +6464,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  though the stance key, support, item, and target are unchanged. If the current stance truly becomes unusable,
      *  ownership stays on the same cell while recovery walks to a different concrete stance. */
     private Optional<Placement> stickyPlacement(BuilderCalculationContext bcc, List<BlockState> desirableOnHotbar) {
+        if (electedBreak) {
+            // assemble/recalc releases a completed or invalid removal. A nearby placement is not a reason to
+            // replace its route, nor is the absence of an item which places AIR a material shortage.
+            return Optional.empty();
+        }
         if (placementTargetLock.isActive() && committedPlaceTarget != null) {
             int x = committedPlaceTarget.x, y = committedPlaceTarget.y, z = committedPlaceTarget.z;
             BlockState curr = bcc.bsi.get0(x, y, z);
@@ -5964,6 +6550,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         } else if (placementTargetLock.isActive()) {
             placementTargetLock.release();
         }
+        if (electedCell != null) {
+            BlockState current = bcc.bsi.get0(electedCell);
+            BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, current);
+            if (wanted == null || valid(current, wanted, false) || isCellParked(electedCell.x, electedCell.y, electedCell.z)) {
+                clearElectedTarget();
+            } else {
+                desirableOnHotbar.add(wanted);
+                if (blocksActivePath(activePathCells(), electedCell.x, electedCell.y, electedCell.z, wanted)) {
+                    return Optional.empty();
+                }
+                Optional<Placement> chosen = possibleToPlace(wanted, electedCell.x, electedCell.y, electedCell.z, bcc);
+                chosen.ifPresent(this::acquirePlacementTarget);
+                return chosen; // one chosen build cell owns preparation, walking and the eventual click
+            }
+        }
         Optional<Placement> fresh = searchForPlacables(bcc, desirableOnHotbar);
         fresh.ifPresent(this::acquirePlacementTarget);
         return fresh;
@@ -5972,6 +6573,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private void acquirePlacementTarget(Placement placement) {
         long key = positionKey(placement.target);
         if (placementTargetLock.acquire(key, placement)) {
+            if (!placement.target.equals(electedCell)) electedGoal = null;
+            electedCell = new BetterBlockPos(placement.target);
             BuildTrace.cell(buildTick, "PICK",
                     placement.target.getX(), placement.target.getY(), placement.target.getZ(),
                     "want=" + blockName(placement.desired)
@@ -5980,46 +6583,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                             + " rot=" + String.format(java.util.Locale.ROOT, "%.1f,%.1f",
                                     placement.rot.getYaw(), placement.rot.getPitch()));
             committedPlaceTarget = new BetterBlockPos(placement.target);
-            placementTargetAcquiredTick = buildTick;
         }
-    }
-
-    /**
-     * Tears the placement lock off a cell that has held it too long, whatever it thinks it is doing.
-     *
-     * <p>The lock's own timeouts each bound one phase and assume the phase advances. The lighthouse stall is the
-     * counterexample: at the planned stance but not centred, with a path still present, the recovery path returned
-     * {@code CANCEL_AND_SET_GOAL} on every tick and deliberately did not charge the centering counter (a cancel is
-     * supposed to take effect next tick). It never did, so nothing counted, nothing logged, and the bot stood still
-     * for 1740 ticks until the bench timed the run out.
-     *
-     * <p>A per-phase bound cannot catch that; only a bound on the whole can. This one is deliberately dumb: it does
-     * not care why the cell is stuck, which is exactly what makes it hold for stalls nobody has thought of yet.
-     */
-    private void enforcePlacementTargetDeadline() {
-        if (paused || !placementTargetLock.isActive() || placementTargetAcquiredTick < 0) {
-            return;
-        }
-        long held = buildTick - placementTargetAcquiredTick;
-        if (held < TARGET_LOCK_MAX_HELD_TICKS) {
-            return;
-        }
-        BetterBlockPos stuck = committedPlaceTarget;
-        if (stuck == null) {
-            releasePlacementTarget();
-            return;
-        }
-        logMechanic("Placement target " + stuck.x + "," + stuck.y + "," + stuck.z + " held the lock for " + held
-                + " ticks without placing anything; taking it away and deferring the cell"
-                + " (recovering=" + placementTargetLock.isRecovering()
-                + ", plannedStance=" + (plannedPlacementStance == null ? "none"
-                        : plannedPlacementStance.x + "," + plannedPlacementStance.y + "," + plannedPlacementStance.z)
-                + ", rejectedStances=" + placementTargetLock.rejectedStanceCount()
-                + ", centeringTicks=" + placementCenteringTicks
-                + ", onGround=" + ctx.player().onGround() + ")");
-        // deferCell releases the lock itself when it owns the cell, and escalates toward retirement.
-        deferCell(stuck, "held the placement lock for " + held + " ticks without producing a placement");
-        releasePlacementTarget();
     }
 
     /**
@@ -6082,92 +6646,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 + "/" + (incorrectPositions == null ? 0 : incorrectPositions.size()) + ")");
     }
 
-    /**
-     * Steps the body one block off a spot it has argued with itself about for five seconds.
-     *
-     * <p>MEASURED, map art at 91% on 2026-08-18 16:37:41. The builder finished a five-wide slice, then produced
-     * nothing whatsoever for ninety seconds: 1517 cells outstanding, {@code parked=0}, {@code retired=0},
-     * {@code cellsWithoutAVerdict=1517/1517} -- not one cell carried so much as a negative verdict --
-     * {@code lockActive=false, target=none, goal=none, pathing=false}. The body never moved: feet
-     * 57887,96,47315 in every census. The operator shoved it three blocks by hand and it resumed instantly, and
-     * did that repeatedly over one picture.
-     *
-     * <p>The pathfinder was not idle during those ninety seconds. It logged "reached goal after 5 nodes, 88
-     * movements" about ten times a second, without pause: a goal was being set and thrown away every tick. The
-     * thrower is {@link #abandonAGoalAlreadySatisfiedWhereWeStand()}, correctly -- the stance the election keeps
-     * choosing is the one the body is ALREADY standing in, so the goal is satisfied on arrival and cleared, the
-     * next tick elects the same cell, and round it goes. A goal that is already reached and a placement that
-     * cannot be made from there are individually reasonable and jointly a livelock.
-     *
-     * <p>Fixing the disagreement between the stance search and {@code possibleToPlace} is the real repair and it
-     * is not a five-line change. This is the escape, and it is deliberately the operator's own remedy: when the
-     * builder has been completely inert -- nothing committed, nothing routed, nothing moving -- for five seconds,
-     * step one block and let the ordinary loop try again from somewhere else. Everything about the geometry that
-     * caused the tie is a function of where the body stands, so moving it is what breaks the tie.
-     *
-     * <p>Only ever onto ground the bot is already entitled to stand on: a candidate is taken only if the block
-     * under it is walkable and the two cells the body would occupy are clear. If nothing around passes, nothing
-     * happens -- the watchdog keeps narrating and no nudge invents a step into the air.
-     */
-    private Goal nudgeOffAStallSpot() {
-        if (paused || incorrectPositions == null || incorrectPositions.isEmpty()) {
-            return null;
-        }
-        if (stallNudgeTicksLeft > 0) {
-            stallNudgeTicksLeft--;
-            return stallNudgeGoal;
-        }
-        if (buildTick - lastCellCompletedTick < STALL_NUDGE_AFTER_TICKS) {
-            return null; // work is happening
-        }
-        // NEVER IS A SENTINEL, NOT A NUMBER. Left as plain arithmetic, buildTick - Long.MIN_VALUE overflows to a
-        // large NEGATIVE value, which is always below the threshold -- so this net never caught anything, not once,
-        // in any run. The explicit "has it ever fired" test is the same idiom the missing-centre counter uses.
-        if (lastStallNudgeTick != Long.MIN_VALUE && buildTick - lastStallNudgeTick < STALL_NUDGE_AFTER_TICKS) {
-            return null; // one nudge per episode, not one per tick
-        }
-        // Inert means ALL of these at once. Any single one of them alone is ordinary: a committed target is work,
-        // a live path is work, and a running calculation is about to become work.
-        if (placementTargetLock.isActive()
-                || princeps.getInputOverrideHandler().getBlockBreakHelper().isBreakingBlock()
-                || princeps.getPathingBehavior().isPathing()
-                || princeps.getPathingBehavior().getCurrent() != null) {
-            return null;
-        }
-        BetterBlockPos feet = ctx.playerFeet();
-        BuilderCalculationContext bcc = new BuilderCalculationContext();
-        // Backwards first -- away from the frontier is where the finished picture is, so it is both the safest
-        // footing and the angle the bot needs to see the cell it is standing on top of. The sideways steps are
-        // the fallbacks for a bot in a corner.
-        int[][] offsets = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}, {1, 1}, {-1, 1}, {1, -1}, {-1, -1}};
-        for (int[] offset : offsets) {
-            int x = feet.x + offset[0];
-            int z = feet.z + offset[1];
-            if (!MovementHelper.canWalkOn(bcc.bsi, x, feet.y - 1, z)) {
-                continue; // never step onto nothing
-            }
-            if (!MovementHelper.canWalkThrough(bcc.bsi, x, feet.y, z)
-                    || !MovementHelper.canWalkThrough(bcc.bsi, x, feet.y + 1, z)) {
-                continue; // the body would not fit
-            }
-            stallNudgeGoal = new GoalBlock(new BetterBlockPos(x, feet.y, z));
-            stallNudgeTicksLeft = STALL_NUDGE_HOLD_TICKS;
-            lastStallNudgeTick = buildTick;
-            logMechanic("Nothing has been committed, routed or moved for "
-                    + (buildTick - lastCellCompletedTick) + " ticks at " + feet.x + "," + feet.y + "," + feet.z
-                    + " -- stepping to " + x + "," + feet.y + "," + z + " so the next tick decides from a"
-                    + " different place. See nudgeOffAStallSpot.");
-            return stallNudgeGoal;
-        }
-        lastStallNudgeTick = buildTick;
-        logMechanic("Nothing has been committed, routed or moved for "
-                + (buildTick - lastCellCompletedTick) + " ticks at " + feet.x + "," + feet.y + "," + feet.z
-                + ", and there is no solid neighbour to step onto -- staying put.");
-        return null;
-    }
-
     /** Called wherever a cell is observed to satisfy the schematic — the watchdog's only source of truth. */
-    private void noteCellCompleted() {
+    private void noteCellCompleted(BetterBlockPos completedCell) {
         breakBranchProgress.observedProgress();
         consecutivePathFailures = 0;
         lastCellCompletedTick = buildTick;
@@ -6176,8 +6656,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         scaffoldVetoTicks = 0;
         scaffoldVetoUnstickTried = false;
         // The latched target is released here and only for real reasons -- a placement is the most real of them.
-        electedCell = null;
-        scaffoldPassAllowed = false;
+        if (completedCell.equals(electedCell)) {
+            clearElectedTarget();
+        }
         // A PLACED BLOCK IS A NEW WORLD, SO EVERY CELL GETS ANOTHER LOOK. The owner's rule, and it turns the deferral
         // backoff from a memory into what it should always have been: "how often has this failed SINCE anything last
         // succeeded". Nothing that was judged before the world changed keeps its verdict.
@@ -6539,6 +7020,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * is what should have happened immediately.
      */
     private void abandonAGoalAlreadySatisfiedWhereWeStand() {
+        if (cleanupEscape != null) return; // reaching an intermediate episode goal advances its next bounded action
         Goal goal = princeps.getPathingBehavior().getGoal();
         if (goal == null || princeps.getPathingBehavior().getCurrent() != null) {
             return;   // no goal, or a real path is being walked -- nothing dead about either
@@ -7743,12 +8225,24 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     }
 
     private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc) {
-        return possibleToPlace(toPlace, x, y, z, bcc, null, null);
+        return possibleToPlace(toPlace, x, y, z, bcc, null, null, null);
     }
 
     private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
                                                 ExcavationRepairAim.Face requiredFace,
                                                 java.util.function.Predicate<Placement> faceFilter) {
+        return possibleToPlace(toPlace, x, y, z, bcc, requiredFace, faceFilter, null);
+    }
+
+    /** Optional failure counts from the actual click derivation, not a second geometry approximation. */
+    private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z,
+                                               BuilderCalculationContext bcc, int[] rejected) {
+        return possibleToPlace(toPlace, x, y, z, bcc, null, null, rejected);
+    }
+
+    private Optional<Placement> possibleToPlace(BlockState toPlace, int x, int y, int z, BuilderCalculationContext bcc,
+                                                ExcavationRepairAim.Face requiredFace,
+                                                java.util.function.Predicate<Placement> faceFilter, int[] rejected) {
         BlockStateInterface bsi = bcc.bsi;
         for (Direction against : supportDirectionsFor(toPlace)) {
             BetterBlockPos placeAgainstPos = new BetterBlockPos(x, y, z).relative(against);
@@ -7756,16 +8250,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     || against.getOpposite() != requiredFace.side())) continue;
             BlockState placeAgainstState = bsi.get0(placeAgainstPos);
             if (MovementHelper.isReplaceable(placeAgainstPos.x, placeAgainstPos.y, placeAgainstPos.z, placeAgainstState, bsi)) {
+                if (rejected != null) rejected[0]++;
                 continue;
             }
             if (!toPlace.canSurvive(ctx.world(), new BetterBlockPos(x, y, z))) {
+                if (rejected != null) rejected[1]++;
                 continue;
             }
             if (!placementPlausible(new BetterBlockPos(x, y, z), toPlace)) {
+                if (rejected != null) rejected[2]++;
                 continue;
             }
             VoxelShape shape = placeAgainstState.getShape(ctx.world(), placeAgainstPos);
             if (shape.isEmpty()) {
+                if (rejected != null) rejected[3]++;
                 continue;
             }
             AABB aabb = shape.bounds();
@@ -7781,6 +8279,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 positionKey(ctx.playerFeet()), new BetterBlockPos(x, y, z), toPlace);
                         if (faceFilter == null || faceFilter.test(option)) return Optional.of(option);
                     }
+                    if (rejected != null) rejected[5]++;
+                } else {
+                    if (rejected != null) rejected[4]++;
                 }
             }
         }
@@ -8945,40 +9446,146 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return BlockPos.asLong(x, y, z);
     }
 
-    /**
-     * True only for observable route advancement. A non-null PathExecutor is work, not proof of progress: a bot
-     * stationary at one node or pacing through already-seen cells must eventually enter recovery.
-     */
-    private boolean navigationMadeProgress(BetterBlockPos feet, Goal activeGoal, boolean calcFailed) {
-        if (calcFailed || activeGoal == null || activeGoal.isInGoal(feet)) {
-            return false;
-        }
-        PathExecutor current = princeps.getPathingBehavior().getCurrent();
-        if (!Objects.equals(observedNavigationGoal, activeGoal)) {
-            observedNavigationGoal = activeGoal;
-            observedNavigationExecutor = current;
-            bestObservedPathPosition = current == null ? -1 : current.getPosition();
-            bestObservedGoalHeuristic = activeGoal.heuristic(feet.x, feet.y, feet.z);
-            navigationVisitedCells.clear();
-            navigationVisitedCells.add(positionKey(feet));
-            return true; // one grace tick for a genuinely new route/calculation
-        }
+    /** A completed/invalid target releases both the cell and its last usable navigation goal. */
+    private void clearElectedTarget() {
+        discardLaneQuestion();
+        laneAProof = null;
+        laneEscalatedCell = null;
+        laneBAnswered = false;
+        platformTraverseApproach = null;
+        electedCell = null;
+        electedGoal = null;
+        electedBreak = false;
+        scaffoldPassAllowed = false;
+    }
 
-        navigationVisitedCells.add(positionKey(feet)); // diagnostic history; new territory alone is not goal progress
-        boolean advanced = false;
-        double heuristic = activeGoal.heuristic(feet.x, feet.y, feet.z);
-        if (heuristic + 0.01D < bestObservedGoalHeuristic) {
-            bestObservedGoalHeuristic = heuristic;
-            advanced = true;
+    /** Unknown is a missing observation, not permission to select a different build cell. */
+    Goal acceptElectedVerdict(CellUrteil verdict) {
+        if (verdict instanceof CellUrteil.Setzen setzen) electedGoal = setzen.ziel();
+        else if (verdict instanceof CellUrteil.Parken) clearElectedTarget();
+        // Keep the chosen cell through a material wait, but never reuse an edge action whose proof was withdrawn.
+        if (electedGoal instanceof PlatformTraverseGoal && platformTraverseApproach == null) return null;
+        return electedGoal;
+    }
+
+    /** Stable across equivalent Goal/PathExecutor reconstruction; no coordinates are retained per route. */
+    private record ProgressRoute(Long target, long hash, int length) { }
+
+    static int progressPathPosition(PathExecutor path) {
+        if (path == null || path.failed() || path.finished()) return -1;
+        int position = path.getPosition();
+        return position >= 0 && position < path.getPath().positions().size() ? position : -1;
+    }
+
+    private PathingCommand observeBuilderProgress() {
+        progressHold = false;
+        if (schematic == null) {
+            progressWatch.reset();
+            return null;
         }
-        if (current != observedNavigationExecutor) {
-            observedNavigationExecutor = current;
-            bestObservedPathPosition = current == null ? -1 : current.getPosition();
-        } else if (current != null && current.getPosition() > bestObservedPathPosition) {
-            bestObservedPathPosition = current.getPosition();
-            advanced = true;
+        BuilderProgressWatch.Phase phase = BuilderProgressWatch.Phase.WORK;
+        BetterBlockPos target = committedPlaceTarget != null ? committedPlaceTarget : electedCell;
+        Long targetKey = target == null ? null : positionKey(target);
+        double distance = 0;
+        Object route = null;
+        int routePosition = -1;
+        Long miningTarget = null;
+        double miningProgress = 0;
+        if (paused) {
+            phase = BuilderProgressWatch.Phase.PAUSED;
+        } else if (ctx.world() == null || ctx.player() == null
+                || !ctx.world().getChunkSource().hasChunk(ctx.playerFeet().x >> 4, ctx.playerFeet().z >> 4)
+                || target != null && !ctx.world().getChunkSource().hasChunk(target.x >> 4, target.z >> 4)) {
+            phase = BuilderProgressWatch.Phase.WAIT_CHUNK;
+        } else {
+            if (target != null) {
+                distance = Math.sqrt(ctx.player().position().distanceToSqr(target.x + 0.5, target.y, target.z + 0.5));
+                BuilderCalculationContext bcc = new BuilderCalculationContext();
+                BlockState wanted = bcc.getSchematic(target.x, target.y, target.z, bcc.bsi.get0(target));
+                BlockState currentState = bcc.bsi.get0(target);
+                if (wanted != null && !wanted.isAir() && !containsBlockState(approxPlaceable(36), wanted)
+                        && !valid(currentState, wanted, false)
+                        && MovementHelper.isReplaceable(target.x, target.y, target.z, currentState, bcc.bsi)) {
+                    phase = BuilderProgressWatch.Phase.WAIT_MATERIAL;
+                }
+            }
+            if (phase == BuilderProgressWatch.Phase.WORK) {
+                var controller = (princeps.utils.accessor.IPlayerControllerMP) ctx.minecraft().gameMode;
+                BlockPos breaking = controller.getCurrentBlock();
+                if (controller.isHittingBlock() && breaking != null && !ctx.world().getBlockState(breaking).isAir()) {
+                    phase = BuilderProgressWatch.Phase.MINING;
+                    progressActions.arm(positionKey(breaking), ctx.world().getBlockState(breaking), Blocks.AIR.defaultBlockState());
+                    miningTarget = positionKey(breaking);
+                    miningProgress = Math.max(0, controller.getDestroyProgress());
+                } else if (lastPlacedCell != null || pendingPlacementRequest != null) {
+                    phase = BuilderProgressWatch.Phase.WAIT_CONFIRMATION;
+                }
+            }
+            PathExecutor current = princeps.getPathingBehavior().getCurrent();
+            int currentPosition = progressPathPosition(current);
+            if (currentPosition >= 0) {
+                if (current != progressExecutor || !Objects.equals(targetKey, progressRouteTarget)) {
+                    Object previousRoute = progressRoute;
+                    int reachedPreviousNode = Objects.equals(targetKey, progressRouteTarget)
+                            ? progressRoutePositions.indexOf(ctx.playerFeet()) : -1;
+                    long hash = 0xcbf29ce484222325L;
+                    for (BetterBlockPos pos : current.getPath().positions()) {
+                        hash = (hash ^ positionKey(pos)) * 0x100000001b3L;
+                    }
+                    progressRoute = new ProgressRoute(targetKey, hash, current.getPath().positions().size());
+                    progressWatch.beginRoute(progressRoute, currentPosition);
+                    // A shortened/replanned path starts at node zero again. Credit the physical feet reaching a
+                    // later node of its predecessor, never the replacement executor's creation or cancel sentinel.
+                    route = reachedPreviousNode > progressRoutePosition ? previousRoute : progressRoute;
+                    routePosition = reachedPreviousNode > progressRoutePosition ? reachedPreviousNode : currentPosition;
+                    progressExecutor = current;
+                    progressRouteTarget = targetKey;
+                    progressRoutePositions = java.util.List.copyOf(current.getPath().positions());
+                    progressRoutePosition = currentPosition;
+                } else {
+                    route = progressRoute;
+                    routePosition = currentPosition;
+                    progressRoutePosition = Math.max(progressRoutePosition, currentPosition);
+                }
+            }
         }
-        return advanced;
+        BuilderProgressWatch.Decision decision = progressWatch.observe(System.nanoTime(), new BuilderProgressWatch.Sample(
+                phase, targetKey, distance, route, routePosition, confirmedProgressRevision, miningTarget, miningProgress));
+        if (phase != progressPhase || decision != BuilderProgressWatch.Decision.CONTINUE) {
+            progressPhase = phase;
+            String detail = "phase=" + phase + " target=" + (target == null ? "none" : target.toShortString())
+                    + " quietSeconds=" + java.util.concurrent.TimeUnit.NANOSECONDS.toSeconds(progressWatch.quietNanos())
+                    + " distance=" + String.format(java.util.Locale.ROOT, "%.2f", distance)
+                    + " pathNode=" + routePosition + " confirmedWorldChanges=" + confirmedProgressRevision;
+            BuildTrace.cell(buildTick, "PROGRESS-" + decision, target == null ? 0 : target.x,
+                    target == null ? 0 : target.y, target == null ? 0 : target.z, detail);
+            logMechanic("Builder progress: " + detail);
+            if (decision == BuilderProgressWatch.Decision.STOP) {
+                progressHold = true;
+                if (beginHomeRecovery(phase, System.nanoTime())) return advanceHomeRecovery(System.nanoTime());
+                abortBuild(phase == BuilderProgressWatch.Phase.WAIT_MATERIAL ? Ending.MATERIALS_MISSING : Ending.PLACEMENT_FAILED,
+                        "Build stopped: no confirmed world action or route progress for 60 active seconds",
+                        java.util.List.of(detail, "All unresolved cells are retained; no automatic restart was requested."));
+                princeps.getInputOverrideHandler().clearAllKeys();
+                return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
+        }
+        if (phase == BuilderProgressWatch.Phase.WAIT_CHUNK || phase == BuilderProgressWatch.Phase.WAIT_MATERIAL) {
+            progressHold = true;
+            princeps.getInputOverrideHandler().clearAllKeys();
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        if (decision == BuilderProgressWatch.Decision.DIAGNOSE && phase == BuilderProgressWatch.Phase.WORK) {
+            Goal currentGoal = princeps.getPathingBehavior().getGoal();
+            if (currentGoal != null) {
+                return continueCurrentRoute(currentGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+            }
+        }
+        return null;
+    }
+
+    private boolean navigationMadeProgress(BetterBlockPos feet, Goal activeGoal, boolean calcFailed) {
+        return !calcFailed && progressWatch.advancedLastSample();
     }
 
     private void resetNavigationProgressTracking() {
@@ -9084,7 +9691,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 || command.goal != null) {
             return command; // not an idle hold -- leave it exactly as it is
         }
-        if (paused || incorrectPositions == null || incorrectPositions.isEmpty()) {
+        if (paused || progressHold || cleanupEscape != null || incorrectPositions == null || incorrectPositions.isEmpty()) {
             return command; // nothing owed, so cancelling is the right answer
         }
         if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
@@ -9097,7 +9704,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 && princeps.getPathingBehavior().getInProgress().isEmpty()) {
             return command; // no route to protect
         }
-        return new PathingCommand(inFlight, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        return continueCurrentRoute(inFlight, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+    }
+
+    /** A continuation must retain the route's rules as well as its goal. A plain command makes PathingBehavior
+     * construct a generic context, briefly allowing routes that the next builder tick cannot execute. Preserve
+     * the exact snapshot, including lane A/B and AutoDig's deliberately generic initial approach. New route
+     * commands still choose their own context; without an existing snapshot there is nothing to retain. */
+    private PathingCommand continueCurrentRoute(Goal goal, PathingCommandType type) {
+        CalculationContext context = princeps.getPathingBehavior().secretInternalGetCalculationContext();
+        return context == null ? new PathingCommand(goal, type) : new PathingCommandContext(goal, type, context);
     }
 
     private PathingCommand onTick(boolean calcFailed, boolean isSafeToCancel, int recursions) {
@@ -9109,6 +9725,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // Arbeit ausloesen.
         if (finishAbortedBuild()) {
             return null;
+        }
+        if (recursions == 0 && homeRecovery != null) {
+            buildTick++;
+            return advanceHomeRecovery(System.nanoTime());
         }
         if (recursions == 0) {
             buildTick++;
@@ -9125,6 +9745,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
                         survival != null && survival.isConsuming());
             }
+            if (calcFailed) {
+                homeFailedRoute = princeps.getPathingBehavior().getGoal();
+                homeFailedTarget = committedPlaceTarget != null ? committedPlaceTarget : electedCell;
+                homeFailedRevision = confirmedProgressRevision;
+            }
             observePendingPlacementRequest();
             // Runs BEFORE anything can return. Every previous stall guard sat further down onTick, behind a dozen
             // early returns, so the one situation they existed for -- a branch that returns the same command every
@@ -9139,7 +9764,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                             "AutoDig stopped: fluid plug placement was not confirmed by the server",
                             List.of("Unconfirmed source plug: " + pos.toShortString(),
                                     "Repeated requests and old fluid updates do not restart the 400-active-tick limit.")));
-            enforcePlacementTargetDeadline();
+            PathingCommand progressDecision = observeBuilderProgress();
+            if (progressDecision != null) {
+                return progressDecision;
+            }
             closeAnyContainerScreen();
             narrateIfNoCellHasCompleted();
             trackAimMovement();
@@ -9166,10 +9794,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // once acted on one; a picture at 91% sat inert for ninety seconds while it wrote the same line nine
             // times. Placed here, in the block that runs ahead of every early return, for the same reason the
             // narration is: a livelock is precisely the state in which the rest of onTick never gets reached.
-            Goal nudge = nudgeOffAStallSpot();
-            if (nudge != null) {
-                return new PathingCommand(nudge, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH);
-            }
+            // Progress decisions never invent a nearby movement. The elected target owns the route.
         }
         orientedGoalCache.clear(); // the standing-position search is memoized per target for the duration of one tick
         orientedSearchesThisTick = 0;
@@ -9239,77 +9864,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 minYInclusive = 0;
                 maxYInclusive = band.hi();
             }
-            schematic = new ISchematic() {
-                @Override
-                public BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable) {
-                    BlockState geruest = BuilderProcess.this.scaffoldOverrideAt(x, y, z);
-                    if (geruest != null) {
-                        return geruest;
-                    }
-                    return realSchematic.desiredState(x, y, z, current, BuilderProcess.this.approxPlaceable);
-                }
-
-                @Override
-                public boolean inSchematic(int x, int y, int z, BlockState currentState) {
-                    if (BuilderProcess.this.scaffoldOverrideAt(x, y, z) != null) {
-                        // Die Geruestzelle liegt regelmaessig UNTER dem Ebenenband -- das ist ja der Grund, warum
-                        // die bediente Zelle in der Luft haengt. Ohne diese Zeile waere sie ausserhalb des
-                        // Arbeitssatzes und niemand wuerde sie je setzen.
-                        return true;
-                    }
-                    if (!ISchematic.super.inSchematic(x, y, z, currentState)
-                            || !realSchematic.inSchematic(x, y, z, currentState)) {
-                        return false;
-                    }
-                    if (y >= minYInclusive && y <= maxYInclusive) {
-                        return true;
-                    }
-                    // A top-down layer containing a door UPPER must atomically include its LOWER one row below.
-                    // Otherwise the upper is intentionally non-placeable, the base is outside the wrapper, and the
-                    // layer can never finish or expand.
-                    if (!topDownLayers || y != minYInclusive - 1) {
-                        return false;
-                    }
-                    BlockState lower = realSchematic.desiredState(
-                            x, y, z, currentState, BuilderProcess.this.approxPlaceable);
-                    if (lower == null || !(lower.getBlock() instanceof DoorBlock)
-                            || lower.getValue(DoorBlock.HALF) != DoubleBlockHalf.LOWER) {
-                        return false;
-                    }
-                    BlockPos aboveWorld = new BlockPos(
-                            BuilderProcess.this.origin.getX() + x,
-                            BuilderProcess.this.origin.getY() + y + 1,
-                            BuilderProcess.this.origin.getZ() + z);
-                    BlockState aboveCurrent = ctx.world().getBlockState(aboveWorld);
-                    if (!realSchematic.inSchematic(x, y + 1, z, aboveCurrent)) {
-                        return false;
-                    }
-                    BlockState upper = realSchematic.desiredState(
-                            x, y + 1, z, aboveCurrent, BuilderProcess.this.approxPlaceable);
-                    return upper != null && upper.getBlock() == lower.getBlock()
-                            && upper.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER;
-                }
-
-                @Override
-                public void reset() {
-                    realSchematic.reset();
-                }
-
-                @Override
-                public int widthX() {
-                    return realSchematic.widthX();
-                }
-
-                @Override
-                public int heightY() {
-                    return realSchematic.heightY();
-                }
-
-                @Override
-                public int lengthZ() {
-                    return realSchematic.lengthZ();
-                }
-            };
+            schematic = layerMask(realSchematic, minYInclusive, maxYInclusive, topDownLayers);
         }
         // DER SCHALTER (Schritt 24). Der Kontext dieses Ticks traegt die Bahn der Zelle, die gerade gefahren wird.
         //
@@ -9317,13 +9872,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // erst weiter unten laeuft: gefragt wird nach der Zelle, zu der wir GERADE unterwegs sind. Genau ein
         // Kontext je Tick, und Planer wie Fahrt lesen denselben -- das ist die Bedingung, an der der erste Versuch
         // gescheitert ist (921 geplante Bruecken gegen 922 verweigerte, Bot 1920 Ticks bewegungslos).
-        Lane laneThisTick = scaffoldCleanupActive ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
+        Lane laneThisTick = scaffoldCleanupActive || layerCleanupActive
+                ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
         // Und dasselbe fuer die Ausfuehrungsseite. scaffoldIsLicensedAt -- das globale Praedikat, das eine laufende
         // Bewegung fragt, ob sie einen Wegwerfblock setzen darf -- haengt ab jetzt an DERSELBEN Entscheidung.
         // Vorher hing es an scaffoldPassAllowed, das ein einziges calcFailed fuer den Rest der Zelle oeffnete:
         // der Planer plante unter der einen Regel und der Mover fuhr unter einer anderen.
         scaffoldPassAllowed = laneThisTick == Lane.B_HELPERS_ALLOWED;
         BuilderCalculationContext scanContext = new BuilderCalculationContext(laneThisTick);
+        if (cleanupEscape != null) return driveCleanupEscape(isSafeToCancel, scanContext);
+        if (platformTraverseApproach != null) {
+            platformTraverseGoal(platformTraverseApproach.target, scanContext, true);
+            if (scanContext.platformApproach != platformTraverseApproach) {
+                scanContext = new BuilderCalculationContext(laneThisTick);
+            }
+        }
         // GANZ FRUEH IM TICK, nicht am Ende. Zwei Fragen haengen daran und beide muessen JEDEN Tick beantwortet
         // werden: hat die Geruestzelle ihren Zweck erfuellt (dann faellt ihr Soll auf Luft zurueck und der
         // vorhandene Abbau raeumt sie weg), und ist sie gescheitert (dann wird sie aufgegeben)?
@@ -9391,7 +9954,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 lastParkSweepTick = buildTick;
                 logMechanic("Released " + parkedCells.size() + " parked cell(s): the active set is empty, so no"
                         + " finished cell can wake them and the window cannot step down past them");
-                parkedCells.clear();
+                releaseParkedCellsForRetry();
                 return onTick(calcFailed, isSafeToCancel, recursions + 1);
             }
             // P0 IST BEANTWORTET: die AKTIV-Menge dieser Ebene ist leer. Alles, was noch offen ist, ist geparkt --
@@ -9473,42 +10036,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             PathingCommand integrity = ordinaryExcavationIntegrityCommand(scanContext, isSafeToCancel, false);
             if (integrity != null) return integrity;
-            // S10 + P6b. Die Ebene wird nachgesehen, bevor sie verlassen wird.
-            LayerAudit audit = auditLayer(scanContext);
-            logMechanic("S10 " + audit.headline());
-            if (!audit.wrong().isEmpty()) {
-                List<String> report = new ArrayList<>();
-                report.add(audit.headline());
-                report.add("The work set was empty and nothing is parked, so the builder believed this layer was"
-                        + " finished. It is not.");
-                report.addAll(LayerAudit.name("missing or wrong", audit.wrong(), 12));
-                if (audit.unverified() > 0) {
-                    report.add(audit.unverified() + " further cell(s) could not be checked (chunk not loaded);"
-                            + " they are NOT counted as failures.");
-                }
-                abortBuild(Ending.LAYER_VERIFICATION_FAILED,
-                        "Build stopped: layer " + layer + " did not verify (" + audit.wrong().size()
-                                + " cell(s) missing or wrong)", report);
-                return finishAbortedBuild() ? null
-                        : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
-            }
             if (Princeps.settings().buildInLayers.value && layer * effectiveLayerHeight()
                     < stopAtHeight) {
-                // Counted and named before climbing. The owner does not want helper blocks left in the build, and
-                // opportunistic removal (see toBreakNearPlayer) only reaches what the bot happens to walk past -- so
-                // this says out loud what it missed instead of leaving it to be discovered by looking at the thing.
-                // Reported rather than waited for: blocking the climb on a cleanup that needs its own routing is
-                // exactly the shape of stall this builder has too many of already.
-                int scaffoldLeft = countScaffoldInLayer(scanContext, layer);
-                if (scaffoldLeft > 0) {
-                    logDirect("Layer " + layer + " done, but " + scaffoldLeft + " scaffold block(s) are still standing"
-                            + " in it; they will be cleared whenever the bot passes them again");
+                int finishedLayer = layer;
+                if (!advanceLayerIfClean(scanContext, Princeps.settings().layerOrder.value, this::logMechanic)) {
+                    return finishAbortedBuild() ? null
+                            : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
-                logDirect("Starting layer " + layer);
-                layer++;
-                scaffoldsThisLayer = 0;   // der Deckel gilt je Ebene, nicht je Bau
-                scaffoldFailed.clear();
-                scaffoldProbeCache.clear();
+                logDirect("Starting layer " + finishedLayer);
                 // DIE REKURSION BLEIBT, bewusst. Sie ist durch recursions > 100 gedeckelt und eine Schematic hat
                 // hier achtzehn Ebenen; auch unter der exklusiven Maske, wo jede fertige Ebene leer ist und der Bot
                 // sich in einem Tick hochhangelt, bleibt das eine Groessenordnung unter dem Deckel. Der Umbau in
@@ -9517,6 +10052,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // eine Verhaltensaenderung ohne Nutzen an dieser Stelle.
                 return onTick(calcFailed, isSafeToCancel, recursions + 1);
             }
+            if (!verifyLayerBeforeLeaving(scanContext, this::logMechanic)) {
+                return finishAbortedBuild() ? null
+                        : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
             // KEINE RETRY-SWEEPS MEHR. Was hier stand, war das Gegenteil der Spezifikation: bis zu MAX_RETRY_SWEEPS
             // ganze Durchlaeufe ueber die fertige Schematic, um Zellen zurueckzuholen, die unterwegs "in den
             // Ruhestand" geschickt worden waren -- und danach ein logDirect("Build finished with N cell(s) unbuilt"),
@@ -9524,7 +10063,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // der Vertrauensverlust, den der Ergebniskanal beenden soll. Beide Zweige sind ersatzlos entfallen: mit
             // P6a kann eine Ebene gar nicht mehr mit offenen Zellen verlassen werden, also gibt es nichts
             // nachzuholen.
-            if (navigationScaffolds.awaitingServer()) {
+            if (navigationScaffolds.awaitingServer() || scaffoldCleanupAwaitingServer()) {
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
             List<BetterBlockPos> remainingScaffolds = remainingNavigationScaffolds(scanContext);
@@ -9549,6 +10088,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // build repeat time
             layer = 0;
             scaffoldCleanupActive = false;
+            layerCleanupActive = false;
             scaffoldCleanupTargets.clear();
             origin = new BlockPos(origin).offset(repeat);
             if (!Princeps.settings().buildRepeatSneaky.value) {
@@ -9751,6 +10291,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         || snakeFaceChangeWaitTicks >= SNAKE_FACE_CHANGE_MAX_WAIT_TICKS;
             }
             if (toolReady && breakAimReady && aimReceivedByServer) {
+                selectSupportRepair(pos, breakState, bcc.getSchematic(pos.x, pos.y, pos.z, breakState));
+                progressActions.arm(positionKey(pos), breakState, Blocks.AIR.defaultBlockState());
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
                 if (needsSnakeFaceSettle && swingFace != null) {
                     snakeLastSwungFace = swingFace;
@@ -9972,6 +10514,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 + " side=" + placement.side);
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
                 pendingPlacementRequest = placement;
+                progressActions.arm(positionKey(placement.target), ctx.world().getBlockState(placement.target), placement.desired);
                 pendingPlacementItem = expectedItem;
                 pendingPlacementRequestSerial = observedBlockClickSerial;
                 // DIE DROSSELUNG IST KEIN FEHLSCHLAG, und ab dem scharfen P5 ist dieser Unterschied ein Bauabbruch
@@ -10019,7 +10562,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // A non-cancellable movement/airborne tick is not a failed placement stance. Preserve the route that is
             // already making the player safe; never fall through to assemble() and replace it with another target.
             Goal activeGoal = princeps.getPathingBehavior().getGoal();
-            return new PathingCommand(activeGoal,
+            return continueCurrentRoute(activeGoal,
                     activeGoal == null ? PathingCommandType.SET_GOAL_AND_PATH
                             : PathingCommandType.REVALIDATE_GOAL_AND_PATH);
         }
@@ -10104,6 +10647,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (ticks <= 0 && lookingAtInteraction && !ctx.player().isCrouching()) {
                 BuildTrace.intendWorldChange("interact", pos.x, pos.y, pos.z,
                         "stepping the state, " + clicksLeft + " click(s) left");
+                progressActions.arm(positionKey(pos), bcc.bsi.get0(pos), bcc.getSchematic(pos.x, pos.y, pos.z, bcc.bsi.get0(pos)));
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
                 ticks = 5; // one click per few ticks so each registers as a single state step
             }
@@ -10115,6 +10659,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // the work set that are starving for a material sitting in the backpack. See appendStarvedWorkSetMaterials.
             List<BlockState> hotbarDemand = new ArrayList<>(desirableOnHotbar);
             appendStarvedWorkSetMaterials(bcc, hotbarDemand);
+            if (electedCell != null && !electedBreak) {
+                BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, bcc.bsi.get0(electedCell));
+                if (wanted != null) {
+                    hotbarDemand.clear();
+                    hotbarDemand.add(wanted);
+                }
+            }
             ArrayList<Integer> usefulSlots = new ArrayList<>();
             List<BlockState> noValidHotbarOption = new ArrayList<>();
             outer:
@@ -10399,7 +10950,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         && !MovementHelper.isReplaceable(
                         committedPlaceTarget.x, committedPlaceTarget.y, committedPlaceTarget.z,
                         bcc.bsi.get0(committedPlaceTarget), bcc.bsi)
-                        && ((calcFailed && noProgressTicks >= UNSTICK_AT_TICKS) || noProgressTicks >= 120);
+                        && calcFailed && noProgressTicks >= UNSTICK_AT_TICKS;
                 if (committedWrongBlockRouteFailed) {
                     BetterBlockPos stalled = new BetterBlockPos(committedPlaceTarget);
                     deferCell(stalled, calcFailed
@@ -10409,7 +10960,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     resetNavigationProgressTracking();
                     return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
-                boolean rotateFailedRoute = !placementTargetLock.isActive()
+                boolean rotateFailedRoute = electedCell == null && !placementTargetLock.isActive()
                         && ((calcFailed && noProgressTicks >= UNSTICK_AT_TICKS) || noProgressTicks >= 120);
                 if (rotateFailedRoute) {
                     BetterBlockPos stalled = nearestRoutableUnresolved(feet, bcc);
@@ -10529,36 +11080,624 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 finishWith(Ending.MATERIALS_MISSING, "Unable to continue: " + resourceBlocker,
                         java.util.Collections.singletonList("The build is paused; supply the material and start it again."));
-                paused = true;
+                pause();
                 return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
             }
         }
-        driveLanesInShadow(goal);
-        // DIE BAHN DIESES TICKS KANN SICH EINE ZEILE VORHER GEAENDERT HABEN, und dann darf nicht der alte
-        // Kontext hinausgehen. laneThisTick wird ganz oben im Tick aus dem damaligen Stand gelesen; die
-        // Eskalation faellt erst hier unten. Wer dazwischen nichts tut, schickt dem Router den Bahn-A-Kontext
-        // fuer eine Zelle, die seit einer Zeile unter Bahn B faehrt.
-        //
-        // DAS WAR DIE ZWEITE HAELFTE DES STILLSTANDS, und ohne sie war die erste wirkungslos: der Abbruch der
-        // laufenden Suche macht inProgress frei, und der Befehl aus DEMSELBEN Tick laeuft mit dem alten Kontext
-        // sofort wieder hinein. Im naechsten Tick steht die neue Suche schon, also greift die richtige Bahn erst,
-        // wenn diese abgelaufen ist -- volle failureTimeoutMS, bei den 60 tps des Bench 120 Ticks. Genau die
-        // 121 Ticks, die 43-mal je Lauf gemessen wurden, und sie ueberlebten den volatile-Fix unveraendert.
-        //
-        // Warum eine Bahn-A-Suche so lange braucht und die Sonde nicht: beide kommen zum selben Nein, aber die
-        // Sonde bricht bei 5000 Knoten ab (108 ms), waehrend die echte Suche kein Knotenbudget hat und bis zum
-        // Zeitablauf sucht -- gemessen 260423 Knoten fuer ein Ziel zwei Bloecke entfernt, das ohne Hilfsblock
-        // schlicht nicht erreichbar ist.
-        // Eigene Variable statt einer Zuweisung an bcc: das Feld wird weiter oben von einem Lambda gelesen und
-        // muss effektiv final bleiben. Betroffen ist ohnehin nur, was an den Router hinausgeht.
-        BuilderCalculationContext contextForTheRouter = bcc;
-        Lane laneNow = laneForCurrentCell(electedCell);
-        if (laneNow != laneThisTick) {
-            contextForTheRouter = new BuilderCalculationContext(laneNow);
-            scaffoldPassAllowed = laneNow == Lane.B_HELPERS_ALLOWED;
+        PathingCommand route = finishBuilderRoute(goal, electedGoal == null ? goal : electedGoal,
+                PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, bcc);
+        return startCleanupEscape(bcc, isSafeToCancel) ? cleanupHold() : route;
+    }
+
+    /** All new builder routes service the same target-bound probe, including early recovery returns.
+     * The work question excludes opportunistic cleanup fallbacks: reaching another helper is not a proof that
+     * the selected placement stance can be reached. The actual router still receives its full navigation goal. */
+    private PathingCommand finishBuilderRoute(Goal routeGoal, Goal workGoal, PathingCommandType type,
+                                             BuilderCalculationContext context) {
+        PlatformTraverseApproach platform = platformTraverseApproach;
+        boolean platformStep = platform != null && platform.target.equals(electedCell);
+        if (platformStep) {
+            routeGoal = platformTraverseApproach.goal;
+            workGoal = platformTraverseApproach.goal;
         }
-        return new PathingCommandContext(goal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH,
-                contextForTheRouter);
+        driveLanesInShadow(workGoal);
+        // A consumed negative answer can withdraw this exact offer and clear its selected work.
+        // Never retain the marked goal while silently replacing its no-mining context with ordinary rules.
+        if (platformStep && (platformTraverseApproach != platform || !platform.target.equals(electedCell))) {
+            return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+        }
+        Lane lane = platformStep ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
+        // Consuming A=NONE can change permissions in this very tick. Never dispatch the old A snapshot for B.
+        BuilderCalculationContext routeContext = context.lane == lane && context.platformApproach == platformTraverseApproach
+                ? context : new BuilderCalculationContext(lane);
+        scaffoldPassAllowed = lane == Lane.B_HELPERS_ALLOWED;
+        return new PathingCommandContext(routeGoal, type, routeContext);
+    }
+
+    private enum CleanupStage { CANDIDATE, PREFIX_PROOF, PRESENT_PROOF, REMOVED_PROOF,
+        WALK_PREFIX, PLACE, WAIT_PLACE, WALK_PRESENT, DOWNWARD, WALK_REMOVED, BLOCKED }
+
+    private record CleanupBounds(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
+        boolean contains(int x, int y, int z) {
+            return x >= minX && x <= maxX && y >= minY && y <= maxY && z >= minZ && z <= maxZ;
+        }
+    }
+
+    /** A finite local action chain. Its three search contexts never escape into the movement executor. */
+    private final class CleanupEscape {
+        final BetterBlockPos owner = electedCell;
+        final Goal ownerGoal = electedGoal;
+        final Object world = ctx.world();
+        final ISchematic model = realSchematic == null ? schematic : realSchematic;
+        final BlockPos buildOrigin = new BlockPos(origin);
+        final BetterBlockPos start = ctx.playerFeet();
+        BetterBlockPos proofStart = start;
+        final BuilderCalculationContext initialRules;
+        final long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(60);
+        final PathProbe probe = new PathProbe("cleanup-one-helper");
+        final CleanupBounds bounds;
+        final Map<Long, BlockState> snapshot = new HashMap<>();
+        final ArrayDeque<BetterBlockPos> candidates = new ArrayDeque<>();
+        final ArrayDeque<BetterBlockPos> stances = new ArrayDeque<>();
+        final List<BetterBlockPos> floors = new ArrayList<>();
+        final List<BetterBlockPos> originalSupports = new ArrayList<>();
+        CleanupStage stage = CleanupStage.CANDIDATE;
+        BetterBlockPos helper, stance, floor;
+        BlockState material;
+        Goal queryGoal;
+        BetterBlockPos queryStart;
+        CleanupEscapeContext queryContext;
+        boolean prefixProved, presentProved, removedProved, placed;
+        int placementCenteringTicks, placementSettleTicks;
+        double placementFailedCenterDistanceSq = Double.POSITIVE_INFINITY;
+        boolean placementAimReported;
+        boolean placementMaterialWaitReported;
+        boolean worldInvalidated;
+        Placement placementRequest;
+        CleanupEscapeContext realRouteContext;
+        Goal realRouteGoal;
+        BetterBlockPos realRouteDestination;
+        boolean realRouteMayMine;
+        String blockedReason;
+
+        CleanupEscape(BuilderCalculationContext bcc) {
+            initialRules = bcc;
+            int radius = (int) Math.ceil(ctx.playerController().getBlockReachDistance()) + 1;
+            bounds = new CleanupBounds(start.x - radius, start.x + radius,
+                    Math.min(owner.y - 1, start.y - bcc.maxFallHeightNoWater - 2), start.y + 3,
+                    start.z - radius, start.z + radius);
+            // A margin covers jump overshoot/head checks. Any unobserved/unloaded area refuses the episode.
+            for (int x = bounds.minX - 5; x <= bounds.maxX + 5; x++) {
+                for (int z = bounds.minZ - 5; z <= bounds.maxZ + 5; z++) {
+                    if (!bcc.bsi.worldContainsLoadedChunk(x, z)) { block("unloaded local proof area"); return; }
+                    for (int y = bounds.minY - 2; y <= bounds.maxY + 3; y++) {
+                        snapshot.put(BlockPos.asLong(x, y, z), ctx.world().getBlockState(new BlockPos(x, y, z)));
+                    }
+                }
+            }
+            List<BetterBlockPos> ordered = new ArrayList<>();
+            for (int x = bounds.minX; x <= bounds.maxX; x++) {
+                for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
+                    for (int y = bounds.minY + 1; y < start.y; y++) {
+                        BetterBlockPos at = new BetterBlockPos(x, y, z);
+                        if (!dryClear(at, bcc) || !MovementHelper.canWalkOn(bcc, x, y - 1, z)) continue;
+                        // The permanent destination must stay valid after removing all original helper debt.
+                        if (cleanupPermanentFloor(at.below(), bcc)
+                                && y <= owner.y && cleanupCanSwingFrom(at, owner)) floors.add(at);
+                        if (cleanupMayOccupy(at, bcc) && !at.equals(owner)) ordered.add(at);
+                    }
+                }
+            }
+            ordered.sort(Comparator.<BetterBlockPos>comparingInt(p -> -p.y)
+                    .thenComparingDouble(p -> p.distSqr(owner)).thenComparingInt(p -> p.x).thenComparingInt(p -> p.z));
+            candidates.addAll(ordered);
+            if (floors.isEmpty()) block("no independent permanent cleanup floor");
+        }
+
+        void block(String why) {
+            if (stage == CleanupStage.BLOCKED) return;
+            probe.cancel();
+            stage = CleanupStage.BLOCKED;
+            blockedReason = why;
+            princeps.getInputOverrideHandler().getBlockPlaceHelper().clearExpectedPlacement();
+            BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-BLOCKED", owner.x, owner.y, owner.z, why);
+        }
+
+        boolean identityCurrent() {
+            return world == ctx.world() && model == (realSchematic == null ? schematic : realSchematic)
+                    && buildOrigin.equals(origin) && owner.equals(electedCell) && ownerGoal == electedGoal
+                    && !buildInRows && System.nanoTime() < deadline;
+        }
+
+        boolean rulesCurrent(BuilderCalculationContext now) {
+            return initialRules.maxFallHeightNoWater == now.maxFallHeightNoWater
+                    && initialRules.allowDownward == now.allowDownward && initialRules.allowParkour == now.allowParkour
+                    && initialRules.allowParkourAscend == now.allowParkourAscend
+                    && initialRules.allowParkourPlace == now.allowParkourPlace
+                    && initialRules.allowBreak == now.allowBreak && initialRules.allowBreakAnyway.equals(now.allowBreakAnyway)
+                    && initialRules.canSprint == now.canSprint;
+        }
+
+        void serverChanged(BlockPos at, BlockState state) {
+            BlockState before = snapshot.get(at.asLong());
+            if (before != null && !(placed && at.equals(helper)) && !before.equals(state)) worldInvalidated = true;
+        }
+
+        boolean worldCurrent() { return !worldInvalidated; }
+
+        /** Full comparison only at proof/action boundaries; ordinary route ticks use packet invalidation. */
+        boolean verifyWorld() {
+            if (worldInvalidated || world != ctx.world()) return false;
+            for (Map.Entry<Long, BlockState> entry : snapshot.entrySet()) {
+                BlockPos at = BlockPos.of(entry.getKey());
+                if (placed && at.equals(helper)) continue; // the sole declared mutation of this episode
+                if (!ctx.world().hasChunkAt(at) || !entry.getValue().equals(ctx.world().getBlockState(at))) {
+                    worldInvalidated = true; return false;
+                }
+            }
+            return true;
+        }
+    }
+
+    /** Strict dry navigation. Ordinary Lane A alone still permits template placement and mining. */
+    final class CleanupEscapeContext extends BuilderCalculationContext {
+        private final CleanupBounds bounds;
+        private final BlockPos mineOnly;
+        private final BlockState mineState;
+        private final BuilderCleanupDebt permittedDebt;
+        private final boolean hypotheticalMine;
+
+        CleanupEscapeContext(CleanupBounds bounds, BlockPos mineOnly, BlockState mineState,
+                             BlockPos assumeAt, BlockState assumedState) {
+            super(Lane.A_NO_PLACING, null, false);
+            this.bounds = bounds;
+            this.mineOnly = mineOnly;
+            this.mineState = mineState;
+            this.hypotheticalMine = mineOnly != null && mineOnly.equals(assumeAt);
+            this.permittedDebt = mineOnly != null && assumeAt == null ? cleanupEscapeDebt : null;
+            if (assumeAt != null) bsi.nimmBlockAn(assumeAt, assumedState);
+            // Each context and BSI is private and immutable for the full worker lifetime, including cancellation.
+        }
+
+        @Override public double costOfPlacingAt(int x, int y, int z, BlockState current) { return COST_INF; }
+        @Override public PlacementLicence placementLicence() { return PlacementLicence.NONE; }
+        @Override public boolean mayUsePathingBarriers() { return false; }
+        @Override public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
+            if (mineOnly == null || mineOnly.getX() != x || mineOnly.getY() != y || mineOnly.getZ() != z
+                    || mineState == null || current.getBlock() != mineState.getBlock()
+                    || (!allowBreak && !allowBreakAnyway.contains(current.getBlock()))
+                    || isPossiblyProtected(x, y, z)) return COST_INF;
+            // PRESENT proves only a hypothetical edge. Real execution must retain its current, revocable
+            // ownership: AIR followed by an identical foreign block never reacquires that permission.
+            if (!hypotheticalMine && (permittedDebt == null || permittedDebt != cleanupEscapeDebt
+                    || permittedDebt.episode != cleanupEscape
+                    || !permittedDebt.mayMine(ctx.world(), mineOnly, current))) return COST_INF;
+            return super.breakCostMultiplierAt(x, y, z, current);
+        }
+        @Override public boolean isPathPositionAllowed(int x, int y, int z) {
+            return bounds.contains(x, y, z) && bsi.isLoaded(x, z)
+                    && get(x, y, z).getFluidState().isEmpty() && get(x, y + 1, z).getFluidState().isEmpty()
+                    && get(x, y - 1, z).getFluidState().isEmpty();
+        }
+    }
+
+    private boolean dryClear(BlockPos feet, BuilderCalculationContext bcc) {
+        return bcc.get(feet).isAir() && bcc.get(feet.above()).isAir()
+                && bcc.get(feet.below()).getFluidState().isEmpty();
+    }
+
+    private boolean cleanupMayOccupy(BlockPos at, BuilderCalculationContext bcc) {
+        if (!bcc.hasThrowaway || !Princeps.settings().allowPlace.value || !bcc.get(at).isAir()
+                || bcc.isPossiblyProtected(at.getX(), at.getY(), at.getZ())
+                || !bcc.worldBorder.canPlaceAt(at.getX(), at.getZ())) return false;
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        int x = at.getX() - origin.getX(), y = at.getY() - origin.getY(), z = at.getZ() - origin.getZ();
+        if (x < 0 || y < 0 || z < 0 || x >= full.widthX() || y >= full.heightY() || z >= full.lengthZ()) return true;
+        try {
+            BlockState wanted = full.desiredState(x, y, z, bcc.get(at), approxPlaceable);
+            return wanted != null && wanted.isAir();
+        } catch (RuntimeException invalidModel) { return false; }
+    }
+
+    private boolean cleanupPermanentFloor(BlockPos at, BuilderCalculationContext bcc) {
+        if (navigationScaffolds.contains(at) || isScaffoldLeftBehind(at.getX(), at.getY(), at.getZ(), bcc)
+                || incorrectPositions != null && incorrectPositions.contains(new BetterBlockPos(at))) return false;
+        ISchematic full = realSchematic == null ? schematic : realSchematic;
+        int x = at.getX() - origin.getX(), y = at.getY() - origin.getY(), z = at.getZ() - origin.getZ();
+        if (x < 0 || y < 0 || z < 0 || x >= full.widthX() || y >= full.heightY() || z >= full.lengthZ()) return true;
+        BlockState current = bcc.get(at);
+        try {
+            BlockState wanted = full.desiredState(x, y, z, current, approxPlaceable);
+            return wanted != null && !wanted.isAir() && wanted.equals(current);
+        } catch (RuntimeException invalidModel) { return false; }
+    }
+
+    /** The finite original support columns involved in this candidate, never the new helper itself. */
+    private void cleanupOriginalSupports(CleanupEscape e, BlockPos base, BuilderCalculationContext bcc) {
+        if (!navigationScaffolds.owns(base, bcc.get(base))) return;
+        for (int step : new int[]{-1, 1}) {
+            for (int y = base.getY(); y >= e.bounds.minY && y <= e.bounds.maxY; y += step) {
+                BetterBlockPos at = new BetterBlockPos(base.getX(), y, base.getZ());
+                if (!navigationScaffolds.owns(at, bcc.get(at))) break;
+                if (!e.originalSupports.contains(at)) e.originalSupports.add(at);
+            }
+        }
+    }
+
+    private boolean cleanupCanSwingFrom(BetterBlockPos stance, BetterBlockPos target) {
+        Vec3 eye = new Vec3(stance.x + 0.5, stance.y + ctx.player().getEyeHeight(Pose.STANDING), stance.z + 0.5);
+        double reach = ctx.playerController().getBlockReachDistance();
+        for (Direction face : Direction.values()) {
+            Vec3 hitAt = Vec3.atCenterOf(target).add(face.getStepX() * 0.5, face.getStepY() * 0.5, face.getStepZ() * 0.5);
+            if (eye.distanceTo(hitAt) > reach) continue;
+            BlockHitResult hit = ctx.world().clip(new net.minecraft.world.level.ClipContext(eye,
+                    hitAt.add(hitAt.subtract(eye).normalize().scale(0.001)),
+                    net.minecraft.world.level.ClipContext.Block.OUTLINE,
+                    net.minecraft.world.level.ClipContext.Fluid.NONE, ctx.player()));
+            if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(target)) return true;
+        }
+        return false;
+    }
+
+    private boolean startCleanupEscape(BuilderCalculationContext bcc, boolean safeToCancel) {
+        if (cleanupEscape != null || !safeToCancel || !ctx.player().onGround() || buildInRows || !electedBreak
+                || electedCell == null || laneAProof == null || !laneQuestionCurrent(laneAProof, electedGoal, false)
+                || !navigationScaffolds.owns(electedCell, ctx.world().getBlockState(electedCell))
+                || cleanupEscapeAttemptedOwners.contains(electedCell.asLong())
+                || cleanupEscapeDebt != null && !cleanupEscapeDebt.discharged()) return false;
+        if (!laneQuestionCurrent(laneAProof, electedGoal, true)) {
+            // Accepted navigation permission can survive movement; a new escape needs a fresh negative search
+            // from the actual body/world revision. Re-ask instead of upgrading that older fact into a proof.
+            discardLaneQuestion();
+            laneAProof = null;
+            laneEscalatedCell = null;
+            return false;
+        }
+        cleanupEscapeAttemptedOwners.add(electedCell.asLong());
+        cleanupEscape = new CleanupEscape(bcc);
+        BuildTrace.cell(buildTick, "CLEANUP-ESCAPE", electedCell.x, electedCell.y, electedCell.z,
+                "finite candidates=" + cleanupEscape.candidates.size() + " permanentFloors=" + cleanupEscape.floors.size());
+        return true;
+    }
+
+    private PathingCommand cleanupHold() {
+        return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+    }
+
+    private boolean askCleanup(CleanupEscape e, BetterBlockPos start, Goal goal, CleanupEscapeContext context) {
+        if (!e.identityCurrent() || !ctx.playerFeet().equals(e.proofStart) || !e.verifyWorld()) {
+            e.block("proof identity/start/world changed"); return false;
+        }
+        e.queryStart = start;
+        e.queryGoal = goal;
+        e.queryContext = context;
+        return e.probe.start(ctx, start, goal, context, LANE_B_BUDGET,
+                Princeps.settings().primaryTimeoutMS.value, Princeps.settings().failureTimeoutMS.value);
+    }
+
+    static boolean cleanupCompleteDryPath(PathProbe.Result answer, BetterBlockPos start, Goal goal, int maxDryFall) {
+        if (answer == null || !answer.reachedGoal() || answer.path == null || answer.path.positions().isEmpty()
+                || !start.equals(answer.path.getSrc()) || !goal.isInGoal(answer.path.getDest())) return false;
+        List<BetterBlockPos> positions = answer.path.positions();
+        for (int i = 1; i < positions.size(); i++) {
+            if (positions.get(i - 1).y - positions.get(i).y > maxDryFall) return false;
+        }
+        return true;
+    }
+
+    private PathingCommand cleanupRoute(CleanupEscape e, BetterBlockPos destination, boolean mayMineHelper) {
+        if (e.realRouteContext == null || !destination.equals(e.realRouteDestination) || mayMineHelper != e.realRouteMayMine) {
+            BlockPos mine = mayMineHelper ? e.helper : null;
+            e.realRouteContext = new CleanupEscapeContext(e.bounds, mine, e.material, null, null);
+            e.realRouteGoal = new GoalBlock(destination);
+            e.realRouteDestination = destination;
+            e.realRouteMayMine = mayMineHelper;
+        }
+        return new PathingCommandContext(e.realRouteGoal, PathingCommandType.FORCE_REVALIDATE_GOAL_AND_PATH, e.realRouteContext);
+    }
+
+    private PathingCommand driveCleanupEscape(boolean safeToCancel, BuilderCalculationContext ordinary) {
+        CleanupEscape e = cleanupEscape;
+        observeCleanupInteraction(e);
+        if (!safeToCancel && princeps.getPathingBehavior().isPathing()) {
+            return continueCurrentRoute(princeps.getPathingBehavior().getGoal(), PathingCommandType.REVALIDATE_GOAL_AND_PATH);
+        }
+        if (!e.identityCurrent() || !e.worldCurrent() || !e.rulesCurrent(ordinary)) {
+            e.block("owner/model/world/rules changed or finite episode expired");
+        }
+        if (e.stage == CleanupStage.BLOCKED) return cleanupHold();
+        if (e.placed && (cleanupEscapeDebt == null || cleanupEscapeDebt.state() == BuilderCleanupDebt.State.REPLACED)) {
+            e.block("helper ownership revoked by server state"); return cleanupHold();
+        }
+
+        if (e.stage == CleanupStage.CANDIDATE) {
+            if (!e.worldCurrent()) { e.block("local world changed before proof"); return cleanupHold(); }
+            if (e.stances.isEmpty()) {
+                if (e.candidates.isEmpty()) { e.block("finite helper candidates exhausted"); return cleanupHold(); }
+                e.helper = e.candidates.removeFirst();
+                e.material = snakeIntegrityBlockState(e.helper);
+                if (e.material == null || !cleanupMayOccupy(e.helper, ordinary)) return cleanupHold();
+                e.originalSupports.clear();
+                cleanupOriginalSupports(e, e.owner, ordinary);
+                cleanupOriginalSupports(e, e.helper.below(), ordinary);
+                // Use normal inventory rules; no direct inventory write and no permission override.
+                princeps.getInventoryBehavior().throwaway(true, stack -> !stack.isEmpty()
+                        && stack.getItem() == e.material.getBlock().asItem());
+                if (hotbarStackThatPlaces(e.material) == null) {
+                    e.candidates.addFirst(e.helper); return cleanupHold();
+                }
+                e.stances.addAll(placementStancesFor(e.helper.x, e.helper.y, e.helper.z, e.material, ordinary,
+                        Integer.MAX_VALUE, true, key -> {
+                            BlockPos p = BlockPos.of(key);
+                            return e.bounds.contains(p.getX(), p.getY(), p.getZ())
+                                    && dryClear(p, ordinary) && isStandable(p.getX(), p.getY(), p.getZ());
+                        }));
+                if (e.stances.isEmpty()) return cleanupHold();
+            }
+            e.stance = e.stances.removeFirst();
+            e.prefixProved = e.presentProved = e.removedProved = false;
+            e.placementCenteringTicks = e.placementSettleTicks = 0;
+            e.placementFailedCenterDistanceSq = Double.POSITIVE_INFINITY;
+            e.placementAimReported = false;
+            e.placementMaterialWaitReported = false;
+            CleanupEscapeContext context = new CleanupEscapeContext(e.bounds, null, null, null, null);
+            if (askCleanup(e, e.proofStart, new GoalBlock(e.stance), context)) e.stage = CleanupStage.PREFIX_PROOF;
+            return cleanupHold();
+        }
+
+        if (e.stage == CleanupStage.PREFIX_PROOF || e.stage == CleanupStage.PRESENT_PROOF
+                || e.stage == CleanupStage.REMOVED_PROOF) {
+            PathProbe.Result answer = e.probe.poll();
+            if (answer == null) return cleanupHold();
+            if (!ctx.playerFeet().equals(e.proofStart) || !e.verifyWorld()) {
+                e.block("start/world changed while proving an escape leg"); return cleanupHold();
+            }
+            if (!cleanupCompleteDryPath(answer, e.queryStart, e.queryGoal, e.queryContext.maxFallHeightNoWater)) {
+                e.stage = CleanupStage.CANDIDATE; return cleanupHold();
+            }
+            if (e.stage == CleanupStage.PREFIX_PROOF) {
+                e.prefixProved = true;
+                CleanupEscapeContext present = new CleanupEscapeContext(e.bounds, null, null, e.helper, e.material);
+                if (askCleanup(e, e.stance, new GoalBlock(e.helper.above()), present)) e.stage = CleanupStage.PRESENT_PROOF;
+            } else if (e.stage == CleanupStage.PRESENT_PROOF) {
+                e.presentProved = true;
+                CleanupEscapeContext downward = new CleanupEscapeContext(e.bounds, e.helper, e.material, e.helper, e.material);
+                double cost = MovementDownward.cost(
+                        downward, e.helper.x, e.helper.y + 1, e.helper.z);
+                if (!Double.isFinite(cost) || cost >= COST_INF) { e.stage = CleanupStage.CANDIDATE; return cleanupHold(); }
+                CleanupEscapeContext removed = new CleanupEscapeContext(e.bounds, null, null, e.helper, Blocks.AIR.defaultBlockState());
+                Goal floors = new GoalComposite(e.floors.stream()
+                        .filter(at -> e.originalSupports.stream().allMatch(support -> cleanupCanSwingFrom(at, support)))
+                        .map(GoalBlock::new).toArray(Goal[]::new));
+                if (askCleanup(e, e.helper, floors, removed)) e.stage = CleanupStage.REMOVED_PROOF;
+            } else {
+                e.removedProved = true;
+                e.floor = answer.path.getDest();
+                e.stage = CleanupStage.WALK_PREFIX;
+                BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-PROVED", e.owner.x, e.owner.y, e.owner.z,
+                        "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                + " permanentFloor=" + e.floor.toShortString() + " independent PREFIX/PRESENT/REMOVED complete");
+            }
+            return cleanupHold();
+        }
+
+        if (e.stage == CleanupStage.WALK_PREFIX) {
+            PathingCommand approach = driveCleanupPlacementApproach(e);
+            if (approach != null) return approach;
+        }
+        if (e.stage == CleanupStage.PLACE) {
+            if (!centeredInPlacementStance(e.stance)) {
+                e.stage = CleanupStage.WALK_PREFIX;
+                return driveCleanupPlacementApproach(e);
+            }
+            if (!e.prefixProved || !e.presentProved || !e.removedProved || !cleanupMayOccupy(e.helper, ordinary)
+                    || !ctx.player().onGround() || !ctx.playerFeet().equals(e.stance)) {
+                e.block("placement prerequisites no longer hold"); return cleanupHold();
+            }
+            if (!e.worldCurrent()) { e.block("world changed during aim"); return cleanupHold(); }
+            if (hotbarStackThatPlaces(e.material) == null) {
+                if (!e.placementMaterialWaitReported) {
+                    e.placementMaterialWaitReported = true;
+                    BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-MATERIAL", e.owner.x, e.owner.y, e.owner.z,
+                            "helper=" + e.helper.toShortString() + " material=" + blockName(e.material)
+                                    + " waiting for normal hotbar supply; stance not rejected");
+                }
+                princeps.getInventoryBehavior().throwaway(true, stack -> !stack.isEmpty()
+                        && stack.getItem() == e.material.getBlock().asItem());
+                return cleanupHold(); // missing material is not evidence against the stance
+            }
+            return deriveCleanupPlacement(e, ordinary);
+        }
+        if (e.stage == CleanupStage.WAIT_PLACE) {
+            if (cleanupEscapeDebt.state() == BuilderCleanupDebt.State.REMOVED) {
+                e.block("server rejected or removed the requested helper"); return cleanupHold();
+            }
+            if (cleanupEscapeDebt.state() != BuilderCleanupDebt.State.OWNED) {
+                if (cleanupEscapeDebt.mayRequest()) cleanupPlacementClick(e, e.placementRequest, ordinary);
+                return cleanupHold();
+            }
+            if (!e.verifyWorld() || !ordinary.get(e.helper).equals(e.material)) {
+                e.block("world changed after helper confirmation"); return cleanupHold();
+            }
+            // The existing ledger must not acquire this new block from a request or client prediction alone.
+            if (navigationScaffolds.record(e.helper, Blocks.AIR.defaultBlockState(), e.material,
+                    templateNamesABlockAt(e.helper), Princeps.settings().acceptableThrowawayItems.value
+                            .contains(e.material.getBlock().asItem()), buildTick)) {
+                navigationScaffolds.serverChanged(e.helper, e.material); // replay the exact observation already held by OWNED debt
+            }
+            e.stage = CleanupStage.WALK_PRESENT;
+        }
+        if (e.stage == CleanupStage.WALK_PRESENT) {
+            if (!ctx.playerFeet().equals(e.helper.above()) || !ctx.player().onGround()) {
+                return cleanupRoute(e, e.helper.above(), false);
+            }
+            if (!cleanupEscapeDebt.mayMine(ctx.world(), e.helper, ordinary.get(e.helper))
+                    || !e.verifyWorld() || !MovementHelper.canWalkOn(ordinary, e.helper.x, e.helper.y - 1, e.helper.z)) {
+                e.block("downward support or ownership changed"); return cleanupHold();
+            }
+            CleanupEscapeContext downward = new CleanupEscapeContext(e.bounds, e.helper, e.material, null, null);
+            double cost = MovementDownward.cost(downward,
+                    e.helper.x, e.helper.y + 1, e.helper.z);
+            if (!Double.isFinite(cost) || cost >= COST_INF) { e.block("real downward movement is forbidden"); return cleanupHold(); }
+            e.stage = CleanupStage.DOWNWARD;
+        }
+        if (e.stage == CleanupStage.DOWNWARD) {
+            PathingCommand descending = driveCleanupDownward(e, ordinary);
+            if (descending != null) return descending;
+        }
+        if (e.stage == CleanupStage.WALK_REMOVED) {
+            if (!ctx.playerFeet().equals(e.floor) || !ctx.player().onGround()) return cleanupRoute(e, e.floor, false);
+            if (!e.verifyWorld() || !cleanupEscapeDebt.discharged() || !dryClear(e.floor, ordinary)
+                    || !MovementHelper.canWalkOn(ordinary, e.floor.x, e.floor.y - 1, e.floor.z)
+                    || !cleanupPermanentFloor(e.floor.below(), ordinary)
+                    || !cleanupCanSwingFrom(e.floor, e.owner)
+                    || !e.originalSupports.stream().allMatch(support -> cleanupCanSwingFrom(e.floor, support))) {
+                e.block("permanent cleanup stance did not verify"); return cleanupHold();
+            }
+            BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-LANDED", e.owner.x, e.owner.y, e.owner.z,
+                    "one helper removed; original owner retained; permanent feet=" + e.floor.toShortString());
+            cleanupEscape = null;
+            return cleanupHold();
+        }
+        return cleanupHold();
+    }
+
+    /** Derive the actual click before treating an approximately centered stance as unreachable. */
+    private PathingCommand deriveCleanupPlacement(CleanupEscape e, BuilderCalculationContext ordinary) {
+        int[] rejected = new int[6];
+        Optional<Placement> placement = possibleToPlace(e.material, e.helper.x, e.helper.y, e.helper.z, ordinary, rejected);
+        if (placement.isPresent()) {
+            if (!e.placementAimReported) {
+                e.placementAimReported = true;
+                BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-AIM", e.owner.x, e.owner.y, e.owner.z,
+                        "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                + " pose=" + ctx.player().position() + " live placement derived; no server ACK yet");
+            }
+            cleanupPlacementClick(e, placement.get(), ordinary);
+        } else {
+            double dx = ctx.player().position().x - (e.stance.x + 0.5D);
+            double dz = ctx.player().position().z - (e.stance.z + 0.5D);
+            double distanceSq = dx * dx + dz * dz;
+            // The ordinary 0.15 arrival tolerance is larger than a near-reach click's margin. It is not a
+            // negative click proof. Reuse one existing centering pulse and settle, then ask the real ray again.
+            // Each further pulse requires measured approach toward the center; repeated/worse poses stop here.
+            if (rejected[4] > 0 && rejected[1] == 0 && rejected[2] == 0 && rejected[3] == 0 && rejected[5] == 0
+                    && distanceSq > 0 && distanceSq < e.placementFailedCenterDistanceSq
+                    && ++e.placementCenteringTicks < STANCE_CENTERING_TICKS) {
+                if (!e.verifyWorld()) { e.block("world changed before click recentering"); return cleanupHold(); }
+                if (Double.isInfinite(e.placementFailedCenterDistanceSq)) {
+                    BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-RECENTER", e.owner.x, e.owner.y, e.owner.z,
+                            "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                    + " pose=" + ctx.player().position() + " live ray missed; approaching proved center");
+                }
+                e.placementFailedCenterDistanceSq = distanceSq;
+                e.placementSettleTicks = 0;
+                e.stage = CleanupStage.WALK_PREFIX;
+                return centerInPlacementStance(e.stance);
+            }
+            rejectCleanupPlacementStance(e, "centered live derivation failed: noSolid=" + rejected[0]
+                    + " cannotSurvive=" + rejected[1] + " obstructed=" + rejected[2] + " emptyShape=" + rejected[3]
+                    + " rayMiss=" + rejected[4] + " itemStateRejected=" + rejected[5]);
+        }
+        return cleanupHold();
+    }
+
+    private PathingCommand driveCleanupPlacementApproach(CleanupEscape e) {
+        if (!ctx.playerFeet().equals(e.stance) || !ctx.player().onGround()) {
+            e.placementSettleTicks = 0;
+            return cleanupRoute(e, e.stance, false);
+        }
+        if (!e.verifyWorld()) { e.block("world changed before actual placement"); return cleanupHold(); }
+        // GoalBlock arrives anywhere in the cell; the placement oracle proved its crouched CENTER.
+        // Reuse the ordinary actor's bounded centering and one input-free settling tick before deriving a click.
+        if (!centeredInPlacementStance(e.stance) || princeps.getPathingBehavior().getCurrent() != null) {
+            e.placementSettleTicks = 0;
+            if (++e.placementCenteringTicks >= STANCE_CENTERING_TICKS) {
+                rejectCleanupPlacementStance(e, "could not settle at the proved placement center");
+                return cleanupHold();
+            }
+            if (princeps.getPathingBehavior().getCurrent() != null) return cleanupHold();
+            if (e.placementCenteringTicks == 1) {
+                BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-CENTER", e.owner.x, e.owner.y, e.owner.z,
+                        "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                                + " pose=" + ctx.player().position());
+            }
+            return centerInPlacementStance(e.stance);
+        }
+        if (e.placementSettleTicks++ == 0) return settleInPlacementStance();
+        e.stage = CleanupStage.PLACE;
+        return null;
+    }
+
+    /** Consume this concrete stance once. Re-prove alternatives from the actual body, under the same deadline. */
+    private void rejectCleanupPlacementStance(CleanupEscape e, String why) {
+        if (e.placed || e.placementRequest != null) { e.block("cannot reject a stance with outstanding helper debt"); return; }
+        e.probe.cancel();
+        BuildTrace.cell(buildTick, "CLEANUP-ESCAPE-STANCE-REJECT", e.owner.x, e.owner.y, e.owner.z,
+                "helper=" + e.helper.toShortString() + " stance=" + e.stance.toShortString()
+                        + " pose=" + ctx.player().position() + " " + why);
+        e.proofStart = ctx.playerFeet();
+        e.prefixProved = e.presentProved = e.removedProved = false;
+        e.realRouteContext = null;
+        e.stage = CleanupStage.CANDIDATE;
+    }
+
+    /** The real Downward phase: an already removed helper may be entered, but never mined a second time. */
+    private PathingCommand driveCleanupDownward(CleanupEscape e, BuilderCalculationContext ordinary) {
+        BlockState actual = ordinary.get(e.helper);
+        if (!actual.isAir() && !cleanupEscapeDebt.mayMine(ctx.world(), e.helper, actual)) {
+            e.block("downward helper is no longer owned"); return cleanupHold();
+        }
+        if (!ctx.playerFeet().equals(e.helper) || !ctx.player().onGround()
+                || !cleanupEscapeDebt.discharged()) return cleanupRoute(e, e.helper, true);
+        if (!e.verifyWorld() || !actual.isAir()) {
+            e.block("world changed after downward removal"); return cleanupHold();
+        }
+        e.stage = CleanupStage.WALK_REMOVED;
+        return null;
+    }
+
+    private void observeCleanupInteraction(CleanupEscape e) {
+        if (e.placementRequest == null || cleanupEscapeDebt == null) return;
+        Placement placement = e.placementRequest;
+        BlockPlaceHelper.SuccessfulBlockInteraction receipt =
+                princeps.getInputOverrideHandler().getBlockPlaceHelper().getLastSuccessfulBlockInteraction();
+        if (receipt != null && receipt.matchesMainHandPlacement(placement.placeAgainst, placement.side, placement.target,
+                placement.hotbarSelection, placement.desired.getBlock().asItem())) {
+            cleanupEscapeDebt.interactionObserved(ctx.world(), e, receipt.getSerial(), System.nanoTime());
+        }
+    }
+
+    private void cleanupPlacementClick(CleanupEscape e, Placement placement, BuilderCalculationContext bcc) {
+        if (placement == null || !e.identityCurrent() || !e.worldCurrent()) return;
+        if (princeps.getSurvivalBehavior() != null && princeps.getSurvivalBehavior().ownsInventory()) return;
+        princeps.getLookBehavior().updateTarget(placement.rot, true, AimIntent.PLACE);
+        ctx.player().getInventory().setSelectedSlot(placement.hotbarSelection);
+        princeps.getInputOverrideHandler().setInputForceState(Input.SNEAK, true);
+        HitResult hit = ctx.objectMouseOver();
+        BlockPlaceHelper placer = princeps.getInputOverrideHandler().getBlockPlaceHelper();
+        if (hit == null || hit.getType() != HitResult.Type.BLOCK || placer.isThrottled()
+                || !((BlockHitResult) hit).getBlockPos().equals(placement.placeAgainst)
+                || ((BlockHitResult) hit).getDirection() != placement.side || !liveRayWouldPlaceDesired(placement, bcc)) return;
+        if (e.placementRequest == null) {
+            if (!e.verifyWorld()) { e.block("world changed at actual placement"); return; }
+            e.placementRequest = placement;
+            cleanupEscapeDebt = new BuilderCleanupDebt(ctx.world(), e, e.helper, e.material,
+                    placer.getSuccessfulBlockInteractions(), cleanupServerUpdateSequence, System.nanoTime());
+            progressActions.arm(positionKey(e.helper), Blocks.AIR.defaultBlockState(), e.material);
+            e.placed = true;
+            e.stage = CleanupStage.WAIT_PLACE;
+        }
+        BuilderCleanupDebt debt = cleanupEscapeDebt;
+        if (debt == null || debt.episode != e || !debt.mayRequest()) return;
+        Item expected = placement.desired.getBlock().asItem();
+        placer.expectMainHandPlacement(placement.placeAgainst, placement.side, placement.target,
+                placement.hotbarSelection, expected, () -> cleanupEscape == e && e.identityCurrent()
+                        && e.worldCurrent() && cleanupEscapeDebt == debt && debt.mayRequest()
+                        && e.stage == CleanupStage.WAIT_PLACE && liveRayWouldPlaceDesired(placement, bcc));
+        BuildTrace.intendWorldChange("cleanup-helper", e.helper.x, e.helper.y, e.helper.z,
+                "one proved helper for retained BREAK owner");
+        princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_RIGHT, true);
     }
 
     // ==========================================================================================================
@@ -10602,22 +11741,165 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * eine Frage, deren Antwort im Schattenlauf 1483 von 1483 Mal "ja" lautete (Median 1 ms).
      */
     private Lane laneForCurrentCell(BetterBlockPos cell) {
-        return cell != null && cell.equals(laneEscalatedCell) ? Lane.B_HELPERS_ALLOWED : Lane.A_NO_PLACING;
+        return cell != null && cell.equals(laneEscalatedCell) && helpersAllowedForElectedWork()
+                && laneQuestionCurrent(laneAProof, laneAProof == null ? null : laneAProof.goal, false)
+                ? Lane.B_HELPERS_ALLOWED : Lane.A_NO_PLACING;
     }
 
     /** The one cell lane A has provably failed on. At most one at a time -- there is only ever one target. */
     private BetterBlockPos laneEscalatedCell;
 
+    private ISchematic layerMask;
+    private ISchematic layerMaskSource;
+    private int layerMaskMinY;
+    private int layerMaskMaxY;
+    private boolean layerMaskTopDown;
+
+    /** Stable identity for the same tick-produced model mask; a genuine model/band/rule change gets a new mask. */
+    private ISchematic layerMask(ISchematic realSchematic, int minYInclusive, int maxYInclusive, boolean topDownLayers) {
+        if (layerMask != null && layerMaskSource == realSchematic && layerMaskMinY == minYInclusive
+                && layerMaskMaxY == maxYInclusive && layerMaskTopDown == topDownLayers) return layerMask;
+        layerMaskSource = realSchematic;
+        layerMaskMinY = minYInclusive;
+        layerMaskMaxY = maxYInclusive;
+        layerMaskTopDown = topDownLayers;
+        layerMask = new ISchematic() {
+            @Override
+            public BlockState desiredState(int x, int y, int z, BlockState current, List<BlockState> approxPlaceable) {
+                BlockState geruest = BuilderProcess.this.scaffoldOverrideAt(x, y, z);
+                if (geruest != null) {
+                    return geruest;
+                }
+                return realSchematic.desiredState(x, y, z, current, BuilderProcess.this.approxPlaceable);
+            }
+
+            @Override
+            public boolean inSchematic(int x, int y, int z, BlockState currentState) {
+                if (BuilderProcess.this.scaffoldOverrideAt(x, y, z) != null) {
+                    // Die Geruestzelle liegt regelmaessig UNTER dem Ebenenband -- das ist ja der Grund, warum
+                    // die bediente Zelle in der Luft haengt. Ohne diese Zeile waere sie ausserhalb des
+                    // Arbeitssatzes und niemand wuerde sie je setzen.
+                    return true;
+                }
+                if (!ISchematic.super.inSchematic(x, y, z, currentState)
+                        || !realSchematic.inSchematic(x, y, z, currentState)) {
+                    return false;
+                }
+                if (y >= minYInclusive && y <= maxYInclusive) {
+                    return true;
+                }
+                // A top-down layer containing a door UPPER must atomically include its LOWER one row below.
+                // Otherwise the upper is intentionally non-placeable, the base is outside the wrapper, and the
+                // layer can never finish or expand.
+                if (!topDownLayers || y != minYInclusive - 1) {
+                    return false;
+                }
+                BlockState lower = realSchematic.desiredState(
+                        x, y, z, currentState, BuilderProcess.this.approxPlaceable);
+                if (lower == null || !(lower.getBlock() instanceof DoorBlock)
+                        || lower.getValue(DoorBlock.HALF) != DoubleBlockHalf.LOWER) {
+                    return false;
+                }
+                BlockPos aboveWorld = new BlockPos(
+                        BuilderProcess.this.origin.getX() + x,
+                        BuilderProcess.this.origin.getY() + y + 1,
+                        BuilderProcess.this.origin.getZ() + z);
+                BlockState aboveCurrent = ctx.world().getBlockState(aboveWorld);
+                if (!realSchematic.inSchematic(x, y + 1, z, aboveCurrent)) {
+                    return false;
+                }
+                BlockState upper = realSchematic.desiredState(
+                        x, y + 1, z, aboveCurrent, BuilderProcess.this.approxPlaceable);
+                return upper != null && upper.getBlock() == lower.getBlock()
+                        && upper.getValue(DoorBlock.HALF) == DoubleBlockHalf.UPPER;
+            }
+
+            @Override
+            public void reset() {
+                realSchematic.reset();
+            }
+
+            @Override
+            public int widthX() {
+                return realSchematic.widthX();
+            }
+
+            @Override
+            public int heightY() {
+                return realSchematic.heightY();
+            }
+
+            @Override
+            public int lengthZ() {
+                return realSchematic.lengthZ();
+            }
+        };
+        return layerMask;
+    }
+
+    private LaneQuestion laneQuestion;
+    private LaneQuestion laneAProof;
+    private boolean laneBAnswered;
+
+    /** The actual question, including the build/model snapshot and the start from which a negative answer applies. */
+    private record LaneQuestion(BetterBlockPos cell, Goal goal, Goal targetGoal, BetterBlockPos start,
+                                BuilderCalculationContext context, BlockState targetState,
+                                boolean cleanup, long worldRevision, BetterBlockPos scaffold, BlockState scaffoldState) { }
+
+    private boolean laneQuestionCurrent(LaneQuestion question, Goal goal, boolean pending) {
+        if (question == null || !question.cell.equals(electedCell) || !Objects.equals(question.goal, goal)
+                || !Objects.equals(question.targetGoal, electedGoal) || question.cleanup != scaffoldCleanupActive
+                || !Objects.equals(question.scaffold, scaffoldCell) || !Objects.equals(question.scaffoldState, scaffoldWanted)
+                || question.context.platformApproach != platformTraverseApproach
+                || question.context.schematic != schematic || question.context.rowMode != buildInRows
+                || buildInRows && (question.context.rowBandStart != rowActiveBandStart
+                    || question.context.rowFrontier != rowActiveFrontier)
+                || origin == null || question.context.originX != origin.getX()
+                || question.context.originY != origin.getY() || question.context.originZ != origin.getZ()
+                || question.context.world != ctx.world()
+                || !question.targetState.equals(ctx.world().getBlockState(question.cell))) return false;
+        int count = question.context.placeable.size();
+        if (approxPlaceable == null || approxPlaceable.size() < count) return false;
+        // These are inventory approximations, whose simulated facing changes with the player's look/position.
+        // Routing uses their block/item identity; a head turn must not revoke the same available material.
+        for (int slot = 0; slot < count; slot++) {
+            if (question.context.placeable.get(slot).getBlock() != approxPlaceable.get(slot).getBlock()) return false;
+        }
+        return !pending || question.start.equals(ctx.playerFeet()) && question.worldRevision == confirmedProgressRevision;
+    }
+
+    private void discardLaneQuestion() {
+        if (laneProbe != null) laneProbe.cancel();
+        laneQuestion = null;
+        laneProbeCell = null;
+    }
+
+    private boolean helpersAllowedForElectedWork() {
+        // An owned helper must not create a new helper debt to remove itself. A separate bounded descent contract
+        // is required before that transition can be enabled. Ordinary target removals keep the normal lane rules.
+        return !scaffoldCleanupActive && (!electedBreak || !navigationScaffolds.contains(electedCell));
+    }
+
     private void driveLanesInShadow(Goal goal) {
         if (goal == null || electedCell == null) {
+            discardLaneQuestion();
+            laneAProof = null;
+            laneEscalatedCell = null;
             return;
         }
-        if (laneEscalatedCell != null && !laneEscalatedCell.equals(electedCell)) {
-            laneEscalatedCell = null;   // eine andere Zelle: die Eskalation der alten gilt nicht fuer sie
+        if (laneAProof != null && !laneQuestionCurrent(laneAProof, goal, false)) {
+            laneAProof = null;
+            laneEscalatedCell = null;
+            laneBAnswered = false;
+        }
+        if (laneQuestion != null && !laneQuestionCurrent(laneQuestion, goal, true)) {
+            discardLaneQuestion(); // a completed old worker is discarded under the same request boundary
         }
         PathProbe.Result answer = laneProbe.poll();
-        if (answer != null && laneProbeCell != null) {
-            int base = laneProbeLane == Lane.A_NO_PLACING ? 0 : 4;
+        if (answer != null && laneQuestion != null) {
+            LaneQuestion answered = laneQuestion;
+            Lane answeredLane = laneProbeLane;
+            int base = answeredLane == Lane.A_NO_PLACING ? 0 : 4;
             int slot = switch (answer.outcome) {
                 case COMPLETE -> 0;
                 case PARTIAL -> 1;
@@ -10625,76 +11907,46 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 default -> 3;
             };
             laneOutcomes[base + slot]++;
-            BuildTrace.cell(buildTick, "LANE", laneProbeCell.x, laneProbeCell.y, laneProbeCell.z,
-                    (laneProbeLane == Lane.A_NO_PLACING ? "A" : "B") + "=" + answer.outcome
-                            + " positions=" + answer.positions + " ms=" + answer.millis
-                            // Das Ziel, das die SONDE bekommen hat -- daneben steht in der Tick-Zeile das des
-                            // Routers. Sind die beiden verschieden, ist der Faktor 400 zwischen 519 und 210998
-                            // Knoten erklaert und die Sonde hat die ganze Zeit eine andere Frage beantwortet.
-                            + " probegoal=" + String.valueOf(goal).replace(' ', '_'));
-            if (laneProbeLane == Lane.A_NO_PLACING && answer.outcome != PathProbe.Outcome.COMPLETE) {
-                // P3 NEGATIV -> S5. Ab jetzt faehrt genau diese Zelle unter Bahn B, und zwar bis sie steht oder
-                // parkt. PARTIAL zaehlt hier ausdruecklich nicht als Ja: A* liefert routinemaessig einen Weg, der
-                // naeher kommt ohne anzukommen, und den als Erfolg zu lesen ist genau, wie eine Bahn, die nicht
-                // setzen darf, irgendwohin laeuft und nie eskaliert.
-                boolean neuEskaliert = !laneProbeCell.equals(laneEscalatedCell);
-                laneEscalatedCell = laneProbeCell;
-                if (neuEskaliert) {
-                    // DIE LAUFENDE SUCHE MUSS WEG, weil sie unter der falschen Regel geboren wurde. Ein A*-Lauf
-                    // behaelt den CalculationContext, mit dem er konstruiert wurde (PathingBehavior:514), und
-                    // secretInternalSetGoalAndPath kehrt bei inProgress != null zurueck, BEVOR der neue Kontext
-                    // ankommt (:294). Die Eskalation aendert also nur ein Feld, das die steuernde Suche nie liest.
-                    //
-                    // GEMESSEN: 55 Strecken in Lauf 28b210f3, jede bis zu 120 Ticks, path=calculating in 5231
-                    // Ticks gegen 36 Ticks goal-no-path -- der Bot steht nicht, weil kein Weg gefunden wird,
-                    // sondern weil die falsche Frage noch laeuft. Es ist EIN failureTimeoutMS von 2000 ms, und
-                    // der Bench faehrt 60 Ticks je Sekunde: 2000 ms sind dort genau die beobachteten 120 Ticks.
-                    // Im selben Fenster steht im Log eine einzige unbudgetierte Suche (PathNode map size 210998,
-                    // rund 2,1 s, ohne Ergebnis) gegen die Sonde mit "reached goal after 519 nodes ... 5ms".
-                    //
-                    // Zurueckgezogen wird ausschliesslich die RECHNUNG, nicht der laufende Weg: ein Weg, der
-                    // gerade gegangen wird, ist unter jeder Bahn gueltig -- er liegt ja schon in der Welt --,
-                    // und ihn abzubrechen waere ein Eingriff, den der Befund nicht deckt.
-                    if (princeps.getPathingBehavior() instanceof princeps.behavior.PathingBehavior pb) {
-                        pb.getInProgress().ifPresent(suche -> suche.cancel());
-                    }
-                }
-                BuildTrace.cell(buildTick, "LANE-ESCALATE", laneProbeCell.x, laneProbeCell.y, laneProbeCell.z,
-                        "lane A found no complete route within " + LANE_A_BUDGET + "; helper blocks now allowed");
-                askLane(Lane.B_HELPERS_ALLOWED, laneProbeCell, goal);
-                return;
+            if (BuildTrace.isActive()) {
+                BuildTrace.cell(buildTick, "LANE", answered.cell.x, answered.cell.y, answered.cell.z,
+                        (answeredLane == Lane.A_NO_PLACING ? "A" : "B") + "=" + answer.outcome
+                                + " positions=" + answer.positions + " ms=" + answer.millis
+                                + " negativeEvidence=" + answer.failedToReachGoal()
+                                + " probegoal=" + String.valueOf(answered.goal).replace(' ', '_'));
             }
-            if (laneProbeLane == Lane.B_HELPERS_ALLOWED && answer.outcome != PathProbe.Outcome.COMPLETE) {
-                // P4 NEGATIV = PARK, GRUND C. Der erste Schreiber dieses Grundes ueberhaupt -- bis hierher war
-                // ParkReason.UNREACHABLE ein Enum-Wert ohne Erzeuger und der C-Zweig des Waechters unerreichbar.
-                // Ein Timeout ist ausdruecklich KEIN Grund C: hier haben BEIDE Bahnen unter ihrem Knotenbudget
-                // gesucht und keine hat einen vollstaendigen Weg gefunden. Das ist ein Urteil ueber die Welt.
-                parkCell(laneProbeCell, ParkReason.UNREACHABLE);
-                if (incorrectPositions != null) {
-                    incorrectPositions.remove(laneProbeCell);
-                }
-                if (placementTargetLock.owns(positionKey(laneProbeCell))) {
-                    releasePlacementTarget();
-                }
-                if (laneProbeCell.equals(electedCell)) {
-                    electedCell = null;
-                }
-                laneEscalatedCell = null;
-                laneProbeCell = null;
-                return;
-            }
+            laneQuestion = null;
             laneProbeCell = null;
+            if (answeredLane == Lane.A_NO_PLACING && answer.failedToReachGoal()) {
+                laneAProof = answered;
+                laneBAnswered = false;
+                if (!helpersAllowedForElectedWork()) {
+                    BuildTrace.cell(buildTick, "LANE-CLEANUP-BOUND", answered.cell.x, answered.cell.y, answered.cell.z,
+                            "no complete A route; helper removal requires a bounded descent and A-only cleanup proof");
+                    return;
+                }
+                laneEscalatedCell = answered.cell;
+                if (princeps.getPathingBehavior() instanceof princeps.behavior.PathingBehavior pb) {
+                    pb.getInProgress().ifPresent(search -> search.cancel());
+                }
+                BuildTrace.cell(buildTick, "LANE-ESCALATE", answered.cell.x, answered.cell.y, answered.cell.z,
+                        "fresh lane A found no complete route within " + LANE_A_BUDGET + "; helper blocks now allowed");
+                askLane(Lane.B_HELPERS_ALLOWED, answered.cell, goal);
+                return;
+            }
+            if (answeredLane == Lane.B_HELPERS_ALLOWED && answer.failedToReachGoal()) {
+                parkCell(answered.cell, ParkReason.UNREACHABLE);
+                if (incorrectPositions != null) incorrectPositions.remove(answered.cell);
+                if (placementTargetLock.owns(positionKey(answered.cell))) releasePlacementTarget();
+                clearElectedTarget();
+                return;
+            }
+            if (answeredLane == Lane.B_HELPERS_ALLOWED && answer.reachedGoal()) laneBAnswered = true;
+            // ERROR, timeout and chunk-limited partial paths are unknown, never a licence or a parking verdict.
             return;
         }
-        if (laneProbe.isRunning() || laneProbeCell != null) {
-            return;   // eine Frage zur Zeit; die Antwort steht noch aus
-        }
-        if (electedCell.equals(laneEscalatedCell)) {
-            // SCHON ENTSCHIEDEN. P3 ist fuer diese Zelle negativ ausgefallen, und die Spezifikation sagt, dass
-            // sie ab dann unter Bahn B faehrt "bis sie steht oder parkt" -- eine erneute A-Frage kann daran
-            // nichts mehr aendern. Trotzdem wurde sie gestellt: im Fenster 7409-7522 lief der Zyklus A=NONE ->
-            // ESKALATION -> B=COMPLETE alle sechs bis acht Ticks neu durch, 33 bis 90 ms Suchzeit je Runde fuer
-            // eine Antwort, die schon in der Zeile darueber stand.
+        if (laneProbe.isRunning() || laneQuestion != null) return;
+        if (laneAProof != null) {
+            if (helpersAllowedForElectedWork() && !laneBAnswered) askLane(Lane.B_HELPERS_ALLOWED, electedCell, goal);
             return;
         }
         askLane(Lane.A_NO_PLACING, electedCell, goal);
@@ -10705,18 +11957,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         try {
             probeContext = new BuilderCalculationContext(lane);
         } catch (RuntimeException e) {
-            return;   // eine Frage, die sich nicht stellen laesst, ist keine Aussage ueber die Welt
+            return; // an unasked question says nothing about reachability
         }
-        boolean started = laneProbe.start(ctx, ctx.playerFeet(), goal, probeContext,
+        BetterBlockPos start = ctx.playerFeet();
+        boolean started = laneProbe.start(ctx, start, goal, probeContext,
                 lane == Lane.A_NO_PLACING ? LANE_A_BUDGET : LANE_B_BUDGET,
-                Princeps.settings().primaryTimeoutMS.value,
-                Princeps.settings().failureTimeoutMS.value);
+                Princeps.settings().primaryTimeoutMS.value, Princeps.settings().failureTimeoutMS.value);
         if (started) {
             laneProbeCell = cell;
             laneProbeLane = lane;
+            laneQuestion = new LaneQuestion(cell, goal, electedGoal, start, probeContext,
+                    probeContext.bsi.get0(cell), scaffoldCleanupActive, confirmedProgressRevision, scaffoldCell, scaffoldWanted);
         }
     }
-
     /** A-COMPLETE/PARTIAL/NONE/ERROR then B-COMPLETE/PARTIAL/NONE/ERROR. Read by the narration. */
     private String laneCensus() {
         return "A=" + laneOutcomes[0] + "/" + laneOutcomes[1] + "/" + laneOutcomes[2] + "/" + laneOutcomes[3]
@@ -10884,7 +12137,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                                 activeCells.remove(pos);
                                 parkedCells.remove(positionKey(x, y, z));
                                 watchmanAfterChangeAt(x, y, z);
-                                noteCellCompleted();
+                                noteCellCompleted(pos);
                                 if (walkTargetKey == positionKey(pos)) {
                                     walksEndedInPlacement++;   // that walk was worth taking
                                     walkTargetKey = -1L;
@@ -10928,6 +12181,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         List<BetterBlockPos> candidates = new ArrayList<>();
         if (scaffoldCleanupActive) {
             candidates.addAll(remainingNavigationScaffolds(bcc));
+        } else {
+            for (long key : scaffoldCleanupTargets) {
+                BlockPos pos = BlockPos.of(key);
+                if (navigationScaffolds.owns(pos, bcc.bsi.get0(pos)) && !isCellParked(pos.getX(), pos.getY(), pos.getZ())) {
+                    candidates.add(new BetterBlockPos(pos));
+                }
+            }
         }
         for (int y = 0; y < schematic.heightY(); y++) {
             for (int z = 0; z < schematic.lengthZ(); z++) {
@@ -11180,7 +12440,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         List<BetterBlockPos> sourceLiquids = new ArrayList<>();
         List<BetterBlockPos> flowingLiquids = new ArrayList<>();
         Map<BlockState, Integer> missing = new HashMap<>();
-        List<BetterBlockPos> outOfBounds = new ArrayList<>();
+        List<BetterBlockPos> noLongerWork = new ArrayList<>();
         incorrectPositions.forEach(pos -> {
             final boolean watched = CellWatch.isWatched(pos.x, pos.y, pos.z);
             if (!includeDeferred && isCellParked(pos.x, pos.y, pos.z)) {
@@ -11192,7 +12452,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             BlockState state = bcc.bsi.get0(pos);
             BlockState desired = bcc.getSchematic(pos.x, pos.y, pos.z, state);
             if (desired == null) {
-                outOfBounds.add(pos);
+                noLongerWork.add(pos);
                 if (watched) {
                     CellWatch.note(buildTick, pos.x, pos.y, pos.z, "assemble",
                             "dropped: outside the current layer mask");
@@ -11212,7 +12472,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                     && (state.getBlock() instanceof AirBlock || state.getBlock() instanceof LiquidBlock)) {
                 // Door upper / bed head completes automatically when its primary half is placed.
             } else if (desired.getBlock() instanceof AirBlock) {
-                breakable.add(pos);
+                if (state.isAir()) noLongerWork.add(pos);
+                else breakable.add(pos);
             } else if (state.getBlock() instanceof AirBlock
                     || state.getBlock() instanceof LiquidBlock
                     || MovementHelper.isReplaceable(pos.x, pos.y, pos.z, state, bcc.bsi)) {
@@ -11238,7 +12499,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 breakable.add(pos);
             }
         });
-        incorrectPositions.removeAll(outOfBounds);
+        incorrectPositions.removeAll(noLongerWork);
+        if (electedBreak) {
+            if (breakable.contains(electedCell)) {
+                // Preserve the exact chosen removal while the body moves. This path deliberately precedes every
+                // placement/material gate; only the real classification above may revoke it.
+                return electedGoal;
+            }
+            clearElectedTarget();
+        }
         // THE CENSUS, MOVED OUT OF A BRANCH IT COULD NOT REACH.
         //
         // It used to sit inside `if (toBreak.isEmpty())`, which is itself only reached when `toPlace` is empty -- so it
@@ -11365,15 +12634,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 .thenComparingInt(p -> p.x).thenComparingInt(p -> p.y).thenComparingInt(p -> p.z));
         // The latched cell is tried FIRST, whatever the distances now say.
         if (electedCell != null) {
-            if (!offered.contains(electedCell) || isCellParked(electedCell.x, electedCell.y, electedCell.z)) {
-                electedCell = null;
+            if (!incorrectPositions.contains(electedCell) || isCellParked(electedCell.x, electedCell.y, electedCell.z)) {
+                clearElectedTarget();
             } else {
-                Goal held = placementGoal(electedCell, bcc);
-                if (held != null) {
-                    toPlace.add(held);
+                BlockState wanted = bcc.getSchematic(electedCell.x, electedCell.y, electedCell.z, bcc.bsi.get0(electedCell));
+                // A hotbar swap or an exhausted per-tick search budget is not a world invalidation.
+                Goal rowGoal = mapArtPlacementGoal(electedCell, bcc);
+                CellUrteil verdict = wanted != null && hotbarStackThatPlaces(wanted) == null
+                        ? new CellUrteil.Unbekannt("waiting for the chosen material on the hotbar")
+                        : rowGoal != null ? new CellUrteil.Setzen(rowGoal) : urteileUeber(electedCell, bcc);
+                Goal held = acceptElectedVerdict(verdict);
+                if (electedCell != null) {
+                    if (held != null) toPlace.add(held);
                     byDistance = java.util.Collections.emptyList();
-                } else {
-                    electedCell = null;
                 }
             }
         }
@@ -11394,6 +12667,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 if (!pos.equals(electedCell)) {
                     electedCell = pos;
+                    electedGoal = goal;
                     // Every new target starts in the walk-only pass. Permission is never inherited.
                     scaffoldPassAllowed = false;
                     BuildTrace.cell(buildTick, "ELECT", pos.x, pos.y, pos.z,
@@ -11444,6 +12718,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                         .collect(Collectors.joining("\n")));
             }
             return null;
+        }
+        if (electedCell == null && !breakable.isEmpty()) {
+            BetterBlockPos target = breakable.stream().min(java.util.Comparator
+                    .comparingDouble((BetterBlockPos pos) -> pos.distSqr(here))
+                    .thenComparingInt(pos -> pos.x).thenComparingInt(pos -> pos.y).thenComparingInt(pos -> pos.z))
+                    .orElseThrow();
+            electedCell = target;
+            electedGoal = breakGoal(target, bcc);
+            electedBreak = true;
+            scaffoldPassAllowed = false;
+            BuildTrace.cell(buildTick, "ELECT-BREAK", target.x, target.y, target.z,
+                    "latched removal; no placement material required");
+            return electedGoal;
         }
         return new GoalComposite(toBreak.toArray(new Goal[0]));
     }
@@ -11702,6 +12989,18 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 && MovementHelper.canWalkOn(ctx, feetPos.below());
     }
 
+    /** The stance search already owns the current block view; reuse it for all pathing predicates. */
+    private boolean isStandable(int x, int y, int z, BlockStateInterface bsi) {
+        BetterBlockPos feetPos = new BetterBlockPos(x, y, z);
+        BlockState feet = ctx.world().getBlockState(feetPos);
+        BlockState head = ctx.world().getBlockState(feetPos.above());
+        return feet.getFluidState().isEmpty()
+                && head.getFluidState().isEmpty()
+                && MovementHelper.canWalkThrough(bsi, x, y, z)
+                && MovementHelper.canWalkThrough(bsi, x, y + 1, z)
+                && MovementHelper.canWalkOn(bsi, x, y - 1, z);
+    }
+
     /**
      * Somewhere the bot could stand -- either because there is already a floor, or because it can lay one.
      *
@@ -11714,18 +13013,20 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *
      * <p>The pathfinder can already bridge and pillar to reach a goal; that is what {@code hasThrowaway} and the
      * scaffold block are for. Filtering candidate stances by the CURRENT floor threw away the stances it would have
-     * built its way to. So a missing floor is allowed here when the cell below could hold a placed block and is not
-     * itself part of the schematic -- never scaffold into a cell the build has plans for.
+     * built its way to. A missing floor is allowed when the cell below could hold a placed block and is outside
+     * the schematic, or is explicitly AIR in an ordinary 3D build. A real requested template block stays reserved;
+     * row mode keeps its exact-template-pixel exception below and does not scaffold into planned AIR.
      *
      * <p>An unreachable stance costs a bounded walk that {@code routeTick} already gives up on. Refusing to consider it
      * costs the cell.
      */
     private boolean isStandableOrScaffoldable(int x, int y, int z, BuilderCalculationContext bcc) {
-        if (isStandable(x, y, z)) {
+        if (isStandable(x, y, z, bcc.bsi)) {
             return true;
         }
         BetterBlockPos feetPos = new BetterBlockPos(x, y, z);
-        if (!MovementHelper.canWalkThrough(ctx, feetPos) || !MovementHelper.canWalkThrough(ctx, feetPos.above())) {
+        if (!MovementHelper.canWalkThrough(bcc.bsi, x, y, z)
+                || !MovementHelper.canWalkThrough(bcc.bsi, x, y + 1, z)) {
             return false;   // the body does not fit; no amount of scaffolding helps
         }
         BetterBlockPos below = feetPos.below();
@@ -11746,7 +13047,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (!bcc.hasThrowaway) {
             return false;   // no template pixel here and nothing to build an ordinary floor out of
         }
-        return plannedFloor == null;
+        return plannedFloor == null || (!buildInRows && plannedFloor.isAir());
     }
 
     /** Raytrace from a hypothetical eye using the same quantized rotation and world clip as possibleToPlace. */
@@ -12153,30 +13454,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         for (int dx = -3; dx <= 3; dx++) {
             for (int dz = -3; dz <= 3; dz++) {
                 for (int dy = lowestDy; dy <= 1; dy++) {
-                    // THE WHOLE TARGET COLUMN, all three cells the body could occupy. Feet in the cell (dy == 0), feet
-                    // one above it (dy == 1), and -- new -- feet one BELOW it (dy == -1), where the HEAD lands in the
-                    // cell. A player is two blocks tall, so all three put a body part where the block has to go, and
-                    // vanilla will not materialise a block inside a player.
-                    //
-                    // dy == -1 used to be admitted, with this note: "Excluding it was tried and facings fell from 79 to
-                    // 56: the stance count went 145 -> 144 for every block in the build, and this file's own history
-                    // says the candidate ORDER and the target lock are more sensitive than the geometry."
-                    //
-                    // That measurement stands and its explanation is exactly why excluding it is right NOW and was not
-                    // then. Removing one of 145 candidates shifted WHICH 24 of them MAX_STANCES_EVALUATED_PER_CALL
-                    // got to evaluate -- the outcome moved because the budget moved, not because the candidate had
-                    // value. And back then the candidate could still return a spurious answer, because
-                    // simulatePlacement asked with the body wherever the bot happened to stand. With the body now
-                    // placed at the candidate (see simulatePlacement's bodyAt), a dy == -1 stance can only ever answer
-                    // "no" -- the head is provably in the target. So it is not a candidate that might work, it is an
-                    // evaluation slot that is guaranteed to be wasted, and one of only 24.
-                    //
-                    // Measured cost of leaving it in, twice on independent scenarios: the oak_door at 73,-60,67
-                    // (oriented, run 5146df14) and 95,-59,67 (facings, run a4932f6b) both reported every stance
-                    // impossible while the bot's own body sat in the cell.
-                    if (dx == 0 && dz == 0 && (dy == 0 || dy == 1 || dy == -1)) {
-                        continue; // no part of a two-block-tall body may be in the cell being filled
-                    }
+                    // A shared block cell does not imply a shared collision volume. Thin panels can be placed
+                    // beside a centred player in this very cell. Keep the candidate: standability, the actual ray,
+                    // and vanilla item placement with the hypothetical body still decide whether it is usable.
                     candidates.add(new BetterBlockPos(tx + dx, ty + dy, tz + dz));
                 }
             }
@@ -12373,7 +13653,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
         placementTargetLock.startRecovery();
         committedPlaceTarget = new BetterBlockPos(target);
-        placementTargetAcquiredTick = buildTick;
         plannedPlacementStance = null;
         logMechanic("Recovering placement at " + target.x + "," + target.y + "," + target.z
                 + " from a different stance (" + reason + ")");
@@ -12610,12 +13889,23 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             return null;
         }
 
+        // A missing stack prevents a placement probe; it does not reject a stance. Keep the target and its
+        // recovery state while normal inventory handling supplies the item, without advancing route failures.
+        if (hotbarStackThatPlaces(desired) == null) {
+            return null;
+        }
+
+        Goal platformGoal = platformTraverseGoal(target, bcc, true);
+        if (platformGoal != null) {
+            return finishBuilderRoute(platformGoal, platformGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+        }
+
         BetterBlockPos feet = ctx.playerFeet();
         if (!ctx.player().onGround() || !princeps.getPathingBehavior().isSafeToCancel()) {
             placementCenterSettleTicks = 0;
             Goal hold = plannedPlacementStance == null
                     ? princeps.getPathingBehavior().getGoal() : new GoalBlock(plannedPlacementStance);
-            return new PathingCommandContext(hold, PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+            return continueCurrentRoute(hold, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
         }
         boolean horizontallyAdjacent = feet.y == target.y
                 && Math.abs(feet.x - target.x) + Math.abs(feet.z - target.z) == 1;
@@ -12649,6 +13939,73 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             placementTargetLock.planStance(positionKey(plannedPlacementStance), 0L);
             return centerInPlacementStance(plannedPlacementStance);
         }
+        PathingCommand plannedRoute = placementRecoveryForPlannedStance(bcc, feet, calcFailed);
+        if (plannedRoute != null) return plannedRoute;
+
+        List<BetterBlockPos> alternatives = placementStancesFor(target.x, target.y, target.z, desired, bcc,
+                1, true, placementTargetLock::mayTryStance);
+        if (alternatives.isEmpty()) {
+            // ...unless the reason is the bot's own body. Then "no stance works" is not a fact about the cell, and
+            // charging it a deferral is charging it for where the bot happened to stand. See the long note in
+            // searchForPlacables: on a one-block-thick structure the bot walks THROUGH the cells it must build, so this
+            // fires routinely, and six such deferrals retire a cell that was never unbuildable at all.
+            // A40, REVERTED: "if the bot is standing in the target, return without deferring -- stepping off is all it
+            // needs." It is not all it needs, and the reason is written down four hundred lines below in the note at
+            // the allowSameLevel fallback: with the cell NOT deferred it stays the nearest work, assemble keeps it in
+            // the goal, GoalAdjacent counts a cell the bot is standing on as reached, so nothing paths, the body never
+            // leaves, and the placement stays impossible. That is a fixpoint, and it is the one that froze run
+            // 20260802-232954 for 11070 ticks on 70,-59,122 with the eye provably inside the target.
+            //
+            // The deferral was doing load-bearing work here: taking the cell out of the running is what lets the goal
+            // move the bot somewhere else, which is what gets it off the cell. Measured, facings: 96/96 -> 57/96.
+            //
+            // The right fix is the one the owner named -- STEP OFF the cell and then evaluate -- which needs an actual
+            // move, not the absence of a penalty. Until that exists, the penalty is the cheaper of two evils.
+            // Six neighbour lookups decide how patient to be, and they cost nothing next to the stance search that
+            // just failed. An earlier version asked this by running that whole search a SECOND time without the
+            // already-tried filter, which answered a different and less useful question at many times the price.
+            // Counted here because walksStarted CANNOT see this. That counter sits below this early return, so it is
+            // only ever incremented once a stance has been chosen -- which means walk efficiency reports zero cost for
+            // exactly the failure mode that dominates a large schematic: a cell with nothing to click, walked to and
+            // then abandoned. Judging this builder by walks=/paidOff= alone was reading a metric blind to its own
+            // biggest expense.
+            stancelessAbandons++;
+            // THE VERDICT NOTE. The full search has just come back empty, so this is the moment the answer is known:
+            // note it against the face set that produced it, and the cell steps out of the running until a neighbour
+            // changes -- not until a timer runs down. Two kinds, because they need different follow-ups: with no face
+            // at all nothing can help but a new neighbour, while "faces exist and none of them works" is what the
+            // helper-block phase later has to solve.
+            recordCellVerdict(target.x, target.y, target.z,
+                    clickableFaceMask(target.x, target.y, target.z) == 0L
+                            ? VERDICT_NO_FACE : VERDICT_NO_STANCE);
+            String why = "all currently valid placement stances were exhausted -- "
+                    + stanceRejectionSummary(target.x, target.y, target.z, desired, bcc);
+            if (supportCouldStillArriveThisLayer(target, bcc)) {
+                deferCell(target, why, bcc);
+            } else {
+                deferCellStructural(target, "nothing in this layer can ever support it -- " + why, bcc);
+            }
+            return null;
+        }
+        plannedPlacementStance = alternatives.get(0);
+        placementCenteringTicks = 0;
+        placementCenterSettleTicks = 0;
+        long dx = feet.x - plannedPlacementStance.x;
+        long dy = feet.y - plannedPlacementStance.y;
+        long dz = feet.z - plannedPlacementStance.z;
+        placementTargetLock.planStance(positionKey(plannedPlacementStance),
+                dx * dx + dy * dy + dz * dz);
+        // A walk begins here: a concrete stance has been chosen and the bot is about to travel to it.
+        walksStarted++;
+        walkTargetKey = targetKey;
+        Goal stanceGoal = new GoalBlock(plannedPlacementStance);
+        return finishBuilderRoute(stanceGoal, stanceGoal, PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+    }
+
+    /** Continues the chosen recovery stance after the caller's material, ownership and safe-body checks. */
+    private PathingCommand placementRecoveryForPlannedStance(BuilderCalculationContext bcc,
+                                                            BetterBlockPos feet, boolean calcFailed) {
+        BetterBlockPos target = committedPlaceTarget;
         if (placementTargetLock.hasPlannedStance()) {
             if (plannedPlacementStance == null
                     || placementTargetLock.plannedStanceKey() != positionKey(plannedPlacementStance)) {
@@ -12708,9 +14065,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 }
                 if (!rejectedDuringCentering) {
                     PlacementTargetLock.RouteDecision decision =
-                            placementTargetLock.routeTick(distanceSquared, distanceSquared == 0);
+                            placementTargetLock.routeTick(distanceSquared, distanceSquared == 0, progressWatch.advancedLastSample());
                     if (decision == PlacementTargetLock.RouteDecision.KEEP_MOVING) {
-                        return new PathingCommandContext(new GoalBlock(plannedPlacementStance),
+                        Goal stanceGoal = new GoalBlock(plannedPlacementStance);
+                        return finishBuilderRoute(stanceGoal, stanceGoal,
                                 PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
                     }
                     if (decision == PlacementTargetLock.RouteDecision.ARRIVED) {
@@ -12734,64 +14092,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
         }
 
-        List<BetterBlockPos> alternatives = placementStancesFor(target.x, target.y, target.z, desired, bcc,
-                1, true, placementTargetLock::mayTryStance);
-        if (alternatives.isEmpty()) {
-            // ...unless the reason is the bot's own body. Then "no stance works" is not a fact about the cell, and
-            // charging it a deferral is charging it for where the bot happened to stand. See the long note in
-            // searchForPlacables: on a one-block-thick structure the bot walks THROUGH the cells it must build, so this
-            // fires routinely, and six such deferrals retire a cell that was never unbuildable at all.
-            // A40, REVERTED: "if the bot is standing in the target, return without deferring -- stepping off is all it
-            // needs." It is not all it needs, and the reason is written down four hundred lines below in the note at
-            // the allowSameLevel fallback: with the cell NOT deferred it stays the nearest work, assemble keeps it in
-            // the goal, GoalAdjacent counts a cell the bot is standing on as reached, so nothing paths, the body never
-            // leaves, and the placement stays impossible. That is a fixpoint, and it is the one that froze run
-            // 20260802-232954 for 11070 ticks on 70,-59,122 with the eye provably inside the target.
-            //
-            // The deferral was doing load-bearing work here: taking the cell out of the running is what lets the goal
-            // move the bot somewhere else, which is what gets it off the cell. Measured, facings: 96/96 -> 57/96.
-            //
-            // The right fix is the one the owner named -- STEP OFF the cell and then evaluate -- which needs an actual
-            // move, not the absence of a penalty. Until that exists, the penalty is the cheaper of two evils.
-            // Six neighbour lookups decide how patient to be, and they cost nothing next to the stance search that
-            // just failed. An earlier version asked this by running that whole search a SECOND time without the
-            // already-tried filter, which answered a different and less useful question at many times the price.
-            // Counted here because walksStarted CANNOT see this. That counter sits below this early return, so it is
-            // only ever incremented once a stance has been chosen -- which means walk efficiency reports zero cost for
-            // exactly the failure mode that dominates a large schematic: a cell with nothing to click, walked to and
-            // then abandoned. Judging this builder by walks=/paidOff= alone was reading a metric blind to its own
-            // biggest expense.
-            stancelessAbandons++;
-            // THE VERDICT NOTE. The full search has just come back empty, so this is the moment the answer is known:
-            // note it against the face set that produced it, and the cell steps out of the running until a neighbour
-            // changes -- not until a timer runs down. Two kinds, because they need different follow-ups: with no face
-            // at all nothing can help but a new neighbour, while "faces exist and none of them works" is what the
-            // helper-block phase later has to solve.
-            recordCellVerdict(target.x, target.y, target.z,
-                    clickableFaceMask(target.x, target.y, target.z) == 0L
-                            ? VERDICT_NO_FACE : VERDICT_NO_STANCE);
-            String why = "all currently valid placement stances were exhausted -- "
-                    + stanceRejectionSummary(target.x, target.y, target.z, desired, bcc);
-            if (supportCouldStillArriveThisLayer(target, bcc)) {
-                deferCell(target, why, bcc);
-            } else {
-                deferCellStructural(target, "nothing in this layer can ever support it -- " + why, bcc);
-            }
-            return null;
-        }
-        plannedPlacementStance = alternatives.get(0);
-        placementCenteringTicks = 0;
-        placementCenterSettleTicks = 0;
-        long dx = feet.x - plannedPlacementStance.x;
-        long dy = feet.y - plannedPlacementStance.y;
-        long dz = feet.z - plannedPlacementStance.z;
-        placementTargetLock.planStance(positionKey(plannedPlacementStance),
-                dx * dx + dy * dy + dz * dz);
-        // A walk begins here: a concrete stance has been chosen and the bot is about to travel to it.
-        walksStarted++;
-        walkTargetKey = targetKey;
-        return new PathingCommandContext(new GoalBlock(plannedPlacementStance),
-                PathingCommandType.REVALIDATE_GOAL_AND_PATH, bcc);
+        return null;
     }
 
     /**
@@ -12843,6 +14144,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * den dieses Repo schon dreimal bezahlt hat (siehe die Notiz an {@code aimPointsOnFace}).
      */
     private Goal placementGoal(BlockPos pos, BuilderCalculationContext bcc) {
+        Goal rowGoal = mapArtPlacementGoal(pos, bcc);
+        return rowGoal != null ? rowGoal
+                : urteileUeber(pos, bcc) instanceof CellUrteil.Setzen setzen ? setzen.ziel() : null;
+    }
+
+    private Goal mapArtPlacementGoal(BlockPos pos, BuilderCalculationContext bcc) {
         if (buildInRows) {
             BlockState current = bcc.bsi.get0(pos);
             BlockState wanted = bcc.getSchematic(pos.getX(), pos.getY(), pos.getZ(), current);
@@ -12859,7 +14166,83 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 return new GoalBlock(pos.above());
             }
         }
-        return urteileUeber(pos, bcc) instanceof CellUrteil.Setzen setzen ? setzen.ziel() : null;
+        return null;
+    }
+
+    /**
+     * Keep a current, permanent full-cube platform by letting the normal one-step Traverse fill the adjacent
+     * template cube beneath its destination. Unlike a standing-cell oracle this action deliberately crosses
+     * the edge before the block exists. Retain the original support until the target changes; re-deriving it
+     * from playerFeet while sneaking would replace it with the still-empty target and abandon a valid action.
+     */
+    Goal platformTraverseGoal(BlockPos pos, BuilderCalculationContext bcc, boolean remember) {
+        if (electedCell != null && !electedCell.equals(pos)) return null;
+        if (buildInRows || excavating || paused || schematic == null || origin == null
+                || incorrectPositions == null || !incorrectPositions.contains(new BetterBlockPos(pos))) {
+            if (remember) platformTraverseApproach = null;
+            return null;
+        }
+        BlockState current = bcc.bsi.get0(pos);
+        BlockState wanted = bcc.getSchematic(pos.getX(), pos.getY(), pos.getZ(), current);
+        ISchematic full = supportModelForDependencies();
+        PlatformTraverseApproach previous = platformTraverseApproach;
+        // A new action starts its own one-step route, never a NEXT segment of an older ordinary path whose
+        // immutable goal/licences would survive splicing. Continue only this exact already-marked action.
+        PathExecutor executing = princeps.getPathingBehavior().getCurrent();
+        if (executing != null && (previous == null || executing.getPath().getGoal() != previous.goal)) {
+            if (remember) platformTraverseApproach = null;
+            return null;
+        }
+        if (previous != null && (!previous.target.equals(pos) || previous.world != ctx.world()
+                || previous.player != ctx.player() || previous.model != full || !previous.origin.equals(origin)
+                || !previous.wanted.equals(wanted))) {
+            if (remember) platformTraverseApproach = null;
+            return null;
+        }
+        BetterBlockPos from = previous == null ? ctx.playerFeet() : previous.from;
+        BetterBlockPos target = new BetterBlockPos(pos);
+        BlockPos supportPos = from.below();
+        if (wanted == null || wanted.isAir() || !current.isAir() || !wanted.getFluidState().isEmpty()
+                || !full.inSchematic(pos.getX() - origin.getX(), pos.getY() - origin.getY(), pos.getZ() - origin.getZ(), current)
+                || !wanted.equals(full.desiredState(pos.getX() - origin.getX(), pos.getY() - origin.getY(),
+                        pos.getZ() - origin.getZ(), current, bcc.placeable))
+                || wanted.getBlock() instanceof FallingBlock || placementStateIsGeometrySensitive(wanted)
+                || !wanted.isCollisionShapeFullBlock(ctx.world(), pos)
+                || from.y != pos.getY() + 1
+                || Math.abs(from.x - pos.getX()) + Math.abs(from.z - pos.getZ()) != 1
+                || !bcc.bsi.worldContainsLoadedChunk(from.x, from.z)
+                || !bcc.bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())
+                || !ctx.player().onGround() || Math.abs(ctx.player().position().y - from.y) > 0.01
+                || !(ctx.playerFeet().equals(from) || ctx.playerFeet().equals(target.above()))
+                || hotbarStackThatPlaces(wanted) == null
+                || !wanted.canSurvive(ctx.world(), pos) || isReservedStanceSpace(pos.getX(), pos.getY(), pos.getZ(), bcc)) {
+            if (remember && previous != null) platformTraverseApproach = null;
+            return null;
+        }
+        BlockState support = bcc.bsi.get0(supportPos);
+        int lx = supportPos.getX() - origin.getX(), ly = supportPos.getY() - origin.getY(), lz = supportPos.getZ() - origin.getZ();
+        if (!full.inSchematic(lx, ly, lz, support)
+                || !support.equals(full.desiredState(lx, ly, lz, support, bcc.placeable))
+                || support.isAir() || !support.getFluidState().isEmpty() || support.getBlock() instanceof FallingBlock
+                || !support.isCollisionShapeFullBlock(ctx.world(), supportPos)
+                || (previous != null && !support.equals(previous.support))
+                || !bcc.bsi.get0(from).isAir() || !bcc.bsi.get0(from.above()).isAir()
+                || !bcc.bsi.get0(target.above()).isAir() || !bcc.bsi.get0(target.above(2)).isAir()
+                || !ctx.world().getBlockState(supportPos).equals(support)
+                || !ctx.world().getBlockState(pos).isAir()) {
+            if (remember && previous != null) platformTraverseApproach = null;
+            return null;
+        }
+        double cost = MovementTraverse.cost(bcc, from.x, from.y, from.z, target.x, target.z);
+        if (!Double.isFinite(cost) || cost >= COST_INF) {
+            if (remember && previous != null) platformTraverseApproach = null;
+            return null;
+        }
+        if (previous != null) return previous.goal;
+        Goal goal = new PlatformTraverseGoal(target.above());
+        if (remember) platformTraverseApproach = new PlatformTraverseApproach(ctx.world(), ctx.player(), full,
+                new Vec3i(origin.getX(), origin.getY(), origin.getZ()), from, target, support, wanted, goal);
+        return goal;
     }
 
     /**
@@ -12895,9 +14278,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             //
             // Grund A: die Welt bietet nicht, woran der Block haengen koennte. Ein Nachbar aendert das, und genau
             // darauf horcht der Waechter -- deshalb ist das ein Park und keine Wiedervorlage.
+            if (darfArbeiten) {
+                recordCellVerdict(pos.getX(), pos.getY(), pos.getZ(), VERDICT_NO_FACE);
+            }
             return new CellUrteil.Parken(ParkReason.NO_FACE,
                     "kein Halt fuer " + blockName(wanted) + " (canSurvive=false)");
         }
+        Goal platformGoal = platformTraverseGoal(pos, bcc, darfArbeiten);
+        if (platformGoal != null) return new CellUrteil.Setzen(platformGoal);
         // For a block whose facing is decided by WHERE the player stands (doors, repeaters, comparators, observers...)
         // route the bot to a standing cell from which the EXACT desired orientation is actually placeable, instead of
         // "any adjacent" — which can strand it on a side from which the wanted facing is impossible (the door the
@@ -12943,6 +14331,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // where the bot happened to be standing -- the "roughly" being removed.
         long key = positionKey(pos);
         Optional<Goal> cached = orientedGoalCache.get(key);
+        // placementStancesFor also returns empty when no hotbar item can simulate this placement. That is not
+        // geometric evidence: parking it would suppress material demand and survive a refill of the hotbar.
+        // Keep already proven goals/facts, but do not search, spend budget, or cache a negative without the item.
+        if (cached == null && (wanted == null || hotbarStackThatPlaces(wanted) == null)) {
+            return new CellUrteil.Unbekannt("kein passendes Material in der Schnellleiste fuer die Standplatzpruefung");
+        }
         if (cached == null
                 && darfArbeiten
                 && stanceSearchNanos < STANCE_SEARCH_BUDGET_NANOS
@@ -13328,13 +14722,44 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         resetBreakBranchTracking();
+        homeRecoveryEnabled = false;
+        homeRecovery = null;
+        homeRecoveryAttemptRevision = Long.MIN_VALUE;
+        homeFailedRoute = null;
+        homeFailedTarget = null;
+        homeFailedRevision = Long.MIN_VALUE;
+        scaffoldMaterialTarget = null;
+        scaffoldMaterialPausedAt = null;
+        scaffoldMaterialAttemptTick = Long.MIN_VALUE;
+        lastSupportRefusal = null;
+        lastSupportDependent = null;
+        lastSupportRefusalReason = null;
+        supportRepair = null;
+        if (cleanupEscape != null) cleanupEscape.probe.cancel();
+        cleanupEscape = null;
+        cleanupEscapeAttemptedOwners.clear();
+        // cleanupEscapeDebt deliberately survives. Foreign replacement revokes mining, not the audit record.
+        progressWatch.reset();
+        progressActions.clear();
+        confirmedProgressRevision = 0;
+        progressExecutor = null;
+        progressRoute = null;
+        progressRouteTarget = null;
+        progressRoutePositions = java.util.List.of();
+        progressRoutePosition = -1;
+        progressPhase = null;
+        progressHold = false;
+        clearElectedTarget();
         navigationScaffolds.clear();
         excavationFluidPlugs.clear();
         excavationActiveClock.clear();
         excavationRepairAim.clear();
         lastExcavationRepairAimTrace = null;
         blockedFluidPlugThisTick = null;
+        layerMask = null;
+        layerMaskSource = null;
         scaffoldCleanupActive = false;
+        layerCleanupActive = false;
         scaffoldCleanupTargets.clear();
         // Die beiden Listen gehoeren zu EINEM Bauauftrag. Eine PARK-Liste, die einen Auftrag ueberlebt,
         // beschreibt eine Welt, die es nicht mehr gibt -- das ist der eine Fall, in dem 'persistent'
@@ -13373,7 +14798,6 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         sealHolds.clear();
         interactGiveUps = null;
         hotbarFetchRefusedTicks = 0;
-        placementTargetAcquiredTick = -1L;
         buildTick = 0;
         lastFullRecalcTick = Long.MIN_VALUE / 2;
         lastCellCompletedTick = 0;
@@ -13638,6 +15062,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         private final List<BlockState> placeable;
         private final ISchematic schematic;
+        /** Unmasked model and original world captured before the path worker starts; excavation opts out. */
+        private final BuilderSupportDependencies supportDependencies;
+        private final ModelProtection modelProtection;
         private final int originX;
         private final int originY;
         private final int originZ;
@@ -13674,6 +15101,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         private final boolean rowSweepAlongX;
         private final int rowBandStart;
         private final int rowFrontier;
+        private final PlatformTraverseApproach platformApproach;
 
         public BuilderCalculationContext() {
             this(Lane.LEGACY, null);
@@ -13684,10 +15112,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
 
         private BuilderCalculationContext(Lane lane, BetterBlockPos excavationRouteWaypoint) {
-            super(BuilderProcess.this.princeps, true); // wew lad
+            this(lane, excavationRouteWaypoint, true);
+        }
+
+        private BuilderCalculationContext(Lane lane, BetterBlockPos excavationRouteWaypoint, boolean permitFallWater) {
+            super(BuilderProcess.this.princeps, true, permitFallWater);
             this.lane = lane;
             this.ordinaryExcavationMode = ordinaryExcavation();
             this.fluidPlugSnapshot = excavating ? excavationFluidPlugs.snapshot() : new ExcavationFluidPlugs();
+            this.platformApproach = platformTraverseApproach;
             this.excavationRouteStart = lane == Lane.EXCAVATION_PATH ? ctx.playerFeet() : null;
             this.excavationRouteWaypoint = lane == Lane.EXCAVATION_PATH ? excavationRouteWaypoint : null;
             this.rowMode = buildInRows;
@@ -13702,6 +15135,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             this.originX = origin.getX();
             this.originY = origin.getY();
             this.originZ = origin.getZ();
+            this.supportDependencies = excavating ? null : new BuilderSupportDependencies(
+                    supportModelForDependencies(), new Vec3i(originX, originY, originZ), placeable, bsi, ctx.world());
+            this.modelProtection = excavating ? null : new ModelProtection(BuilderProcess.this,
+                    supportModelForDependencies(), new Vec3i(originX, originY, originZ), ctx.world(), ctx.player(), placeable);
             this.excavationBridgeKey = snakeBridgeTarget == null
                     ? Long.MIN_VALUE : snakeBridgeTarget.asLong();
             // THE ONE PLACE THE TWO LANES DIFFER, and it is deliberately the only one: everything else about the
@@ -13763,9 +15200,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             this.allowParkour = lane != Lane.EXCAVATION_PATH && !buildInRows;
         }
 
+        public ModelProtection modelProtection() { return modelProtection; }
+
         private BlockState getSchematic(int x, int y, int z, BlockState current) {
             BlockPos pos = new BlockPos(x, y, z);
-            if (scaffoldCleanupActive && scaffoldCleanupTargets.contains(pos.asLong())
+            if ((scaffoldCleanupActive || layerCleanupActive) && scaffoldCleanupTargets.contains(pos.asLong())
                     && (current.isAir() || navigationScaffolds.owns(pos, current))) {
                 return Blocks.AIR.defaultBlockState();
             }
@@ -13778,6 +15217,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         @Override
         public boolean isPathPositionAllowed(int x, int y, int z) {
+            if (platformApproach != null) {
+                BetterBlockPos from = platformApproach.from, target = platformApproach.target;
+                return y == from.y && ((x == from.x && z == from.z) || (x == target.x && z == target.z));
+            }
             if (lane != Lane.EXCAVATION_PATH) {
                 return true;
             }
@@ -13909,6 +15352,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         @Override
         public double costOfPlacingAt(int x, int y, int z, BlockState current) {
+            if (platformApproach != null && !platformApproach.target.equals(new BlockPos(x, y, z))) return COST_INF;
             if (isPossiblyProtected(x, y, z) || !worldBorder.canPlaceAt(x, z)) { // make calculation fail properly if we can't build
                 return COST_INF;
             }
@@ -13928,8 +15372,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // Still allowed: filling a cell the template names with the block it is waiting for, when the executor
             // will really do it. That is free progress, not scaffolding, and the two must not be conflated -- the
             // exemption mirrors the one at the executor site exactly.
+            // AIR in placeable represents an empty/non-block inventory slot. Matching that sentinel to template
+            // AIR cannot authorize a helper: lane A's executor still carries PlacementLicence.NONE.
             if (!scaffoldLicensed
-                    && !(sch != null && containsBlockState(placeable, sch) && !placementStateIsGeometrySensitive(sch)
+                    && !(sch != null && !sch.isAir() && containsBlockState(placeable, sch) && !placementStateIsGeometrySensitive(sch)
                         && rowTemplatePlacementIsLicensedAt(x, y, z))) {
                 return COST_INF;
             }
@@ -14007,11 +15453,15 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         @Override
         public double breakCostMultiplierAt(int x, int y, int z, BlockState current) {
+            if (platformApproach != null) return COST_INF;
             if ((!allowBreak && !allowBreakAnyway.contains(current.getBlock())) || isPossiblyProtected(x, y, z)) {
                 return COST_INF;
             }
             if (fluidPlugSnapshot.size() > 0 && fluidPlugSnapshot.firstHazard(List.of(new BlockPos(x, y, z)),
                     bsi.access, ExcavationFluidPlugs::vanillaSourceConversion).isPresent()) return COST_INF;
+            if (supportDependencies != null && !supportDependencies.removal(new BlockPos(x, y, z)).allowed()) {
+                return COST_INF;
+            }
             // The snake itself owns every excavation break, including the exact 3x3 face and its rotation settle.
             // Navigation is only allowed to walk that cleared corridor and bridge its one licensed floor cell. If A*
             // may break here it can tunnel sideways, shave the ceiling, or invent a stair around a ravine; all three

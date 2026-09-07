@@ -32,6 +32,7 @@ import princeps.pathing.calc.AbstractNodeCostSearch;
 import princeps.pathing.movement.Movement;
 import princeps.pathing.movement.MovementHelper;
 import princeps.pathing.movement.movements.*;
+import princeps.process.BuilderProcess.ModelProtection;
 import princeps.utils.BlockStateInterface;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Vec3i;
@@ -89,6 +90,7 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     /** The other half of the same promise, and final for the same reason. See {@link WadeLicence}. */
     private final WadeLicence wadeLicence;
+    private final ModelProtection modelProtection;
 
     public PathExecutor(PathingBehavior behavior, IPath path) {
         this(behavior, path, PlacementLicence.UNRESTRICTED, WadeLicence.NONE);
@@ -104,12 +106,23 @@ public class PathExecutor implements IPathExecutor, Helper {
      */
     public PathExecutor(PathingBehavior behavior, IPath path, PlacementLicence placementLicence,
                         WadeLicence wadeLicence) {
+        this(behavior, path, placementLicence, wadeLicence, null);
+    }
+
+    public PathExecutor(PathingBehavior behavior, IPath path, PlacementLicence placementLicence,
+                        WadeLicence wadeLicence, ModelProtection modelProtection) {
         this.behavior = behavior;
         this.ctx = behavior.ctx;
         this.path = path;
         this.pathPosition = 0;
         this.placementLicence = placementLicence == null ? PlacementLicence.UNRESTRICTED : placementLicence;
         this.wadeLicence = wadeLicence == null ? WadeLicence.NONE : wadeLicence;
+        this.modelProtection = modelProtection;
+    }
+
+    public boolean allowsModelRemoval(BlockPos target, princeps.api.process.IPrincepsProcess controlling,
+                                      java.util.function.BooleanSupplier continuing) {
+        return modelProtection == null || modelProtection.allowsRemoval(target, ctx, controlling, continuing);
     }
 
     @Override
@@ -715,6 +728,8 @@ public class PathExecutor implements IPathExecutor, Helper {
         if (next == null) {
             return cutIfTooLong();
         }
+        if (modelProtection == null ? next.modelProtection != null
+                : !modelProtection.sameBinding(next.modelProtection)) return this;
         return SplicedPath.trySplice(path, next.path, false).map(path -> {
             if (!path.getDest().equals(next.getPath().getDest())) {
                 throw new IllegalStateException(String.format(
@@ -722,7 +737,7 @@ public class PathExecutor implements IPathExecutor, Helper {
                         path.getDest(), next.getPath().getDest()));
             }
             // Inherits the licences: a spliced or cut route is the SAME route under the same rules.
-            PathExecutor ret = new PathExecutor(behavior, path, placementLicence, wadeLicence);
+            PathExecutor ret = new PathExecutor(behavior, path, placementLicence, wadeLicence, modelProtection);
             ret.pathPosition = pathPosition;
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             ret.costEstimateIndex = costEstimateIndex;
@@ -732,8 +747,12 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     private PathExecutor cutIfTooLong() {
-        if (pathPosition > Princeps.settings().maxPathHistoryLength.value) {
-            int cutoffAmt = Princeps.settings().pathHistoryCutoffAmount.value;
+        int maxHistory = Princeps.settings().maxPathHistoryLength.value;
+        return pathPosition > maxHistory ? cutIfTooLong(maxHistory, Princeps.settings().pathHistoryCutoffAmount.value) : this;
+    }
+
+    private PathExecutor cutIfTooLong(int maxHistory, int cutoffAmt) {
+        if (pathPosition > maxHistory) {
             CutoffPath newPath = new CutoffPath(path, cutoffAmt, path.length() - 1);
             if (!newPath.getDest().equals(path.getDest())) {
                 throw new IllegalStateException(String.format(
@@ -742,7 +761,7 @@ public class PathExecutor implements IPathExecutor, Helper {
             }
             logDebug("Discarding earliest segment movements, length cut from " + path.length() + " to " + newPath.length());
             // Inherits the licences: a spliced or cut route is the SAME route under the same rules.
-            PathExecutor ret = new PathExecutor(behavior, newPath, placementLicence, wadeLicence);
+            PathExecutor ret = new PathExecutor(behavior, newPath, placementLicence, wadeLicence, modelProtection);
             ret.pathPosition = pathPosition - cutoffAmt;
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             if (costEstimateIndex != null) {

@@ -118,14 +118,18 @@ public class BuilderLookProfileLifecycleTest {
     }
 
     private static BuilderProcess headlessBuilder() throws ReflectiveOperationException {
-        // The real constructor requires a running client. These tests intentionally initialize only the field
-        // consumed by resetAutoDigLookProfile; pause()/resume() touch only their own boolean.
+        // The real constructor requires a running client. Initialize the progress watch used by pause(),
+        // alongside the profile installed by each test, so the actual lifecycle reaches its assertions.
         Class<?> unsafeType = Class.forName("sun.misc.Unsafe");
         Field singleton = unsafeType.getDeclaredField("theUnsafe");
         singleton.setAccessible(true);
         Object unsafe = singleton.get(null);
-        return (BuilderProcess) unsafeType.getMethod("allocateInstance", Class.class)
+        BuilderProcess builder = (BuilderProcess) unsafeType.getMethod("allocateInstance", Class.class)
                 .invoke(unsafe, BuilderProcess.class);
+        Field progressWatch = BuilderProcess.class.getDeclaredField("progressWatch");
+        progressWatch.setAccessible(true);
+        progressWatch.set(builder, new princeps.process.builder.BuilderProgressWatch(5, 60, 2));
+        return builder;
     }
 
     private static Settings originalSettings() throws ReflectiveOperationException {

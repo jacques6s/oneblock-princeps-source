@@ -30,6 +30,7 @@ import princeps.process.BuilderProcess;
 import net.minecraft.client.player.KeyboardInput;
 import net.minecraft.client.player.LocalPlayer;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.core.BlockPos;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -56,11 +57,29 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     private final BlockBreakHelper blockBreakHelper;
     private final BlockPlaceHelper blockPlaceHelper;
+    private princeps.process.BuilderProcess supportMiningOwner;
 
     public InputOverrideHandler(Princeps princeps) {
         super(princeps);
-        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext());
+        this.blockBreakHelper = new BlockBreakHelper(princeps.getPlayerContext(), this::allowsMining);
         this.blockPlaceHelper = new BlockPlaceHelper(princeps);
+    }
+
+    /** Predicate consumed by the real break helper immediately before its controller calls. */
+    boolean allowsMining(BlockPos target) {
+        var controlling = princeps.getPathingControlManager().mostRecentInControl().orElse(null);
+        observeMiningOwner(controlling);
+        var executing = princeps.getPathingBehavior().getCurrent();
+        if (executing != null && !executing.allowsModelRemoval(target, controlling, blockBreakHelper::isBreakingBlock)) return false;
+        // An unsafe edge route retains its no-mining contract after pause or owner transfer.
+        if (BuilderProcess.platformRouteForbidsMining(executing)) return false;
+        return supportMiningOwner == null || supportMiningOwner.allowsSupportRemoval(target);
+    }
+
+    void observeMiningOwner(princeps.api.process.IPrincepsProcess controlling) {
+        princeps.process.BuilderProcess next = controlling instanceof princeps.process.BuilderProcess builder ? builder : null;
+        if (supportMiningOwner != null && supportMiningOwner != next) supportMiningOwner.revokeSupportRepair();
+        supportMiningOwner = next;
     }
 
     /**
@@ -155,6 +174,8 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
 
     @Override
     public final void onTick(TickEvent event) {
+        observeMiningOwner(event.getType() == TickEvent.Type.OUT ? null
+                : princeps.getPathingControlManager().mostRecentInControl().orElse(null));
         if (event.getType() == TickEvent.Type.OUT) {
             return;
         }
@@ -203,6 +224,10 @@ public final class InputOverrideHandler extends Behavior implements IInputOverri
     }
 
     private boolean inControl() {
+        // A quiescent owned Home hold must not hand WASD back to KeyboardInput while the client relocates it.
+        if (princeps.getPathingControlManager().mostRecentInControl().orElse(null)
+                instanceof princeps.process.BuilderProcess builder
+                && builder.homeRecoveryHoldsUse()) return true;
         for (Input input : new Input[]{Input.MOVE_FORWARD, Input.MOVE_BACK, Input.MOVE_LEFT, Input.MOVE_RIGHT, Input.SNEAK, Input.JUMP}) {
             if (isInputForcedDown(input)) {
                 return true;

@@ -230,6 +230,10 @@ public class MovementDescend extends Movement {
             return state;
         }
 
+        // Generic cost/preparation treats hand-operated doors as passable. Honour that promise before stepping
+        // down into their collision shape, using the same ray-gated normal interaction as a flat approach.
+        if (MovementHelper.openDoorOnRoute(princeps, state, src, positionsToBreak)) return state;
+
         BlockPos playerFeet = ctx.playerFeet();
         BlockPos fakeDest = new BlockPos(dest.getX() * 2 - src.getX(), dest.getY(), dest.getZ() * 2 - src.getZ());
         if ((playerFeet.equals(dest) || playerFeet.equals(fakeDest)) && (MovementHelper.isLiquid(ctx, dest) || ctx.player().position().y - dest.getY() < 0.5)) { // lilypads
