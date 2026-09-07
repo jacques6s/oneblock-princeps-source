@@ -164,7 +164,7 @@ public class BuilderCleanupClickableStanceTest {
         assertEquals("BLOCKED", f.stage()); assertTrue(f.inputs.isEmpty());
     }
 
-    private static Fixture fixture() throws Exception {
+    static Fixture fixture() throws Exception {
         BuilderProcess builder = allocate(BuilderProcess.class); Princeps owner = allocate(Princeps.class);
         TestWorld world = allocate(TestWorld.class); world.states = new HashMap<>();
         world.states.put(HELPER.below().asLong(), Blocks.DIRT.defaultBlockState());
@@ -181,6 +181,7 @@ public class BuilderCleanupClickableStanceTest {
         IPlayerContext ctx = (IPlayerContext) Proxy.newProxyInstance(IPlayerContext.class.getClassLoader(),
                 new Class<?>[]{IPlayerContext.class}, (proxy, method, args) -> switch (method.getName()) {
                     case "player" -> avatar; case "world" -> world; case "minecraft" -> mc;
+                    case "objectMouseOver" -> null;
                     case "playerController" -> controller; case "playerRotations" -> LOOK;
                     case "playerFeet" -> new BetterBlockPos(avatar.position().x, avatar.position().y, avatar.position().z);
                     default -> throw new AssertionError("unexpected live dependency " + method.getName());
@@ -212,7 +213,7 @@ public class BuilderCleanupClickableStanceTest {
         return new Fixture(builder, episode, context, avatar, world, processor, inputs);
     }
 
-    private record Fixture(BuilderProcess builder, Object episode, BuilderProcess.BuilderCalculationContext context,
+    record Fixture(BuilderProcess builder, Object episode, BuilderProcess.BuilderCalculationContext context,
                            TestPlayer avatar, TestWorld world, IAimProcessor processor, Map<Input, Boolean> inputs) {
         void pose(double x, double z) throws Exception {
             Vec3 feet = new Vec3(STANCE.x + x, STANCE.y, STANCE.z + z); set(avatar, "position", feet);
@@ -243,7 +244,7 @@ public class BuilderCleanupClickableStanceTest {
         }
     }
 
-    private static final class TestWorld extends ClientLevel {
+    static final class TestWorld extends ClientLevel {
         Map<Long, BlockState> states; boolean obstructed;
         private TestWorld() { super(null, null, null, null, 0, 0, null, false, 0L, 0); }
         @Override public BlockState getBlockState(BlockPos pos) { return states.getOrDefault(pos.asLong(), Blocks.AIR.defaultBlockState()); }
@@ -251,7 +252,7 @@ public class BuilderCleanupClickableStanceTest {
         @Override public BlockEntity getBlockEntity(BlockPos pos) { return null; }
         @Override public boolean isUnobstructed(Entity except, VoxelShape shape) { return !obstructed; }
     }
-    private static final class TestPlayer extends LocalPlayer {
+    static final class TestPlayer extends LocalPlayer {
         private TestPlayer() { super(null, null, null, null, null, null, false, null); }
         @Override public boolean isShiftKeyDown() { return true; }
         @Override public boolean isFallFlying() { return false; }
@@ -263,10 +264,10 @@ public class BuilderCleanupClickableStanceTest {
         @Override public BlockState get0(int x, int y, int z) { return world.getBlockState(new BlockPos(x, y, z)); }
     }
     private static Object stage(String name) { return Arrays.stream(stageType.getEnumConstants()).filter(v -> v.toString().equals(name)).findFirst().orElseThrow(); }
-    private static Method method(String name, Class<?>... args) throws Exception {
+    static Method method(String name, Class<?>... args) throws Exception {
         Method method = BuilderProcess.class.getDeclaredMethod(name, args); method.setAccessible(true); return method;
     }
-    private static <T> T allocate(Class<T> type) throws Exception { return type.cast(allocator.allocateInstance(type)); }
+    static <T> T allocate(Class<T> type) throws Exception { return type.cast(allocator.allocateInstance(type)); }
     private static Field field(Object target, String name) throws Exception {
         for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
             try { Field field = type.getDeclaredField(name); field.setAccessible(true); return field; }
@@ -274,6 +275,6 @@ public class BuilderCleanupClickableStanceTest {
         }
         throw new NoSuchFieldException(name);
     }
-    private static void set(Object target, String name, Object value) throws Exception { field(target, name).set(target, value); }
-    private static Object read(Object target, String name) throws Exception { return field(target, name).get(target); }
+    static void set(Object target, String name, Object value) throws Exception { field(target, name).set(target, value); }
+    static Object read(Object target, String name) throws Exception { return field(target, name).get(target); }
 }
