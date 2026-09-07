@@ -178,6 +178,7 @@ public class BuilderModelRestorationTest {
             @Override protected boolean partOfMask(int x, int y, int z, BlockState current) { return y == 0; }
         } : f.full;
         f.owner = allocate(BuilderProcess.class);
+        set(f.owner, "scaffoldCleanupTargets", new java.util.HashSet<>());
         set(f.owner, "excavationFluidPlugs", new ExcavationFluidPlugs());
         set(f.owner, "excavationRepairAim", new ExcavationRepairAim());
         LocalPlayer player = allocate(LocalPlayer.class);

@@ -633,6 +633,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private long cleanupServerUpdateSequence;
     private final Set<Long> cleanupEscapeAttemptedOwners = new HashSet<>();
     private boolean scaffoldCleanupActive;
+    /** Uses the existing cleanup target ledger while retaining the ordinary working layer mask. */
+    private boolean layerCleanupActive;
     private final Set<Long> scaffoldCleanupTargets = new HashSet<>();
     /** Die geparkte Zelle, die sie freimachen soll. */
     private BetterBlockPos scaffoldServes;
@@ -2053,6 +2055,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     private boolean homeRecoveryHasAcknowledgement() {
         return pendingPlacementRequest != null || lastPlacedCell != null || navigationScaffolds.awaitingServer()
+                || scaffoldCleanupAwaitingServer()
                 || cleanupEscapeDebt != null && !cleanupEscapeDebt.discharged();
     }
 
@@ -2662,6 +2665,133 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             remaining.add(new BetterBlockPos(pos));
         }
         return remaining;
+    }
+
+    /** A local disappearance/replacement is not the server event that releases our ledger entry. */
+    boolean scaffoldCleanupAwaitingServer() {
+        if (!layerCleanupActive && !scaffoldCleanupActive) return false;
+        for (long key : scaffoldCleanupTargets) {
+            BlockPos pos = BlockPos.of(key);
+            if (navigationScaffolds.contains(pos) && !navigationScaffolds.owns(pos, ctx.world().getBlockState(pos))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Queue only this boundary's owned debt, without replacing the working layer by the full model. */
+    boolean prepareLayerCleanup(BuilderCalculationContext bcc, boolean topDown) {
+        if (excavating || buildInRows) return false;
+        if (platformTraverseApproach != null) return true;
+        scaffoldCleanupTargets.removeIf(key -> !navigationScaffolds.contains(BlockPos.of(key)));
+        Set<Long> runnable = new HashSet<>();
+        List<String> protectedHelpers = new ArrayList<>();
+        boolean waiting = navigationScaffolds.awaitingServer();
+        for (BlockPos pos : navigationScaffolds.positions()) {
+            int localY = pos.getY() - origin.getY();
+            if (!scaffoldCleanupTargets.contains(pos.asLong())
+                    && (topDown ? localY < bandMinYLocal : localY > bandMaxYLocal)) continue;
+            if (!bcc.bsi.worldContainsLoadedChunk(pos.getX(), pos.getZ())) {
+                waiting = true;
+                continue;
+            }
+            BlockState current = bcc.bsi.get0(pos);
+            if (!navigationScaffolds.owns(pos, current)) {
+                // Includes Cobble -> WATER: wait for that exact server observation, never demand an AIR frame.
+                scaffoldCleanupTargets.add(pos.asLong());
+                waiting = true;
+                continue;
+            }
+            String anchorDependency = layerCleanupAnchorDependency(pos, bcc);
+            if (anchorDependency != null) {
+                protectedHelpers.add(anchorDependency);
+                continue;
+            }
+            BuilderSupportDependencies.Decision protection = bcc.supportDependencies.removal(pos);
+            if (!protection.allowed()) {
+                if (protection.reason() == BuilderSupportDependencies.Reason.UNKNOWN_WORLD) {
+                    waiting = true;
+                } else {
+                    protectedHelpers.add(pos.toShortString() + ": " + protection.reason()
+                            + " dependent=" + protection.dependent());
+                }
+                continue;
+            }
+            runnable.add(pos.asLong());
+        }
+        // A confirmed click anchor can be excluded from the navigation ledger while it serves its target.
+        // Name a dependency on an unfinished later layer instead of waiting for that layer behind this gate.
+        for (long key : temporarySupportTargets.keySet().toLongArray()) {
+            BlockPos pos = BlockPos.of(key);
+            int localY = pos.getY() - origin.getY();
+            if ((topDown ? localY >= bandMinYLocal : localY <= bandMaxYLocal) && !bcc.bsi.get0(pos).isAir()) {
+                String dependency = layerCleanupAnchorDependency(pos, bcc);
+                if (dependency != null && !protectedHelpers.contains(dependency)) protectedHelpers.add(dependency);
+            }
+        }
+        if (!runnable.isEmpty()) {
+            layerCleanupActive = true;
+            if (scaffoldCleanupTargets.addAll(runnable)) incorrectPositions = null;
+            return true;
+        }
+        if (waiting) {
+            layerCleanupActive = true;
+            return true;
+        }
+        if (!protectedHelpers.isEmpty()) {
+            abortBuild(Ending.LAYER_UNBUILDABLE,
+                    "Layer " + layer + " cleanup needs a protected support; layer was not advanced", protectedHelpers);
+            return true;
+        }
+        scaffoldCleanupTargets.clear();
+        layerCleanupActive = false;
+        return false;
+    }
+
+    private String layerCleanupAnchorDependency(BlockPos support, BuilderCalculationContext bcc) {
+        long key = positionKey(support);
+        if (!temporarySupportTargets.containsKey(key)) return null;
+        BlockPos target = BlockPos.of(temporarySupportTargets.get(key));
+        ISchematic full = supportModelForDependencies();
+        int x = target.getX() - origin.getX(), y = target.getY() - origin.getY(), z = target.getZ() - origin.getZ();
+        BlockState current = bcc.bsi.get0(target);
+        if (bcc.bsi.worldContainsLoadedChunk(target.getX(), target.getZ())
+                && full.inSchematic(x, y, z, current)
+                // A release needs the actual promised state, not an ignore-air/substitution preference.
+                && current.equals(full.desiredState(x, y, z, current, approxPlaceable))) {
+            temporarySupportTargets.remove(key);
+            return null;
+        }
+        return support.toShortString() + " is the click anchor for unfinished target " + target.toShortString();
+    }
+
+    /** The actual onTick layer transition; a local removal cannot bypass either the server ledger or S10. */
+    boolean advanceLayerIfClean(BuilderCalculationContext bcc, boolean topDown, java.util.function.Consumer<String> log) {
+        if (!verifyLayerBeforeLeaving(bcc, log) || prepareLayerCleanup(bcc, topDown)) return false;
+        layer++;
+        scaffoldsThisLayer = 0;
+        scaffoldFailed.clear();
+        scaffoldProbeCache.clear();
+        return true;
+    }
+
+    private boolean verifyLayerBeforeLeaving(BuilderCalculationContext bcc, java.util.function.Consumer<String> log) {
+        LayerAudit audit = auditLayer(bcc);
+        log.accept("S10 " + audit.headline());
+        if (audit.wrong().isEmpty()) return true;
+        List<String> report = new ArrayList<>();
+        report.add(audit.headline());
+        report.add("The work set was empty and nothing is parked, so the builder believed this layer was"
+                + " finished. It is not.");
+        report.addAll(LayerAudit.name("missing or wrong", audit.wrong(), 12));
+        if (audit.unverified() > 0) {
+            report.add(audit.unverified() + " further cell(s) could not be checked (chunk not loaded);"
+                    + " they are NOT counted as failures.");
+        }
+        abortBuild(Ending.LAYER_VERIFICATION_FAILED,
+                "Build stopped: layer " + layer + " did not verify (" + audit.wrong().size()
+                        + " cell(s) missing or wrong)", report);
+        return false;
     }
 
     private boolean isScaffoldLeftBehind(int x, int y, int z, BuilderCalculationContext bcc) {
@@ -9741,7 +9871,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         // erst weiter unten laeuft: gefragt wird nach der Zelle, zu der wir GERADE unterwegs sind. Genau ein
         // Kontext je Tick, und Planer wie Fahrt lesen denselben -- das ist die Bedingung, an der der erste Versuch
         // gescheitert ist (921 geplante Bruecken gegen 922 verweigerte, Bot 1920 Ticks bewegungslos).
-        Lane laneThisTick = scaffoldCleanupActive ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
+        Lane laneThisTick = scaffoldCleanupActive || layerCleanupActive
+                ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
         // Und dasselbe fuer die Ausfuehrungsseite. scaffoldIsLicensedAt -- das globale Praedikat, das eine laufende
         // Bewegung fragt, ob sie einen Wegwerfblock setzen darf -- haengt ab jetzt an DERSELBEN Entscheidung.
         // Vorher hing es an scaffoldPassAllowed, das ein einziges calcFailed fuer den Rest der Zelle oeffnete:
@@ -9904,42 +10035,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             }
             PathingCommand integrity = ordinaryExcavationIntegrityCommand(scanContext, isSafeToCancel, false);
             if (integrity != null) return integrity;
-            // S10 + P6b. Die Ebene wird nachgesehen, bevor sie verlassen wird.
-            LayerAudit audit = auditLayer(scanContext);
-            logMechanic("S10 " + audit.headline());
-            if (!audit.wrong().isEmpty()) {
-                List<String> report = new ArrayList<>();
-                report.add(audit.headline());
-                report.add("The work set was empty and nothing is parked, so the builder believed this layer was"
-                        + " finished. It is not.");
-                report.addAll(LayerAudit.name("missing or wrong", audit.wrong(), 12));
-                if (audit.unverified() > 0) {
-                    report.add(audit.unverified() + " further cell(s) could not be checked (chunk not loaded);"
-                            + " they are NOT counted as failures.");
-                }
-                abortBuild(Ending.LAYER_VERIFICATION_FAILED,
-                        "Build stopped: layer " + layer + " did not verify (" + audit.wrong().size()
-                                + " cell(s) missing or wrong)", report);
-                return finishAbortedBuild() ? null
-                        : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
-            }
             if (Princeps.settings().buildInLayers.value && layer * effectiveLayerHeight()
                     < stopAtHeight) {
-                // Counted and named before climbing. The owner does not want helper blocks left in the build, and
-                // opportunistic removal (see toBreakNearPlayer) only reaches what the bot happens to walk past -- so
-                // this says out loud what it missed instead of leaving it to be discovered by looking at the thing.
-                // Reported rather than waited for: blocking the climb on a cleanup that needs its own routing is
-                // exactly the shape of stall this builder has too many of already.
-                int scaffoldLeft = countScaffoldInLayer(scanContext, layer);
-                if (scaffoldLeft > 0) {
-                    logDirect("Layer " + layer + " done, but " + scaffoldLeft + " scaffold block(s) are still standing"
-                            + " in it; they will be cleared whenever the bot passes them again");
+                int finishedLayer = layer;
+                if (!advanceLayerIfClean(scanContext, Princeps.settings().layerOrder.value, this::logMechanic)) {
+                    return finishAbortedBuild() ? null
+                            : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
                 }
-                logDirect("Starting layer " + layer);
-                layer++;
-                scaffoldsThisLayer = 0;   // der Deckel gilt je Ebene, nicht je Bau
-                scaffoldFailed.clear();
-                scaffoldProbeCache.clear();
+                logDirect("Starting layer " + finishedLayer);
                 // DIE REKURSION BLEIBT, bewusst. Sie ist durch recursions > 100 gedeckelt und eine Schematic hat
                 // hier achtzehn Ebenen; auch unter der exklusiven Maske, wo jede fertige Ebene leer ist und der Bot
                 // sich in einem Tick hochhangelt, bleibt das eine Groessenordnung unter dem Deckel. Der Umbau in
@@ -9948,6 +10051,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // eine Verhaltensaenderung ohne Nutzen an dieser Stelle.
                 return onTick(calcFailed, isSafeToCancel, recursions + 1);
             }
+            if (!verifyLayerBeforeLeaving(scanContext, this::logMechanic)) {
+                return finishAbortedBuild() ? null
+                        : new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
+            }
             // KEINE RETRY-SWEEPS MEHR. Was hier stand, war das Gegenteil der Spezifikation: bis zu MAX_RETRY_SWEEPS
             // ganze Durchlaeufe ueber die fertige Schematic, um Zellen zurueckzuholen, die unterwegs "in den
             // Ruhestand" geschickt worden waren -- und danach ein logDirect("Build finished with N cell(s) unbuilt"),
@@ -9955,7 +10062,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // der Vertrauensverlust, den der Ergebniskanal beenden soll. Beide Zweige sind ersatzlos entfallen: mit
             // P6a kann eine Ebene gar nicht mehr mit offenen Zellen verlassen werden, also gibt es nichts
             // nachzuholen.
-            if (navigationScaffolds.awaitingServer()) {
+            if (navigationScaffolds.awaitingServer() || scaffoldCleanupAwaitingServer()) {
                 return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
             }
             List<BetterBlockPos> remainingScaffolds = remainingNavigationScaffolds(scanContext);
@@ -9980,6 +10087,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             // build repeat time
             layer = 0;
             scaffoldCleanupActive = false;
+            layerCleanupActive = false;
             scaffoldCleanupTargets.clear();
             origin = new BlockPos(origin).offset(repeat);
             if (!Princeps.settings().buildRepeatSneaky.value) {
@@ -12072,6 +12180,13 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         List<BetterBlockPos> candidates = new ArrayList<>();
         if (scaffoldCleanupActive) {
             candidates.addAll(remainingNavigationScaffolds(bcc));
+        } else {
+            for (long key : scaffoldCleanupTargets) {
+                BlockPos pos = BlockPos.of(key);
+                if (navigationScaffolds.owns(pos, bcc.bsi.get0(pos)) && !isCellParked(pos.getX(), pos.getY(), pos.getZ())) {
+                    candidates.add(new BetterBlockPos(pos));
+                }
+            }
         }
         for (int y = 0; y < schematic.heightY(); y++) {
             for (int z = 0; z < schematic.lengthZ(); z++) {
@@ -14643,6 +14758,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         layerMask = null;
         layerMaskSource = null;
         scaffoldCleanupActive = false;
+        layerCleanupActive = false;
         scaffoldCleanupTargets.clear();
         // Die beiden Listen gehoeren zu EINEM Bauauftrag. Eine PARK-Liste, die einen Auftrag ueberlebt,
         // beschreibt eine Welt, die es nicht mehr gibt -- das ist der eine Fall, in dem 'persistent'
@@ -15087,7 +15203,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
         private BlockState getSchematic(int x, int y, int z, BlockState current) {
             BlockPos pos = new BlockPos(x, y, z);
-            if (scaffoldCleanupActive && scaffoldCleanupTargets.contains(pos.asLong())
+            if ((scaffoldCleanupActive || layerCleanupActive) && scaffoldCleanupTargets.contains(pos.asLong())
                     && (current.isAir() || navigationScaffolds.owns(pos, current))) {
                 return Blocks.AIR.defaultBlockState();
             }
