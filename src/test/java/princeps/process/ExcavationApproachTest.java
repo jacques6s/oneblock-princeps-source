@@ -205,7 +205,7 @@ public class ExcavationApproachTest {
         return new PathExecutor(allocate(PathingBehavior.class), path, PlacementLicence.NONE, WadeLicence.NONE, token);
     }
 
-    private static IPath path(BetterBlockPos... positions) {
+    static IPath path(BetterBlockPos... positions) {
         IPrinceps princeps = (IPrinceps) Proxy.newProxyInstance(IPrinceps.class.getClassLoader(),
                 new Class<?>[] {IPrinceps.class}, (proxy, method, args) -> {
                     if (method.getName().equals("getPlayerContext")) return null;
