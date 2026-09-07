@@ -17,7 +17,7 @@ import java.lang.reflect.Method;
 import static org.junit.Assert.*;
 import static princeps.process.ExcavationApproachTest.*;
 
-/** Replays the actual E217 repair-face admission from the frozen approach run, without a client loop. */
+/** Replays actual E217/E223 repair-face admission from the frozen approach runs, without a client loop. */
 public class ExcavationApproachRepairTest {
     private static final BetterBlockPos FEET = new BetterBlockPos(70, -54, 66);
     private static final BetterBlockPos HOLE = new BetterBlockPos(68, -54, 68);
@@ -39,42 +39,68 @@ public class ExcavationApproachRepairTest {
                 f.aim.heldFace(f.world.world, HOLE).isEmpty());
     }
 
-    @Test public void futureHeadIsProtectedButUnrelatedShellAndFloorRepairsRemainEligible() throws Exception {
+    @Test public void passedRoofGapCannotStealControlsAtTheE223Transition() throws Exception {
+        Fixture f = fixture();
+        BetterBlockPos passedGap = new BetterBlockPos(70, -54, 67);
+        f.world.player.pos = new Vec3(69.558, -54, 67.607);
+        put(f.world.pathing, "current", executor(path(new BetterBlockPos(69, -54, 67),
+                new BetterBlockPos(68, -54, 67), HOLE, HOLE.below(), ENTRY), f.approach.token()));
+        assertFalse("E223: a passed dry roof gap cannot take aim/item control during initial travel",
+                f.mayAim(passedGap, passedGap.below(), Direction.UP));
+        assertTrue(f.aim.heldFace(f.world.world, passedGap).isEmpty());
+    }
+
+    @Test public void allDryShellMaintenanceYieldsButFloorRepairsRemainEligible() throws Exception {
         Fixture f = fixture();
         Object token = f.approach.token();
         put(f.world.pathing, "current", executor(path(FEET, FEET.south(), HOLE.below(), ENTRY), token));
         assertFalse("the hole is future HEAD clearance even when it is not a waypoint", f.mayAim(HOLE));
-        assertTrue("an unrelated roof gap may still be repaired", f.mayAim(HOLE.east().south()));
+        assertFalse("an unrelated roof gap must also yield shared controls", f.mayAim(HOLE.east().south()));
         assertFalse("a missing support must still be bridgeable", f.world.builder.deferApproachShellRepair(
-                FEET.below(), ExcavationRepairPolicy.Kind.BRIDGE, Blocks.AIR.defaultBlockState()));
-        assertFalse("support is not body/head clearance", ExcavationApproach.needsOpen(
-                path(FEET, FEET.south()), 0, FEET.below()));
+                ExcavationRepairPolicy.Kind.BRIDGE, Blocks.AIR.defaultBlockState()));
     }
 
     @Test public void sourceAndFlowingFluidRepairsAreNeverPostponedByTheDryGapRule() throws Exception {
         Fixture f = fixture();
         for (var kind : new ExcavationRepairPolicy.Kind[]{ExcavationRepairPolicy.Kind.INTERNAL_SOURCE,
                 ExcavationRepairPolicy.Kind.SHELL_SOURCE}) {
-            assertFalse(f.world.builder.deferApproachShellRepair(HOLE, kind, Blocks.WATER.defaultBlockState()));
+            assertFalse(f.world.builder.deferApproachShellRepair(kind, Blocks.WATER.defaultBlockState()));
         }
         var flowing = Blocks.WATER.defaultBlockState().setValue(net.minecraft.world.level.block.LiquidBlock.LEVEL, 3);
         assertEquals(ExcavationRepairPolicy.Kind.SHELL_GAP, ExcavationRepairPolicy.repair(BOUNDS,
                 HOLE.x, HOLE.y, HOLE.z, flowing, true, true));
         assertFalse("SHELL_GAP includes flow: kind alone is not sufficient", f.world.builder.deferApproachShellRepair(
-                HOLE, ExcavationRepairPolicy.Kind.SHELL_GAP, flowing));
+                ExcavationRepairPolicy.Kind.SHELL_GAP, flowing));
     }
 
-    @Test public void passedCellsArrivalAndWorkingCutsEndTheTemporaryDeferral() throws Exception {
+    @Test public void onlyArrivalAndWorkingCutsEndTheJourneyDeferral() throws Exception {
         Fixture f = fixture();
         assertFalse(f.mayAim(HOLE));
         put(f.world.pathing.getCurrent(), "pathPosition", 6);
-        assertTrue("the remaining route has already passed below this hole", f.mayAim(HOLE));
+        assertFalse("passed cells still yield until the whole initial journey ends", f.mayAim(HOLE));
         f = fixture();
         f.approach.observe(ENTRY);
         assertTrue("normal excavation must restore the entry shell", f.mayAim(HOLE));
         f = fixture();
-        f.approach.clear();
-        assertTrue("work/lifecycle reset cannot leave permanent unsealed exceptions", f.mayAim(HOLE));
+        put(f.world.builder, "origin", new BetterBlockPos(67, -60, 67));
+        put(f.world.builder, "schematic", new princeps.api.schematic.FillSchematic(7, 6, 7,
+                Blocks.AIR.defaultBlockState()));
+        f.world.builder.noteExcavationWorkCut(ENTRY);
+        assertTrue("real in-selection work restores ordinary shell maintenance", f.mayAim(HOLE));
+    }
+
+    @Test public void recalculationRetainsPriorityOnlyForTheCommittedContext() throws Exception {
+        Fixture f = fixture();
+        put(f.world.pathing, "current", null);
+        assertFalse("dry repair must not seize control between route segments", f.mayAim(HOLE));
+        put(f.world.pathing, "context", null);
+        assertTrue("no committed context means no approach control reservation", f.mayAim(HOLE));
+        f = fixture();
+        put(f.world.pathing, "current", executor(path(FEET, FEET.south()), new Object()));
+        assertTrue("a foreign executor cannot borrow approach priority", f.mayAim(HOLE));
+        f = fixture();
+        f.approach.start();
+        assertTrue("an uncommitted pending job cannot suppress shell maintenance", f.mayAim(HOLE));
     }
 
     @Test public void pauseForeignContextAndJobReplacementCannotBorrowTheOldRoute() throws Exception {
@@ -88,6 +114,9 @@ public class ExcavationApproachRepairTest {
         f = fixture();
         put(f.world.cost, "approachToken", new Object());
         assertTrue("foreign context is not an access passage", f.mayAim(HOLE));
+        f = fixture();
+        f.approach.observeCommand(null);
+        assertTrue("an owner/command replacement retires the reservation", f.mayAim(HOLE));
         f = fixture();
         f.approach.start();
         f.approach.commit(new GoalBlock(ENTRY), FEET);
@@ -120,8 +149,11 @@ public class ExcavationApproachRepairTest {
 
     private record Fixture(PlatformTraverseFixture world, ExcavationApproach approach, ExcavationRepairAim aim) {
         boolean mayAim(BetterBlockPos cell) throws Exception {
-            world.world.states.put(cell.west().asLong(), Blocks.STONE.defaultBlockState());
-            var placement = new BuilderProcess.Placement(3, cell.west(), Direction.EAST,
+            return mayAim(cell, cell.west(), Direction.EAST);
+        }
+        boolean mayAim(BetterBlockPos cell, BlockPos support, Direction side) throws Exception {
+            world.world.states.put(support.asLong(), Blocks.STONE.defaultBlockState());
+            var placement = new BuilderProcess.Placement(3, support, side,
                     new Rotation(0, 0), FEET.asLong(), cell, Blocks.COBBLESTONE.defaultBlockState());
             Class<?> repairClass = Class.forName("princeps.process.BuilderProcess$SnakeRepair");
             var constructor = repairClass.getDeclaredConstructor(BetterBlockPos.class, ExcavationRepairPolicy.Kind.class, int.class);

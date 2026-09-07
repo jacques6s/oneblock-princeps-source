@@ -60,18 +60,6 @@ final class ExcavationApproach {
         return pending && token != null && token == commandToken && token == routeToken;
     }
 
-    /** Remaining body/head clearance, including the overhead cells occupied during an ascent or drop. */
-    static boolean needsOpen(IPath path, int position, BlockPos target) {
-        if (path == null || target == null || position < 0 || position >= path.movements().size()) return false;
-        for (int i = position; i < path.movements().size(); i++) {
-            var movement = path.movements().get(i);
-            BlockPos from = movement.getSrc(), to = movement.getDest();
-            if (target.equals(from) || target.equals(from.above())
-                    || target.equals(to) || target.equals(to.above()) || requiresBreak(path, i, target)) return true;
-        }
-        return false;
-    }
-
     /** The live movement's declared cut, excluding later steps and foreground blocks from blind aim fallbacks. */
     static boolean requiresBreak(IPath path, int position, BlockPos target) {
         if (path == null || target == null || position < 0 || position >= path.movements().size()) return false;

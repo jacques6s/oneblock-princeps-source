@@ -5660,9 +5660,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 .thenComparingInt(repair -> repair.pos().x)
                 .thenComparingInt(repair -> repair.pos().z));
         for (SnakeRepair candidate : candidates) {
-            if (deferApproachShellRepair(candidate.pos(), candidate.kind(), bcc.bsi.get0(candidate.pos()))) {
+            if (deferApproachShellRepair(candidate.kind(), bcc.bsi.get0(candidate.pos()))) {
                 if (buildTick % 20 == 0) BuildTrace.cell(buildTick, "DIG-APPROACH-DEFER", candidate.pos().x,
-                        candidate.pos().y, candidate.pos().z, "dry shell gap is remaining approach body/head clearance");
+                        candidate.pos().y, candidate.pos().z, "dry shell repair waits for initial approach controls");
                 continue;
             }
             BlockState fill = snakeIntegrityBlockState(candidate.pos());
@@ -5715,7 +5715,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private boolean excavationRepairFaceReady(Placement placement, SnakeRepair candidate,
                                                ExcavationRepairPolicy.Bounds bounds, BuilderCalculationContext bcc) {
         BlockState liveTarget = ctx.world().getBlockState(candidate.pos());
-        if (deferApproachShellRepair(candidate.pos(), candidate.kind(), liveTarget)) {
+        if (deferApproachShellRepair(candidate.kind(), liveTarget)) {
             excavationRepairAim.clear();
             return false;
         }
@@ -5736,18 +5736,19 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         return ready;
     }
 
-    /** Do not aim or select a repair item that would close the initial journey's remaining passage. */
-    boolean deferApproachShellRepair(BlockPos target, ExcavationRepairPolicy.Kind kind, BlockState state) {
+    /** Dry shell maintenance yields aim and inventory control until the committed initial journey ends. */
+    boolean deferApproachShellRepair(ExcavationRepairPolicy.Kind kind, BlockState state) {
         if (!excavating || paused || abortPending != Ending.RUNNING
                 || kind != ExcavationRepairPolicy.Kind.SHELL_GAP || !state.getFluidState().isEmpty()) return false;
         var pathing = princeps.getPathingBehavior();
         PathExecutor route = pathing.getCurrent();
         CalculationContext context = pathing.secretInternalGetCalculationContext();
         // This runs inside builder.onTick, before the manager assigns this tick's owner. The observed previous
-        // command already retired foreign sessions; require the exact live context/executor pair here.
-        return route != null && context != null
-                && excavationApproach.owns(context.excavationApproachToken(), route.excavationApproachToken())
-                && ExcavationApproach.needsOpen(route.getPath(), route.getPosition(), target);
+        // command already retired foreign sessions. Keep this priority between route segments and during
+        // recalculation too: a passed or unrelated dry gap still steals the route's shared aim/hotbar.
+        // An existing executor must belong to the same session; this grants no outside mining permission.
+        return context != null && excavationApproach.owns(context.excavationApproachToken(),
+                route == null ? context.excavationApproachToken() : route.excavationApproachToken());
     }
 
     private void traceExcavationRepairAim(String phase, Placement placement) {
