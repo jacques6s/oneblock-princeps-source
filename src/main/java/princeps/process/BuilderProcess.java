@@ -9859,24 +9859,24 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (paused || progressHold || cleanupEscape != null || incorrectPositions == null || incorrectPositions.isEmpty()) {
             return command; // nothing owed, so cancelling is the right answer
         }
+        CalculationContext context = princeps.getPathingBehavior().secretInternalGetCalculationContext();
+        PathExecutor route = princeps.getPathingBehavior().getCurrent();
+        PathingCommand approachHold = excavating && context != null
+                && excavationApproach.owns(context.excavationApproachToken(),
+                        route == null ? context.excavationApproachToken() : route.excavationApproachToken())
+                ? new PathingCommandContext(null, command.commandType, context) : command;
         if (princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_LEFT)
                 || princeps.getInputOverrideHandler().isInputForcedDown(Input.CLICK_RIGHT)) {
-            CalculationContext context = princeps.getPathingBehavior().secretInternalGetCalculationContext();
-            PathExecutor route = princeps.getPathingBehavior().getCurrent();
-            if (excavating && context != null
-                    && excavationApproach.owns(context.excavationApproachToken(),
-                            route == null ? context.excavationApproachToken() : route.excavationApproachToken())) {
-                // A builder-owned access cut stops the body, not its journey. A plain CANCEL would make the
-                // next tick mistake this same owner's click for a foreign command and release dry-shell priority.
-                return new PathingCommandContext(null, command.commandType, context);
-            }
-            return command; // a real click this tick: hold the body still, that is what the cancel is for
+            return approachHold; // a real click stops the body while retaining its owned initial journey
         }
         Goal inFlight = princeps.getPathingBehavior().getGoal();
         if (inFlight == null
                 && !princeps.getPathingBehavior().isPathing()
                 && princeps.getPathingBehavior().getInProgress().isEmpty()) {
-            return command; // no route to protect
+            // An earlier own click already canceled goal/executor. Its next aim/tool-settling tick still belongs
+            // to the same entry action. Dropping the token here lets dry repair select filler before the next
+            // cleanup click, producing a native pickaxe/filler fight even though neither foot nor owner changed.
+            return approachHold;
         }
         return continueCurrentRoute(inFlight, PathingCommandType.REVALIDATE_GOAL_AND_PATH);
     }

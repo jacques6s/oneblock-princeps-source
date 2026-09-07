@@ -95,6 +95,46 @@ public class ExcavationApproachRepairTest {
         assertTrue(f.mayAim(HOLE));
     }
 
+    @Test public void lowEntryClickThenAimOnlyTickKeepsDryRepairPriorityWithoutAnExecutor() throws Exception {
+        Fixture f = fixture();
+        f.world.player.pos = new Vec3(68.504, -58, 66.255);
+        BetterBlockPos wallGap = new BetterBlockPos(68, -56, 66);
+        Object token = f.approach.token();
+        var input = allocate(princeps.utils.InputOverrideHandler.class);
+        put(input, "inputForceStateMap", new java.util.HashMap<>());
+        put(PlatformTraverseFixture.get(f.world.builder, "princeps"), "inputOverrideHandler", input);
+        var hold = new princeps.api.process.PathingCommand(null,
+                princeps.api.process.PathingCommandType.CANCEL_AND_SET_GOAL);
+        input.setInputForceState(princeps.api.utils.input.Input.CLICK_LEFT, true);
+        var clicked = f.world.builder.holdStillWithoutTearingUpTheRoute(hold);
+        assertTrue(clicked instanceof princeps.utils.PathingCommandContext);
+        f.approach.observeCommand(((princeps.utils.PathingCommandContext) clicked)
+                .desiredCalcContext.excavationApproachToken());
+        // PathingControlManager's CANCEL clears goal/executor. The following ordinary target needs aim first,
+        // so this tick has neither input nor a live route, while the committed entry is still two steps away.
+        put(f.world.pathing, "current", null);
+        put(f.world.pathing, "goal", null);
+        input.clearAllKeys();
+        var aiming = f.world.builder.holdStillWithoutTearingUpTheRoute(hold);
+        f.approach.observeCommand(aiming instanceof princeps.utils.PathingCommandContext contextual
+                ? contextual.desiredCalcContext.excavationApproachToken() : null);
+        assertFalse("low-entry T207: an aim-only tick must not re-enable the competing dry repair", f.mayAim(wallGap));
+        assertSame(token, f.approach.token());
+        assertNull("holding aim must not restart walking during this action", aiming.goal);
+        assertEquals(hold.commandType, aiming.commandType);
+        assertFalse(input.isInputForcedDown(princeps.api.utils.input.Input.CLICK_LEFT));
+        assertFalse(input.isInputForcedDown(princeps.api.utils.input.Input.CLICK_RIGHT));
+        put(f.world.builder, "paused", true);
+        assertSame("pause cannot retain an action hold", hold, f.world.builder.holdStillWithoutTearingUpTheRoute(hold));
+        put(f.world.builder, "paused", false);
+        f.approach.observe(ENTRY);
+        assertTrue("arrival still restores ordinary wall maintenance", f.mayAim(wallGap));
+        assertSame("arrival cannot retain the old action hold", hold, f.world.builder.holdStillWithoutTearingUpTheRoute(hold));
+        f.approach.start();
+        f.approach.commit(new GoalBlock(ENTRY), FEET);
+        assertSame("a new job cannot reuse the old context", hold, f.world.builder.holdStillWithoutTearingUpTheRoute(hold));
+    }
+
     @Test public void directWorkRetiresOnlyAnUnroutedJobAlreadyInsideTheSelection() throws Exception {
         Fixture f = fixture();
         put(f.world.builder, "origin", new BetterBlockPos(67, -60, 67));
