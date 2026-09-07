@@ -115,6 +115,7 @@ public class ExcavationApproachTest {
     @Test
     public void actualBuilderPauseAndResumeRevokeBeforeAnotherTick() throws Exception {
         BuilderProcess builder = allocate(BuilderProcess.class);
+        put(builder, "progressWatch", new princeps.process.builder.BuilderProgressWatch(1, 2, 0.1));
         ExcavationApproach approach = new ExcavationApproach();
         put(builder, "excavationApproach", approach);
         approach.start();
@@ -188,8 +189,13 @@ public class ExcavationApproachTest {
         approach.observeCommand(retainedContext.excavationApproachToken());
         assertSame("a harmless hold must not create a cancel/replan cycle", token,
                 approach.commit(new GoalBlock(ENTRY), START));
-        put(pathing, "current", executor(path(START, START.east()), new Object()));
-        assertFalse(builder.holdStillWithoutTearingUpTheRoute(hold) instanceof princeps.utils.PathingCommandContext);
+        PathExecutor foreign = executor(path(START, START.east()), new Object());
+        put(pathing, "current", foreign);
+        var foreignHold = builder.holdStillWithoutTearingUpTheRoute(hold);
+        assertTrue("223 continuations preserve their planning context", foreignHold instanceof princeps.utils.PathingCommandContext);
+        assertFalse("retaining context cannot license another executor's cuts",
+                approach.owns(((princeps.utils.PathingCommandContext) foreignHold).desiredCalcContext.excavationApproachToken(),
+                        foreign.excavationApproachToken()));
         input.setInputForceState(princeps.api.utils.input.Input.CLICK_LEFT, true);
         assertSame("an actual click still cancels and holds the body", hold,
                 builder.holdStillWithoutTearingUpTheRoute(hold));
