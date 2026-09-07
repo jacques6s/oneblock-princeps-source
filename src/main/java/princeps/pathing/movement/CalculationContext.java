@@ -196,6 +196,11 @@ public class CalculationContext {
         return princeps;
     }
 
+    /** Opaque, revocable initial AutoDig approach identity; ordinary routes carry no outside-cut permission. */
+    public Object excavationApproachToken() {
+        return null;
+    }
+
     public BlockState get(int x, int y, int z) {
         return bsi.get0(x, y, z); // laughs maniacally
     }

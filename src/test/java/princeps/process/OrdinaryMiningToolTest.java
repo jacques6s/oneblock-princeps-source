@@ -21,6 +21,9 @@ import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import princeps.utils.ToolSet;
+import princeps.api.schematic.ISchematic;
+import princeps.api.pathing.PlacementLicence;
+import princeps.pathing.movement.CalculationContext;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
@@ -143,5 +146,95 @@ public class OrdinaryMiningToolTest {
                 Blocks.OAK_FENCE.defaultBlockState(), true, 10));
         assertEquals(-1, BuilderProcess.ordinaryMiningToolSlot(List.of(fastSword, ItemStack.EMPTY),
                 Blocks.OAK_FENCE.defaultBlockState(), true, 10));
+    }
+
+    @Test
+    public void initialApproachPlannerRequiresOrdinaryToolsWhileNormalExcavationKeepsItsBoundary() throws Exception {
+        var stone = Blocks.STONE.defaultBlockState();
+        var approach = approachContext(new Object(), hotbar(), BuilderProcess.Lane.EXCAVATION_APPROACH, true);
+        // The user's trace was an ordinary-tool route through a wall outside the selection. The former plain
+        // navigation context offered this exact cut, while the actuator refused every outside-selection hit.
+        var oldNavigation = ExcavationApproachTest.allocate(CalculationContext.class);
+        ExcavationApproachTest.put(oldNavigation, "allowBreak", true);
+        assertEquals(1, oldNavigation.breakCostMultiplierAt(9, 24, 30, stone), 0);
+        assertEquals(1, approach.breakCostMultiplierAt(9, 24, 30, stone), 0);
+        assertNotNull(approach.excavationApproachToken());
+        assertSame(PlacementLicence.NONE, approach.placementLicence());
+        for (var lane : new BuilderProcess.Lane[] {BuilderProcess.Lane.A_NO_PLACING,
+                BuilderProcess.Lane.LEGACY, BuilderProcess.Lane.EXCAVATION_PATH}) {
+            assertEquals(princeps.api.pathing.movement.ActionCosts.COST_INF,
+                    approachContext(null, hotbar(), lane, true).breakCostMultiplierAt(9, 24, 30, stone), 0);
+        }
+        assertEquals("construction keeps its prior outside routing", 1,
+                approachContext(null, hotbar(), BuilderProcess.Lane.LEGACY, false)
+                        .breakCostMultiplierAt(9, 24, 30, stone), 0);
+        for (var tools : List.of(List.of(hotbar().getFirst()), List.<ItemStack>of())) {
+            assertEquals("Shard-only and empty hotbars cannot make an access tunnel",
+                    princeps.api.pathing.movement.ActionCosts.COST_INF,
+                    approachContext(new Object(), tools, BuilderProcess.Lane.EXCAVATION_APPROACH, true)
+                            .breakCostMultiplierAt(9, 24, 30, stone), 0);
+        }
+        assertEquals("an unlicensed approach snapshot cannot offer outside mining",
+                princeps.api.pathing.movement.ActionCosts.COST_INF,
+                approachContext(null, hotbar(), BuilderProcess.Lane.EXCAVATION_APPROACH, true)
+                        .breakCostMultiplierAt(9, 24, 30, stone), 0);
+    }
+
+    @Test
+    public void accessContextDoesNotBorrowPermissionForLowerBandsOrFluids() throws Exception {
+        var approach = approachContext(new Object(), hotbar(), BuilderProcess.Lane.EXCAVATION_APPROACH, true);
+        assertEquals(1, approach.breakCostMultiplierAt(10, 24, 30, Blocks.STONE.defaultBlockState()), 0);
+        assertEquals("the active AIR mask still owns in-selection cuts",
+                princeps.api.pathing.movement.ActionCosts.COST_INF,
+                approach.breakCostMultiplierAt(10, 20, 30, Blocks.STONE.defaultBlockState()), 0);
+        for (var wet : new net.minecraft.world.level.block.state.BlockState[] {
+                Blocks.WATER.defaultBlockState(), Blocks.LAVA.defaultBlockState(),
+                Blocks.OAK_SLAB.defaultBlockState().setValue(
+                        net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED, true)}) {
+            assertEquals(princeps.api.pathing.movement.ActionCosts.COST_INF,
+                    approach.breakCostMultiplierAt(9, 24, 30, wet), 0);
+        }
+        ExcavationApproachTest.put(approach, "allowBreak", false);
+        assertEquals(princeps.api.pathing.movement.ActionCosts.COST_INF,
+                approach.breakCostMultiplierAt(9, 24, 30, Blocks.STONE.defaultBlockState()), 0);
+    }
+
+    private static BuilderProcess.BuilderCalculationContext approachContext(Object token, List<ItemStack> tools,
+            BuilderProcess.Lane lane, boolean excavation) throws Exception {
+        BuilderProcess builder = ExcavationApproachTest.allocate(BuilderProcess.class);
+        ExcavationApproachTest.put(builder, "approxPlaceable", List.of());
+        var context = ExcavationApproachTest.allocate(BuilderProcess.BuilderCalculationContext.class);
+        ExcavationApproachTest.put(context, "this$0", builder);
+        ExcavationApproachTest.put(context, "allowBreak", true);
+        ExcavationApproachTest.put(context, "allowBreakAnyway", List.of());
+        ExcavationApproachTest.put(context, "lane", lane);
+        ExcavationApproachTest.put(context, "excavationMode", excavation);
+        ExcavationApproachTest.put(context, "ordinaryExcavationMode", excavation);
+        ExcavationApproachTest.put(context, "approachToken", token);
+        ExcavationApproachTest.put(context, "approachTools", tools);
+        ExcavationApproachTest.put(context, "approachItemSaver", true);
+        ExcavationApproachTest.put(context, "approachItemSaverThreshold", 10);
+        ExcavationApproachTest.put(context, "fluidPlugSnapshot", new ExcavationFluidPlugs());
+        ExcavationApproachTest.put(context, "originX", 10);
+        ExcavationApproachTest.put(context, "originY", 20);
+        ExcavationApproachTest.put(context, "originZ", 30);
+        ExcavationApproachTest.put(context, "fullWidth", 4);
+        ExcavationApproachTest.put(context, "fullHeight", 6);
+        ExcavationApproachTest.put(context, "fullLength", 4);
+        ExcavationApproachTest.put(context, "schematic", new ISchematic() {
+            @Override public int widthX() { return 4; }
+            @Override public int heightY() { return 6; }
+            @Override public int lengthZ() { return 4; }
+            @Override public boolean inSchematic(int x, int y, int z,
+                    net.minecraft.world.level.block.state.BlockState current) {
+                return ISchematic.super.inSchematic(x, y, z, current) && y >= 4;
+            }
+            @Override public net.minecraft.world.level.block.state.BlockState desiredState(int x, int y, int z,
+                    net.minecraft.world.level.block.state.BlockState current,
+                    List<net.minecraft.world.level.block.state.BlockState> available) {
+                return Blocks.AIR.defaultBlockState();
+            }
+        });
+        return context;
     }
 }

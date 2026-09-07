@@ -91,6 +91,7 @@ public class PathExecutor implements IPathExecutor, Helper {
     /** The other half of the same promise, and final for the same reason. See {@link WadeLicence}. */
     private final WadeLicence wadeLicence;
     private final ModelProtection modelProtection;
+    private final Object excavationApproachToken;
 
     public PathExecutor(PathingBehavior behavior, IPath path) {
         this(behavior, path, PlacementLicence.UNRESTRICTED, WadeLicence.NONE);
@@ -111,6 +112,16 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     public PathExecutor(PathingBehavior behavior, IPath path, PlacementLicence placementLicence,
                         WadeLicence wadeLicence, ModelProtection modelProtection) {
+        this(behavior, path, placementLicence, wadeLicence, modelProtection, null);
+    }
+
+    public PathExecutor(PathingBehavior behavior, IPath path, PlacementLicence placementLicence,
+                        WadeLicence wadeLicence, Object excavationApproachToken) {
+        this(behavior, path, placementLicence, wadeLicence, null, excavationApproachToken);
+    }
+
+    public PathExecutor(PathingBehavior behavior, IPath path, PlacementLicence placementLicence,
+                        WadeLicence wadeLicence, ModelProtection modelProtection, Object excavationApproachToken) {
         this.behavior = behavior;
         this.ctx = behavior.ctx;
         this.path = path;
@@ -118,6 +129,11 @@ public class PathExecutor implements IPathExecutor, Helper {
         this.placementLicence = placementLicence == null ? PlacementLicence.UNRESTRICTED : placementLicence;
         this.wadeLicence = wadeLicence == null ? WadeLicence.NONE : wadeLicence;
         this.modelProtection = modelProtection;
+        this.excavationApproachToken = excavationApproachToken;
+    }
+
+    public Object excavationApproachToken() {
+        return excavationApproachToken;
     }
 
     public boolean allowsModelRemoval(BlockPos target, princeps.api.process.IPrincepsProcess controlling,
@@ -730,6 +746,7 @@ public class PathExecutor implements IPathExecutor, Helper {
         }
         if (modelProtection == null ? next.modelProtection != null
                 : !modelProtection.sameBinding(next.modelProtection)) return this;
+        if (excavationApproachToken != next.excavationApproachToken) return this;
         return SplicedPath.trySplice(path, next.path, false).map(path -> {
             if (!path.getDest().equals(next.getPath().getDest())) {
                 throw new IllegalStateException(String.format(
@@ -737,7 +754,8 @@ public class PathExecutor implements IPathExecutor, Helper {
                         path.getDest(), next.getPath().getDest()));
             }
             // Inherits the licences: a spliced or cut route is the SAME route under the same rules.
-            PathExecutor ret = new PathExecutor(behavior, path, placementLicence, wadeLicence, modelProtection);
+            PathExecutor ret = new PathExecutor(behavior, path, placementLicence, wadeLicence, modelProtection,
+                    excavationApproachToken);
             ret.pathPosition = pathPosition;
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             ret.costEstimateIndex = costEstimateIndex;
@@ -761,7 +779,8 @@ public class PathExecutor implements IPathExecutor, Helper {
             }
             logDebug("Discarding earliest segment movements, length cut from " + path.length() + " to " + newPath.length());
             // Inherits the licences: a spliced or cut route is the SAME route under the same rules.
-            PathExecutor ret = new PathExecutor(behavior, newPath, placementLicence, wadeLicence, modelProtection);
+            PathExecutor ret = new PathExecutor(behavior, newPath, placementLicence, wadeLicence, modelProtection,
+                    excavationApproachToken);
             ret.pathPosition = pathPosition - cutoffAmt;
             ret.currentMovementOriginalCostEstimate = currentMovementOriginalCostEstimate;
             if (costEstimateIndex != null) {
