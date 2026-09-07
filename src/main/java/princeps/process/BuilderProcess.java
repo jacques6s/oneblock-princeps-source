@@ -622,6 +622,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private final BuilderScaffoldLedger navigationScaffolds = new BuilderScaffoldLedger();
     private final ExcavationFluidPlugs excavationFluidPlugs = new ExcavationFluidPlugs();
     private final ExcavationActiveClock excavationActiveClock = new ExcavationActiveClock();
+    private final ExcavationApproach excavationApproach = new ExcavationApproach();
+    private long excavationApproachToolChangedTick = Long.MIN_VALUE;
     private final ExcavationRepairAim excavationRepairAim = new ExcavationRepairAim();
     private String lastExcavationRepairAimTrace;
     private long lastExcavationRepairAimTraceTick;
@@ -1981,6 +1983,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (scaffoldMaterialTarget != null) scaffoldMaterialWaitStarted += Math.max(0, buildTick - scaffoldMaterialPausedAt);
             scaffoldMaterialPausedAt = null;
         }
+        if (paused && excavationApproach != null) excavationApproach.suspend();
         paused = false;
     }
 
@@ -1990,6 +1993,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         platformTraverseApproach = null;
         supportRepair = null;
         progressWatch.pause();
+        if (excavationApproach != null) excavationApproach.suspend();
     }
 
     @Override
@@ -2268,6 +2272,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         build("clear area", new FillSchematic(widthX, heightY, lengthZ, Blocks.AIR.defaultBlockState()), origin);
         // AFTER the build, because build() clears the flag for every job that is not this one.
         excavating = true;
+        excavationApproach.start();
     }
 
     @Override
@@ -4639,7 +4644,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 + ",sources=" + snakeFluidSourcesPlugged
                 + ",shell=" + snakeShellRepairs
                 + ",verificationPasses=" + snakeVerificationPasses
-                + ",verifiedBands=" + snakeVerifiedBands + "}";
+                + ",verifiedBands=" + snakeVerifiedBands + "} breakRetry={"
+                + princeps.getInputOverrideHandler().getBlockBreakHelper().breakRetryDiagnosis() + "}";
+    }
+
+    /** Bounded helper retries belong to the active excavation, never to a subsequent construction action. */
+    public boolean mayRetryExcavationBreak() {
+        return isActive() && excavating && !paused && abortPending == Ending.RUNNING
+                && princeps.getPathingControlManager().mostRecentInControl().orElse(null) == this;
     }
 
     /**
@@ -5429,8 +5441,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     /** Last-moment guard shared by builder and navigation inputs, including every actual Shard neighbour. */
     public boolean ordinaryExcavationBreakAllowed(BlockPos target) {
         if (!isActive() || !excavating) return true;
-        if (paused || abortPending != Ending.RUNNING || !insideSnakeVolume(target.getX(), target.getY(), target.getZ())) {
+        if (paused || abortPending != Ending.RUNNING) {
             return false;
+        }
+        if (!insideSnakeVolume(target.getX(), target.getY(), target.getZ())) {
+            return excavationApproachBreakAllowed(target);
         }
         boolean areaTool = snakeIsAreaTool(ctx.player().getMainHandItem());
         Direction face = ctx.objectMouseOver() instanceof BlockHitResult hit ? hit.getDirection() : null;
@@ -5443,6 +5458,65 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 ? schematic.desiredState(x, y, z, state, approxPlaceable) : null;
         return ExcavationRepairPolicy.ordinaryBreakAllowed(true, desired != null && desired.isAir(),
                 areaTool);
+    }
+
+    private PathExecutor ownedExcavationApproachRoute() {
+        if (!isActive() || !excavating || paused || abortPending != Ending.RUNNING
+                || princeps.getPathingControlManager().mostRecentInControl().orElse(null) != this) return null;
+        PathExecutor route = princeps.getPathingBehavior().getCurrent();
+        PathingCommand command = princeps.getPathingControlManager().mostRecentCommand().orElse(null);
+        Object commandToken = command instanceof PathingCommandContext contextual
+                ? contextual.desiredCalcContext.excavationApproachToken() : null;
+        return route != null && excavationApproach.owns(commandToken, route.excavationApproachToken())
+                ? route : null;
+    }
+
+    private boolean excavationApproachBreakAllowed(BlockPos target) {
+        PathExecutor route = ownedExcavationApproachRoute();
+        if (route == null || !ExcavationApproach.requiresBreak(route.getPath(), route.getPosition(), target)
+                || snakeIsAreaTool(ctx.player().getMainHandItem())
+                || excavationApproachToolChangedTick == buildTick) return false;
+        var survival = princeps.getSurvivalBehavior();
+        if (survival != null && (survival.ownsInventory() || survival.isConsuming())) return false;
+        BlockState state = ctx.world().getBlockState(target);
+        int ordinary = snakeOrdinaryPickSlot(state);
+        return ordinary >= 0 && ordinary == ctx.player().getInventory().getSelectedSlot()
+                && (Princeps.settings().allowBreak.value
+                    || Princeps.settings().allowBreakAnyway.value.contains(state.getBlock()))
+                && state.getFluidState().isEmpty()
+                && !MovementHelper.avoidBreaking(princeps.bsi, target.getX(), target.getY(), target.getZ(), state)
+                && excavationMayMinePlug(target, false);
+    }
+
+    /** Select an eligible ordinary mining tool and settle its slot before the single-cell access cut. */
+    public boolean selectExcavationApproachTool(BlockState state) {
+        if (ownedExcavationApproachRoute() == null) return false;
+        int wanted = snakeOrdinaryPickSlot(state);
+        if (wanted < 0) {
+            abortBuild(Ending.MATERIALS_MISSING, "AutoDig needs an ordinary mining tool to reach its entry",
+                    List.of("Put an ordinary pickaxe, axe, shovel, or hoe on the hotbar to continue."));
+        } else if (wanted != ctx.player().getInventory().getSelectedSlot()) {
+            ctx.player().getInventory().setSelectedSlot(wanted);
+            excavationApproachToolChangedTick = buildTick;
+        }
+        return true;
+    }
+
+    private PathingCommand initialExcavationApproach(Goal requested) {
+        if (!excavating || !excavationApproach.pending()) return null;
+        Object previous = excavationApproach.token();
+        Object token = excavationApproach.commit(requested, ctx.playerFeet());
+        if (token == null) return null;
+        if (previous != token) princeps.getPathingBehavior().softCancelIfSafe();
+        BuilderCalculationContext context = new BuilderCalculationContext(Lane.EXCAVATION_APPROACH);
+        snakeDiagnosis = "t=" + buildTick + " AutoDig approaches its initial entry using ordinary route cuts";
+        return new PathingCommandContext(excavationApproach.entry(),
+                PathingCommandType.SET_GOAL_AND_PATH, context);
+    }
+
+    /** An already reachable working cut ends initial travel even when no entry route was needed. */
+    void noteExcavationWorkCut(BlockPos target) {
+        if (excavating && insideSnakeVolume(target.getX(), target.getY(), target.getZ())) excavationApproach.clear();
     }
 
     private Optional<ExcavationFluidPlugs.Hazard> excavationPlugHazard(BlockPos target, Direction face,
@@ -5586,6 +5660,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 .thenComparingInt(repair -> repair.pos().x)
                 .thenComparingInt(repair -> repair.pos().z));
         for (SnakeRepair candidate : candidates) {
+            if (deferApproachShellRepair(candidate.kind(), bcc.bsi.get0(candidate.pos()))) {
+                if (buildTick % 20 == 0) BuildTrace.cell(buildTick, "DIG-APPROACH-DEFER", candidate.pos().x,
+                        candidate.pos().y, candidate.pos().z, "dry shell repair waits for initial approach controls");
+                continue;
+            }
             BlockState fill = snakeIntegrityBlockState(candidate.pos());
             if (fill == null) {
                 abortBuild(Ending.MATERIALS_MISSING,
@@ -5636,6 +5715,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private boolean excavationRepairFaceReady(Placement placement, SnakeRepair candidate,
                                                ExcavationRepairPolicy.Bounds bounds, BuilderCalculationContext bcc) {
         BlockState liveTarget = ctx.world().getBlockState(candidate.pos());
+        if (deferApproachShellRepair(candidate.kind(), liveTarget)) {
+            excavationRepairAim.clear();
+            return false;
+        }
         if (ExcavationRepairPolicy.repair(bounds, candidate.pos().x, candidate.pos().y, candidate.pos().z,
                 liveTarget, MovementHelper.isReplaceable(candidate.pos().x, candidate.pos().y, candidate.pos().z,
                         liveTarget, bcc.bsi), true) != candidate.kind()) {
@@ -5651,6 +5734,21 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 ctx.player().isInWater(), !supportShape.isEmpty());
         traceExcavationRepairAim(ready ? "AIM" : "APPROACH", placement);
         return ready;
+    }
+
+    /** Dry shell maintenance yields aim and inventory control until the committed initial journey ends. */
+    boolean deferApproachShellRepair(ExcavationRepairPolicy.Kind kind, BlockState state) {
+        if (!excavating || paused || abortPending != Ending.RUNNING
+                || kind != ExcavationRepairPolicy.Kind.SHELL_GAP || !state.getFluidState().isEmpty()) return false;
+        var pathing = princeps.getPathingBehavior();
+        PathExecutor route = pathing.getCurrent();
+        CalculationContext context = pathing.secretInternalGetCalculationContext();
+        // This runs inside builder.onTick, before the manager assigns this tick's owner. The observed previous
+        // command already retired foreign sessions. Keep this priority between route segments and during
+        // recalculation too: a passed or unrelated dry gap still steals the route's shared aim/hotbar.
+        // An existing executor must belong to the same session; this grants no outside mining permission.
+        return context != null && excavationApproach.owns(context.excavationApproachToken(),
+                route == null ? context.excavationApproachToken() : route.excavationApproachToken());
     }
 
     private void traceExcavationRepairAim(String phase, Placement placement) {
@@ -9685,7 +9783,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      * are cleared at the top of every tick, so a forced click can only have been forced by this tick, which makes
      * it the exact test for "did this tick act".
      */
-    private PathingCommand holdStillWithoutTearingUpTheRoute(PathingCommand command) {
+    PathingCommand holdStillWithoutTearingUpTheRoute(PathingCommand command) {
         if (command == null
                 || command.commandType != PathingCommandType.CANCEL_AND_SET_GOAL
                 || command.goal != null) {
@@ -9709,7 +9807,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
 
     /** A continuation must retain the route's rules as well as its goal. A plain command makes PathingBehavior
      * construct a generic context, briefly allowing routes that the next builder tick cannot execute. Preserve
-     * the exact snapshot, including lane A/B and AutoDig's deliberately generic initial approach. New route
+     * the exact snapshot, including lane A/B and AutoDig's licensed initial approach. New route
      * commands still choose their own context; without an existing snapshot there is nothing to retain. */
     private PathingCommand continueCurrentRoute(Goal goal, PathingCommandType type) {
         CalculationContext context = princeps.getPathingBehavior().secretInternalGetCalculationContext();
@@ -9741,9 +9839,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 breakBranchProgress.observedProgress();
             }
             if (excavating) {
+                PathingCommand previousCommand = princeps.getPathingControlManager().mostRecentCommand().orElse(null);
+                excavationApproach.observeCommand(previousCommand instanceof PathingCommandContext contextual
+                        ? contextual.desiredCalcContext.excavationApproachToken() : null);
+                excavationApproach.observe(ctx.playerFeet());
                 if (!paused) enforceAutoDigLookProfile();
                 excavationActiveClock.tick(paused, survival != null && survival.ownsInventory(),
                         survival != null && survival.isConsuming());
+                if (paused || (survival != null && (survival.ownsInventory() || survival.isConsuming()))) {
+                    excavationFluidPlugs.suspendRouteProgress();
+                }
             }
             if (calcFailed) {
                 homeFailedRoute = princeps.getPathingBehavior().getGoal();
@@ -10148,10 +10253,10 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         var excavationSurvival = princeps.getSurvivalBehavior();
         boolean excavationHandsBorrowed = excavationSurvival != null
                 && (excavationSurvival.ownsInventory() || excavationSurvival.isConsuming());
-        if (blockedFluidPlugThisTick != null && plugRoute != null
+        if (blockedFluidPlugThisTick != null
                 && !excavationHandsBorrowed
                 && insideSnakeVolume(ctx.playerFeet().x, ctx.playerFeet().y, ctx.playerFeet().z)) {
-            excavationFluidPlugs.routeProgress(plugRoute, plugRoute.getPosition(), ctx.playerFeet());
+            excavationFluidPlugs.observeRouteProgress(plugRoute, ctx.playerFeet());
         }
         // Check before a repair can arm CLICK_RIGHT. First server confirmations anywhere in the current plug
         // ledger and real, non-repeated route advancement renew this clock; merely aiming or retrying does not.
@@ -10293,6 +10398,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (toolReady && breakAimReady && aimReceivedByServer) {
                 selectSupportRepair(pos, breakState, bcc.getSchematic(pos.x, pos.y, pos.z, breakState));
                 progressActions.arm(positionKey(pos), breakState, Blocks.AIR.defaultBlockState());
+                noteExcavationWorkCut(pos);
                 princeps.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
                 if (needsSnakeFaceSettle && swingFace != null) {
                     snakeLastSwungFace = swingFace;
@@ -11106,6 +11212,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         if (platformStep && (platformTraverseApproach != platform || !platform.target.equals(electedCell))) {
             return new PathingCommand(null, PathingCommandType.CANCEL_AND_SET_GOAL);
         }
+        PathingCommand initialApproach = initialExcavationApproach(routeGoal);
+        if (initialApproach != null) return initialApproach;
         Lane lane = platformStep ? Lane.A_NO_PLACING : laneForCurrentCell(electedCell);
         // Consuming A=NONE can change permissions in this very tick. Never dispatch the old A snapshot for B.
         BuilderCalculationContext routeContext = context.lane == lane && context.platformApproach == platformTraverseApproach
@@ -13703,6 +13811,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
     private PathingCommand snakePathingCommand() {
         BetterBlockPos feet = ctx.playerFeet();
         BetterBlockPos goal = snakeStance;
+        PathingCommand initialApproach = initialExcavationApproach(new GoalBlock(goal));
+        if (initialApproach != null) return initialApproach;
         // AutoDig may descend only through its owned one-block entry cut. If ordinary pathing sees a vertical
         // difference here, the bot has left the band floor (normally by falling into an unrepaired gap). Asking A*
         // for the remote stance would license a stair or pillar recovery and silently violate the excavation route.
@@ -13719,8 +13829,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
                 // walks the bot to a dig site in the first place. The corridor rule takes over the moment the bot
                 // has actually stood on that level, and from then on leaving it is still an abort.
                 snakeBridgeTarget = null;
-                return new PathingCommand(new GoalBlock(goal.x, goal.y, goal.z),
-                        PathingCommandType.SET_GOAL_AND_PATH);
+                return new PathingCommandContext(new GoalBlock(goal.x, goal.y, goal.z),
+                        PathingCommandType.SET_GOAL_AND_PATH, new BuilderCalculationContext(Lane.A_NO_PLACING));
             }
             abortBuild(Ending.LAYER_UNBUILDABLE,
                     "AutoDig left its level one-block route at " + feet.x + "," + feet.y + "," + feet.z,
@@ -14722,6 +14832,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
      *  of truth so a field added to one path can never be forgotten in the other. */
     private void resetPlacementTracking() {
         resetBreakBranchTracking();
+        excavationApproach.clear();
+        excavationApproachToolChangedTick = Long.MIN_VALUE;
         homeRecoveryEnabled = false;
         homeRecovery = null;
         homeRecoveryAttemptRevision = Long.MIN_VALUE;
@@ -15054,6 +15166,8 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         B_HELPERS_ALLOWED,
         /** AutoDig: a short path may bridge exactly its next centre-line floor cell and nowhere else. */
         EXCAVATION_PATH,
+        /** The initial journey to the selected entry; its current movement alone may make ordinary access cuts. */
+        EXCAVATION_APPROACH,
         /** What the builder did before the lanes existed. */
         LEGACY,
     }
@@ -15097,6 +15211,12 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         private final Lane lane;
         private final boolean rowMode;
         private final boolean ordinaryExcavationMode;
+        private final boolean excavationMode;
+        private final Object approachToken;
+        private final List<ItemStack> approachTools;
+        private final boolean approachItemSaver;
+        private final int approachItemSaverThreshold;
+        private final int fullWidth, fullHeight, fullLength;
         private final ExcavationFluidPlugs fluidPlugSnapshot;
         private final boolean rowSweepAlongX;
         private final int rowBandStart;
@@ -15119,6 +15239,16 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             super(BuilderProcess.this.princeps, true, permitFallWater);
             this.lane = lane;
             this.ordinaryExcavationMode = ordinaryExcavation();
+            this.excavationMode = excavating;
+            this.approachToken = lane == Lane.EXCAVATION_APPROACH ? excavationApproach.token() : null;
+            this.approachItemSaver = Princeps.settings().itemSaver.value;
+            this.approachItemSaverThreshold = Princeps.settings().itemSaverThreshold.value;
+            this.approachTools = approachToken == null ? List.of()
+                    : ctx.player().getInventory().getNonEquipmentItems().stream().limit(9).map(ItemStack::copy).toList();
+            ISchematic full = realSchematic == null ? BuilderProcess.this.schematic : realSchematic;
+            this.fullWidth = full.widthX();
+            this.fullHeight = full.heightY();
+            this.fullLength = full.lengthZ();
             this.fluidPlugSnapshot = excavating ? excavationFluidPlugs.snapshot() : new ExcavationFluidPlugs();
             this.platformApproach = platformTraverseApproach;
             this.excavationRouteStart = lane == Lane.EXCAVATION_PATH ? ctx.playerFeet() : null;
@@ -15152,6 +15282,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             } else {
                 switch (lane) {
                     case A_NO_PLACING:
+                    case EXCAVATION_APPROACH:
                         this.scaffoldLicensed = false;
                         break;
                     case B_HELPERS_ALLOWED:
@@ -15201,6 +15332,11 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         }
 
         public ModelProtection modelProtection() { return modelProtection; }
+
+        @Override
+        public Object excavationApproachToken() {
+            return approachToken;
+        }
 
         private BlockState getSchematic(int x, int y, int z, BlockState current) {
             BlockPos pos = new BlockPos(x, y, z);
@@ -15280,6 +15416,7 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
          */
         @Override
         public PlacementLicence placementLicence() {
+            if (lane == Lane.EXCAVATION_APPROACH) return PlacementLicence.NONE;
             switch (lane) {
                 case A_NO_PLACING:
                     return PlacementLicence.NONE;
@@ -15462,6 +15599,14 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
             if (supportDependencies != null && !supportDependencies.removal(new BlockPos(x, y, z)).allowed()) {
                 return COST_INF;
             }
+            boolean outsideSelection = x < originX || x >= originX + fullWidth
+                    || y < originY || y >= originY + fullHeight || z < originZ || z >= originZ + fullLength;
+            if (lane == Lane.EXCAVATION_APPROACH && outsideSelection) {
+                return approachToken != null && current.getFluidState().isEmpty()
+                        && ordinaryMiningToolSlot(approachTools, current, approachItemSaver,
+                            approachItemSaverThreshold) >= 0 ? 1 : COST_INF;
+            }
+            if (excavationMode && outsideSelection) return COST_INF;
             // The snake itself owns every excavation break, including the exact 3x3 face and its rotation settle.
             // Navigation is only allowed to walk that cleared corridor and bridge its one licensed floor cell. If A*
             // may break here it can tunnel sideways, shave the ceiling, or invent a stair around a ravine; all three

@@ -37,6 +37,7 @@ public final class BlockBreakHelper {
 
     private final IPlayerContext ctx;
     private final java.util.function.Predicate<BlockPos> miningAllowed;
+    private final java.util.function.BooleanSupplier allowExcavationRetries;
     private boolean wasHitting;
     private int breakDelayTimer = 0;
     // Break timing is execution-only (never replayed in path/reach prediction), so a plain RNG is fine here.
@@ -54,44 +55,61 @@ public final class BlockBreakHelper {
     /** One-shot execution intent, consumed by the next helper tick. V2 never sets it and keeps its sampled cadence. */
     private boolean deterministicThisTick;
 
-    // ── glitch-block blacklist ──────────────────────────────────────────────────────────────────────────
-    // A block that re-appears after we break it (the server re-sets it / it isn't really breakable and just
-    // "glitches") is abandoned IMMEDIATELY: break it once, if it regrows and we break the SAME spot a second
-    // time within the window, blacklist it. Cheap to be wrong — we simply take another route; the caller's
-    // stuck detection then re-routes / RTPs away. Once blacklisted the spot is never mined again.
-    private static final int REGROW_LIMIT = 1;          // MORE than this many rapid re-breaks of the SAME block → blacklist (so the 2nd break blacklists)
     private static final int COLUMN_SCAN_HEIGHT = 24;
-    private static final long REGROW_WINDOW_MS = 4000L; // re-breaks farther apart than this are treated as unrelated
-    private final java.util.Set<Long> blacklist = new java.util.HashSet<>();
-    private long lastBrokenPosPacked = Long.MIN_VALUE;
-    private int regrowCount;
-    /** Height of the fallable stack above the last broken cell when that break completed. */
-    private int lastColumnAbove;
-    private long lastBrokenAtMs;
+    private final BlockBreakRetry breakRetry = new BlockBreakRetry();
 
     BlockBreakHelper(IPlayerContext ctx, java.util.function.Predicate<BlockPos> miningAllowed) {
-        this.ctx = ctx;
-        this.miningAllowed = miningAllowed;
+        this(ctx, miningAllowed, () -> false);
     }
 
-    /** True if this block was abandoned as an un-breakable glitch block (re-set itself too many times). */
+    BlockBreakHelper(IPlayerContext ctx) {
+        this(ctx, ignored -> true, () -> false);
+    }
+
+    BlockBreakHelper(IPlayerContext ctx, java.util.function.BooleanSupplier allowExcavationRetries) {
+        this(ctx, ignored -> true, allowExcavationRetries);
+    }
+
+    BlockBreakHelper(IPlayerContext ctx, java.util.function.Predicate<BlockPos> miningAllowed,
+                     java.util.function.BooleanSupplier allowExcavationRetries) {
+        this.ctx = ctx;
+        this.miningAllowed = miningAllowed;
+        this.allowExcavationRetries = allowExcavationRetries;
+    }
+
+    /** Unresolved rejection for terminal planner consumers. An AutoDig retry does not imply planner completion. */
     public boolean isBlacklisted(BlockPos pos) {
-        return pos != null && blacklist.contains(pos.asLong());
+        return breakRetry.rejected(ctx.world(), pos);
+    }
+
+    private boolean shouldSuppressBreak(BlockPos pos) {
+        return allowExcavationRetries.getAsBoolean()
+                ? breakRetry.blocked(ctx.world(), pos, monotonicMillis()) : isBlacklisted(pos);
     }
 
     /** True when the crosshair currently rests on a blacklisted glitch block — the caller should not force a break. */
     public boolean isAimingAtBlacklisted() {
         final HitResult trace = ctx.objectMouseOver();
         return trace != null && trace.getType() == HitResult.Type.BLOCK
-                && blacklist.contains(((BlockHitResult) trace).getBlockPos().asLong());
+                && shouldSuppressBreak(((BlockHitResult) trace).getBlockPos());
     }
 
     /** Forget all blacklisted blocks (e.g. on a world/dimension change). */
     public void clearBlacklist() {
-        blacklist.clear();
-        lastBrokenPosPacked = Long.MIN_VALUE;
-        regrowCount = 0;
-        lastColumnAbove = 0;
+        breakRetry.clear();
+    }
+
+    public void observeServerChange(BlockPos pos, BlockState state) {
+        breakRetry.serverChanged(ctx.world(), pos, state);
+    }
+
+    public String breakRetryDiagnosis() {
+        return ctx.objectMouseOver() instanceof BlockHitResult hit
+                ? breakRetry.diagnosis(ctx.world(), hit.getBlockPos(), monotonicMillis()) : "none";
+    }
+
+    private static long monotonicMillis() {
+        return System.nanoTime() / 1_000_000L;
     }
 
     /** Number of contiguous sand/gravel-like blocks directly above {@code pos}. */
@@ -111,24 +129,8 @@ public final class BlockBreakHelper {
      * Records a completed break and distinguishes a server reset from a falling column refilling the cell.
      * A real refill consumes one block above; a glitch reset leaves that column unchanged.
      */
-    private void noteBreak(BlockPos pos) {
-        final long packed = pos.asLong();
-        final long now = System.currentTimeMillis();
-        final int column = fallableColumnAbove(pos);
-        final boolean sameCellAgain = packed == this.lastBrokenPosPacked
-                && (now - this.lastBrokenAtMs) < REGROW_WINDOW_MS;
-        final boolean fallingRefill = sameCellAgain && column < this.lastColumnAbove;
-        if (sameCellAgain && !fallingRefill) {
-            this.regrowCount++;
-        } else {
-            this.regrowCount = 1;
-        }
-        this.lastBrokenPosPacked = packed;
-        this.lastBrokenAtMs = now;
-        this.lastColumnAbove = column;
-        if (this.regrowCount > REGROW_LIMIT) {
-            this.blacklist.add(packed);
-        }
+    private void noteBreak(BlockPos pos, BlockState before) {
+        breakRetry.completed(ctx.world(), pos, before, fallableColumnAbove(pos), monotonicMillis());
     }
 
     public void stopBreakingBlock() {
@@ -211,9 +213,8 @@ public final class BlockBreakHelper {
 
         if (isLeftClick && isBlockTrace) {
             final BlockPos target = ((BlockHitResult) trace).getBlockPos();
-            if (blacklist.contains(target.asLong())) {
-                // Abandoned glitch block: never mine it again. Stop any in-progress break and report not-hitting
-                // so the caller's stuck detection takes over (re-route / RTP) instead of hammering it forever.
+            if (shouldSuppressBreak(target)) {
+                // Release the controller during a bounded retry wait. A wait never counts as completed work.
                 stopBreakingBlock();
                 wasHitting = false;
                 return;
@@ -230,11 +231,12 @@ public final class BlockBreakHelper {
                 ctx.playerController().clickBlock(target, ((BlockHitResult) trace).getDirection());
                 ctx.player().swing(InteractionHand.MAIN_HAND);
             } else {
+                BlockState before = ctx.world().getBlockState(target);
                 if (ctx.playerController().onPlayerDamageBlock(target, ((BlockHitResult) trace).getDirection())) {
                     ctx.player().swing(InteractionHand.MAIN_HAND);
                 }
                 if (ctx.playerController().hasBrokenBlock()) { // block broken this tick
-                    noteBreak(target); // count regrows of the SAME block → blacklist a glitching one
+                    noteBreak(target, before);
                     rhythmTimer = 3; // keep the held-button rhythm alive across the cooldown boundary
                     // break delay timer only applies for multi-tick block breaks like vanilla
                     final int base = PrincepsAPI.getSettings().blockBreakSpeed.value - BASE_BREAK_DELAY;

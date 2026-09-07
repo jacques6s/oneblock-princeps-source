@@ -578,7 +578,8 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
     /** Receives the completed search's local context, never the potentially newer behavior field. */
     private PathExecutor executorForSearch(IPath path, CalculationContext searchContext) {
         return new PathExecutor(this, path, searchContext.placementLicence(), searchContext.wadeLicence(),
-                searchContext instanceof BuilderProcess.BuilderCalculationContext builder ? builder.modelProtection() : null);
+                searchContext instanceof BuilderProcess.BuilderCalculationContext builder ? builder.modelProtection() : null,
+                searchContext.excavationApproachToken());
     }
 
     private AbstractNodeCostSearch createPathfinder(BlockPos start, Goal goal, IPath previous, CalculationContext context) {

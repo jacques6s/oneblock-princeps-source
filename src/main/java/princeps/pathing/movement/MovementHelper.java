@@ -804,6 +804,9 @@ public interface MovementHelper extends ActionCosts, Helper {
                     && princeps.getSurvivalBehavior().ownsInventory()) {
                 return;
             }
+            if (PrincepsAPI.getProvider().getPrincepsForPlayer(ctx.player()) instanceof Princeps owner
+                    && owner.getBuilderProcess() instanceof princeps.process.BuilderProcess builder
+                    && builder.selectExcavationApproachTool(b)) return;
             ctx.player().getInventory().setSelectedSlot(ts.getBestSlot(b.getBlock(), preferSilkTouch));
         }
     }
