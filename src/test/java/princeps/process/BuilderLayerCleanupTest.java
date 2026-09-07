@@ -175,6 +175,52 @@ public class BuilderLayerCleanupTest {
         assertEquals(Ending.RUNNING, get(f.owner, "abortPending"));
     }
 
+    @Test public void poweredOpenIronTrapdoorReleasesItsCompletedPlacementAnchor() throws Exception {
+        BlockState target = Blocks.IRON_TRAPDOOR.defaultBlockState();
+        Fixture f = anchorFixture(target, target.setValue(BlockStateProperties.OPEN, true)
+                .setValue(BlockStateProperties.POWERED, true));
+        assertTrue(f.owner.prepareLayerCleanup(f.cost, false));
+        assertTrue("redstone does not undo the completed placement", anchors(f).isEmpty());
+        assertEquals(Set.of(HELPER.asLong()), targets(f));
+        assertEquals(Ending.RUNNING, get(f.owner, "abortPending"));
+    }
+
+    @Test public void connectedFenceReleasesItsCompletedPlacementAnchor() throws Exception {
+        BlockState target = Blocks.OAK_FENCE.defaultBlockState();
+        Fixture f = anchorFixture(target, target.setValue(BlockStateProperties.NORTH, true));
+        assertTrue(f.owner.prepareLayerCleanup(f.cost, false));
+        assertTrue("neighbour-derived connections do not require another placement", anchors(f).isEmpty());
+        assertEquals(Set.of(HELPER.asLong()), targets(f));
+    }
+
+    @Test public void wrongFacingKeepsItsPlacementAnchorDespiteMatchingTransientProperties() throws Exception {
+        BlockState target = Blocks.IRON_TRAPDOOR.defaultBlockState();
+        Fixture f = anchorFixture(target, target.setValue(BlockStateProperties.HORIZONTAL_FACING,
+                target.getValue(BlockStateProperties.HORIZONTAL_FACING).getOpposite()));
+        assertAnchorBlocked(f);
+    }
+
+    @Test public void differentBlockKeepsItsPlacementAnchor() throws Exception {
+        Fixture f = anchorFixture(Blocks.IRON_TRAPDOOR.defaultBlockState(), Blocks.OAK_TRAPDOOR.defaultBlockState());
+        assertAnchorBlocked(f);
+    }
+
+    @Test public void dryStructuralTargetReleasesAnchorAfterWaterloggingNormalization() throws Exception {
+        BlockState original = Blocks.IRON_TRAPDOOR.defaultBlockState().setValue(BlockStateProperties.WATERLOGGED, true);
+        BlockState structural = BuilderProcess.structuralDesiredState(original);
+        assertFalse(structural.getValue(BlockStateProperties.WATERLOGGED));
+        Fixture f = anchorFixture(structural, structural.setValue(BlockStateProperties.OPEN, true));
+        assertTrue(f.owner.prepareLayerCleanup(f.cost, false));
+        assertTrue(anchors(f).isEmpty());
+        assertEquals(Set.of(HELPER.asLong()), targets(f));
+    }
+
+    @Test public void waterloggingMismatchIsNotAnInteractionException() throws Exception {
+        BlockState target = Blocks.IRON_TRAPDOOR.defaultBlockState();
+        Fixture f = anchorFixture(target, target.setValue(BlockStateProperties.WATERLOGGED, true));
+        assertAnchorBlocked(f);
+    }
+
     @Test public void currentPlatformTraversalRetainsItsNoMiningContractAtTheBoundary() throws Exception {
         Fixture f = layerFixture(); own(f, HELPER);
         Object platform = allocate(Class.forName("princeps.process.BuilderProcess$PlatformTraverseApproach"));
@@ -196,7 +242,11 @@ public class BuilderLayerCleanupTest {
     }
 
     private static Fixture layerFixture() throws Exception {
-        Fixture f = fixture(Blocks.GLASS.defaultBlockState(), true);
+        return layerFixture(Blocks.GLASS.defaultBlockState());
+    }
+
+    private static Fixture layerFixture(BlockState target) throws Exception {
+        Fixture f = fixture(target, true);
         set(f.owner, "navigationScaffolds", new BuilderScaffoldLedger());
         set(f.owner, "scaffoldCleanupTargets", new HashSet<>());
         set(f.owner, "observedCompleted", new it.unimi.dsi.fastutil.longs.LongOpenHashSet());
@@ -208,6 +258,20 @@ public class BuilderLayerCleanupTest {
         set(f.owner, "ending", Ending.RUNNING); set(f.owner, "abortPending", Ending.RUNNING);
         set(f.owner, "layer", 1); set(f.owner, "bandMinYLocal", 0); set(f.owner, "bandMaxYLocal", 0);
         return f;
+    }
+
+    private static Fixture anchorFixture(BlockState desired, BlockState current) throws Exception {
+        Fixture f = layerFixture(desired); own(f, HELPER);
+        anchors(f).put(HELPER.asLong(), TARGET.asLong());
+        f.world.states.put(TARGET.asLong(), current);
+        return f;
+    }
+
+    private static void assertAnchorBlocked(Fixture f) throws Exception {
+        assertTrue(f.owner.prepareLayerCleanup(f.cost, false));
+        assertEquals(Ending.LAYER_UNBUILDABLE, get(f.owner, "abortPending"));
+        assertEquals(TARGET.asLong(), anchors(f).get(HELPER.asLong()));
+        assertTrue(targets(f).isEmpty());
     }
 
     private static void own(Fixture f, BlockPos p) throws Exception {

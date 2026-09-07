@@ -24,11 +24,19 @@ The next boundary attempt rereads the actual layer through S10.
 
 Protected supports are never turned into mining permission. When no ordinary
 cleanup work remains, a required support or an explicit anchor for an unfinished
-later target produces a named LAYER_UNBUILDABLE report. An anchor whose exact
-promised state is already present in the full model is released even if the
+later target produces a named LAYER_UNBUILDABLE report. An anchor whose promised
+block and placement properties are already present in the full model is released even if the
 working layer masks its target. This is a bounded diagnostic limitation: there
 is no new scheduler to reorder higher-layer work, and a reported dependency is
 not a completed build.
+
+The existing `matchesExceptInteraction` identity check accepts environment-derived
+and right-click-settable differences without consulting substitution, ignore-air
+or ignore-direction preferences. Facing, half and waterlogging still must match.
+The existing structural wrapper normalizes the original waterlogged target before
+it becomes the unmasked `realSchematic`; the cleanup check adds no waterlogging
+exception. A powered/open iron trapdoor or a connected fence does not need its
+old placement anchor once the correct block and placement properties are present.
 
 Offline evidence is under `build/layer-cleanup-evidence`. The unchanged base
 produced the causal `admission-red-confirmed` result: two tests, one work-admission
@@ -41,6 +49,13 @@ current/future support, platform retention and explicit anchor dependencies.
 They do not claim complete A* physics or live-server execution. Server values
 are supplied to the actual ledger; the existing packet callback is unchanged.
 
+Review found that exact state equality falsely retained completed anchors after
+redstone or neighbour changes. `transient-red` confirms three causal assertions
+on unchanged 10e686 production with fifteen passing controls. The six additional
+cases cover powered/open iron trapdoors, fence connections, wrong facing, wrong
+block, normalized dry targets and rejection of a waterlogging mismatch.
+
 Final complete-suite counts and committed-source runtime/API pins are recorded
-separately in `final-full/final-artifacts.json`. No live or release acceptance is
+separately in `final-corrected/final-artifacts.json`; the first candidate's full
+run remains in `final-full`. No live or release acceptance is
 asserted by these offline checks.

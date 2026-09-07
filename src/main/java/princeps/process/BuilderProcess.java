@@ -2757,8 +2757,9 @@ public final class BuilderProcess extends PrincepsProcessHelper implements IBuil
         BlockState current = bcc.bsi.get0(target);
         if (bcc.bsi.worldContainsLoadedChunk(target.getX(), target.getZ())
                 && full.inSchematic(x, y, z, current)
-                // A release needs the actual promised state, not an ignore-air/substitution preference.
-                && current.equals(full.desiredState(x, y, z, current, approxPlaceable))) {
+                // A click anchor is discharged by the promised placement identity. Neighbour/redstone changes
+                // and a remaining interaction do not need another placement; orientation and waterlogging still do.
+                && matchesExceptInteraction(current, full.desiredState(x, y, z, current, approxPlaceable))) {
             temporarySupportTargets.remove(key);
             return null;
         }
