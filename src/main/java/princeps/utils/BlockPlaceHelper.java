@@ -59,6 +59,11 @@ public class BlockPlaceHelper {
         return rightClickTimer > 0;
     }
 
+    /** A queued click retains this expectation only until execution, cancellation or its finite cooldown ends. */
+    public boolean hasExpectedPlacement() {
+        return expectedPlacement != null;
+    }
+
     public void tick(boolean rightClickRequested) {
         // The throttle is checked BEFORE the expectation is consumed. It used to read expectedPlacement into a local
         // and null the field first, so a click forced during the cooldown was dropped AND took its expectation with

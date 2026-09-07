@@ -149,6 +149,8 @@ public class ExcavationApproachTest {
         put(builder, "origin", ENTRY);
         put(builder, "schematic", new princeps.api.schematic.FillSchematic(4, 6, 4,
                 net.minecraft.world.level.block.Blocks.AIR.defaultBlockState()));
+        put(builder, "ctx", PlatformTraverseFixture.proxy(princeps.api.utils.IPlayerContext.class,
+                (name, args) -> name.equals("playerFeet") ? ENTRY : null));
         approach.start();
         builder.noteExcavationWorkCut(START.east());
         assertTrue("outside access cuts do not complete entry", approach.pending());
@@ -199,6 +201,16 @@ public class ExcavationApproachTest {
         input.setInputForceState(princeps.api.utils.input.Input.CLICK_LEFT, true);
         assertSame("an actual click still cancels and holds the body", hold,
                 builder.holdStillWithoutTearingUpTheRoute(hold));
+        put(pathing, "current", executor(path(START, START.east()), token));
+        var accessCut = builder.holdStillWithoutTearingUpTheRoute(hold);
+        assertTrue(accessCut instanceof princeps.utils.PathingCommandContext);
+        assertEquals("an access click must stop the body", hold.commandType, accessCut.commandType);
+        assertNull(accessCut.goal);
+        approach.observeCommand(((princeps.utils.PathingCommandContext) accessCut).desiredCalcContext.excavationApproachToken());
+        assertSame("our own ordinary cut is not a foreign owner change", token, approach.token());
+        put(pathing, "current", null);
+        var afterCut = builder.holdStillWithoutTearingUpTheRoute(hold);
+        assertTrue("the canceled segment does not finish the journey", afterCut instanceof princeps.utils.PathingCommandContext);
     }
 
     static PathExecutor executor(IPath path, Object token) throws Exception {

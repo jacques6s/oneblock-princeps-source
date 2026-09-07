@@ -63,6 +63,7 @@ public class BuilderScaffoldMaterialPreparationTest {
 
     @Test public void realInventoryLockRefusalKeepsOneDemandAndStopsAt120WithoutRenewingTheDeadline() throws Exception {
         Fixture f=fixture(); InventoryBehavior inventory=allocate(InventoryBehavior.class);
+        var engine=allocate(princeps.Princeps.class); set(engine,"builderProcess",f.owner); set(inventory,"princeps",engine);
         set(inventory,"ctx",f.ctx); set(inventory,"hotbarFetchedAt",new long[9]);
         set(inventory,"builderLockedHotbarSlot",1);
         AtomicInteger calls=new AtomicInteger();

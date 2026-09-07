@@ -73,7 +73,7 @@ public class ExcavationApproachRepairTest {
                 ExcavationRepairPolicy.Kind.SHELL_GAP, flowing));
     }
 
-    @Test public void onlyArrivalAndWorkingCutsEndTheJourneyDeferral() throws Exception {
+    @Test public void onlyActualArrivalEndsAnAlreadyCommittedJourney() throws Exception {
         Fixture f = fixture();
         assertFalse(f.mayAim(HOLE));
         put(f.world.pathing.getCurrent(), "pathPosition", 6);
@@ -86,7 +86,27 @@ public class ExcavationApproachRepairTest {
         put(f.world.builder, "schematic", new princeps.api.schematic.FillSchematic(7, 6, 7,
                 Blocks.AIR.defaultBlockState()));
         f.world.builder.noteExcavationWorkCut(ENTRY);
-        assertTrue("real in-selection work restores ordinary shell maintenance", f.mayAim(HOLE));
+        assertFalse("a reachable in-selection cut is not arrival from outside", f.mayAim(HOLE));
+        assertNotNull(f.approach.token());
+        f.world.world.states.put(ENTRY.asLong(), Blocks.AIR.defaultBlockState());
+        f.world.builder.noteExcavationWorkCut(ENTRY.above());
+        assertFalse("confirmed access clears still do not close the passage before arrival", f.mayAim(HOLE));
+        f.approach.observe(ENTRY);
+        assertTrue(f.mayAim(HOLE));
+    }
+
+    @Test public void directWorkRetiresOnlyAnUnroutedJobAlreadyInsideTheSelection() throws Exception {
+        Fixture f = fixture();
+        put(f.world.builder, "origin", new BetterBlockPos(67, -60, 67));
+        put(f.world.builder, "schematic", new princeps.api.schematic.FillSchematic(7, 6, 7,
+                Blocks.AIR.defaultBlockState()));
+        f.approach.start();
+        f.world.builder.noteExcavationWorkCut(ENTRY);
+        assertTrue("outside reach work must retain the chance to approach", f.approach.pending());
+        f.world.player.pos = Vec3.atBottomCenterOf(ENTRY);
+        f.world.builder.noteExcavationWorkCut(ENTRY.above());
+        assertFalse(f.approach.pending());
+        assertNull("later bands cannot open a new initial journey", f.approach.commit(new GoalBlock(ENTRY.east()), ENTRY));
     }
 
     @Test public void recalculationRetainsPriorityOnlyForTheCommittedContext() throws Exception {
